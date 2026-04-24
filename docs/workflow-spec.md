@@ -1,15 +1,34 @@
-# Cross-Review MCP Workflow Specification v3 (DRAFT)
+# Cross-Review MCP Workflow Specification v4
 
-**Status**: draft elevando v2 (sessao 7d745f38, aprovada bilateral) a normativa
-absorvendo as mudancas arquiteturais de `cross-review-mcp` v0.3.0-alpha
-(sessao 0e427278, aprovada bilateral em 5 rodadas).
+**Status**: normativa absorvendo `cross-review-mcp` v0.4.0-alpha (sessao
+08cd61e6, aprovada bilateral em 2 rodadas em 2026-04-24). Elevada a partir da
+v3 normativa (sessao 806a1c4f). Precursores: v2 (sessao 7d745f38); mudancas
+arquiteturais de v0.3.0-alpha (sessao 0e427278).
 
 Encoding: ASCII-only com transliteracao de acentos do portugues. Motivo
 operacional em secao 6.4.
 
 ---
 
-## 0. Delta v2 -> v3 (sumario executivo)
+## 0a. Delta v3 -> v4 (sumario executivo)
+
+- **Secao 2.3.1 NOVA**: schema JSON expandido do bloco estruturado.
+  Campos opcionais `uncertainty`, `caller_requests`, `follow_ups` validados
+  per-field; invalidos sao DESCARTADOS com warning sem derrubar o bloco;
+  campos fora da whitelist sao descartados com warning. Regra normativa
+  `omit-unless-signal`. Limites: <=20 items por array, <=500 chars por item.
+- **Secao 5 ATUALIZADA**: conjunto consumido pelo caller expandido com
+  `parser_warnings` e `peer_model`.
+- **Secao 6.8 REESCRITA**: antes FOLLOW-UP, agora IMPLEMENTADO em
+  v0.4.0-alpha (secao 2.3.1).
+- **Secao 6.9 NOVA (operacional normativa)**: 6.9.1 Tri-tool obrigatorio
+  (cross-review + ultrathink + code-reasoning) e 6.9.2 Modelo top-level
+  (peer invocado com IDs especificos em cada release; auditado via
+  `peer_model`).
+
+---
+
+## 0. Delta v2 -> v3 (sumario executivo, preservado para rastreabilidade)
 
 - **Secao 2.1 reescrita**: contrato de STATUS ancorado exclusivamente no tail
   da resposta / ultima linha nao-vazia. Removido scan global do regex.
@@ -130,10 +149,71 @@ Esta secao deixou de ser FOLLOW-UP. O MCP agora aceita o bloco estruturado
 como forma preferida, conforme secao 2.1 caminho (1). Referencia de
 implementacao: `src/lib/status-parser.js`.
 
-Payload JSON nesta versao contem apenas o campo `status`. Campos adicionais
-(`uncertainty`, `caller_requests`, `follow_ups`) permanecem como convencoes
-textuais (secoes 3.3, 4.3, 6.3); sua incorporacao ao schema JSON e tratada
-como FOLLOW-UP separado (secao 6.8 nova).
+Desde v0.3.0-alpha, o payload JSON aceitava apenas `status`. Em v0.4.0-alpha
+(secao 2.3.1), o payload foi expandido com campos opcionais validados.
+
+### 2.3.1 Schema expandido do payload (NOVO em v4, implementado em v0.4.0-alpha)
+
+O payload JSON do bloco estruturado passa a aceitar tres campos OPCIONAIS
+alem de `status`:
+
+```
+{
+  "status": "READY" | "NOT_READY" | "NEEDS_EVIDENCE",          // required
+  "uncertainty": "low" | "medium" | "high",                    // optional
+  "caller_requests": ["string", ...],                          // optional
+  "follow_ups": ["string", ...]                                // optional
+}
+```
+
+Limites de tamanho (invariantes do parser):
+- `caller_requests` e `follow_ups`: ARRAYS de strings, maximo 20 items,
+  cada item com no maximo 500 chars.
+- `uncertainty`: string no enum `{low, medium, high}`.
+
+Validacao deterministica per-field (ordem de verificacao):
+1. shape (array vs nao-array; string vs nao-string).
+2. quantidade (items do array).
+3. tipo dos itens (string vs nao-string).
+4. tamanho dos itens (chars por string).
+
+Se qualquer regra falhar, o campo inteiro eh DESCARTADO do `peer_structured`
+e UM warning por campo rejeitado eh adicionado a `parser_warnings` (string
+humano-legivel que identifica o campo e a regra violada, com indice/size
+quando aplicavel). Campo opcional invalido NAO invalida o bloco inteiro --
+`peer_status` preserva o valor do `status` quando este eh valido.
+
+Empty array (`[]`) eh normalizado para AUSENCIA do campo em
+`peer_structured`, sem warning. Equivalencia semantica explicita: campo
+ausente === array vazio.
+
+Campos fora da whitelist (`status`, `uncertainty`, `caller_requests`,
+`follow_ups`) sao DESCARTADOS de `peer_structured` e cada ocorrencia gera um
+warning `unknown field 'X' ignored`. Extensao futura do schema requer bump
+explicito de release + spec (adicao silenciosa de campo eh violacao do
+contrato).
+
+Regra normativa `omit-unless-signal`: peers DEVEM omitir os campos
+opcionais por padrao; emissao apenas quando o valor efetivamente altera a
+leitura do parecer. Default-padding (ex: `uncertainty: "medium"` sem
+significado real) eh violacao do contrato operacional. Valida-se pela
+coerencia textual do corpo da resposta, nao automaticamente pelo parser.
+
+Semantica por pairing `status x campo opcional`:
+- `caller_requests` com `NEEDS_EVIDENCE`: uso primario esperado. Lista
+  estruturada de pedidos ao caller.
+- `caller_requests` com `READY` ou `NOT_READY`: permitido mas interpretado
+  como nice-to-have nao-bloqueante. Caller pode atender ou ignorar.
+- `follow_ups` com `READY`: uso primario esperado. Itens acordados para
+  sessao futura; sinal explicito de "fechamos com debito acordado".
+- `follow_ups` com `NOT_READY` ou `NEEDS_EVIDENCE`: permitido, nao bloqueia
+  fluxo desta sessao.
+- `uncertainty` com qualquer status: informativa; NAO afeta convergencia
+  nem influencia `peer_status`.
+
+Compatibilidade retroativa: bloco v3 puro `{"status":"X"}` permanece valido
+em v4. Passa pelo mesmo codepath com `parser_warnings: []` e
+`peer_structured = {status: "X"}`.
 
 ### 2.4 Falha silenciosa do bloco estruturado (NOVO em v3)
 
@@ -259,18 +339,29 @@ escopo e incompativel:
 
 ---
 
-## 5. Ruido (ATUALIZADO em v3)
+## 5. Ruido (ATUALIZADO em v4)
 
-Caller consome apenas `content`, `peer_status`, `peer_structured`, e
-`status_source`. Em v2, o conjunto consumido era `content` + `peer_status`
-apenas; `peer_structured` e `status_source` foram introduzidos em
-v0.3.0-alpha e agora integram o payload util para decisao do caller (ex:
-`status_source === 'structured'` confirma que o peer respeitou o contrato
-preferido; `peer_structured` permite acesso direto ao JSON completo).
+Caller consome apenas `content`, `peer_status`, `peer_structured`,
+`status_source`, `parser_warnings`, e `peer_model`. Em v2, o conjunto era
+apenas `content` + `peer_status`; `peer_structured` e `status_source`
+entraram em v0.3.0-alpha; `parser_warnings` e `peer_model` entraram em
+v0.4.0-alpha.
 
-`stderr_tail` e telemetria de transporte, guardada apenas para diagnostico
-do proprio mecanismo. Nenhuma decisao tecnica ou formal e baseada em
-stderr_tail.
+Semantica de cada campo:
+- `status_source === 'structured'` confirma que o peer respeitou o
+  contrato preferido (bloco estruturado tail-anchored).
+- `peer_structured` eh o payload JSON validado (v4: `status` + campos
+  opcionais na whitelist que passaram validacao); acesso direto sem
+  parsing prosa.
+- `parser_warnings` lista rejeicoes per-field do parser. Caller DEVE
+  inspecionar: warnings sinalizam peer drift ou violacao de schema --
+  ignorar eh transformar `parser_warnings` em telemetria morta.
+- `peer_model` audita qual modelo top-level foi efetivamente invocado no
+  round. Revisoes de sessao conferem aderencia a secao 6.9.2.
+
+`stderr_tail` permanece telemetria de transporte, guardada apenas para
+diagnostico do proprio mecanismo. Nenhuma decisao tecnica ou formal eh
+baseada em stderr_tail.
 
 ---
 
@@ -387,47 +478,122 @@ FOLLOW-UP: definir matriz minima de evidencia por classe de artefato.
   - cross-review-mcp proprio: `npm test` (= functional-smoke, 40 steps).
 ```
 
-### 6.8 Schema expandido do bloco estruturado (NOVO FOLLOW-UP em v3)
+### 6.8 Schema expandido do bloco estruturado -- IMPLEMENTADO em v0.4.0-alpha
 
-```
-FOLLOW-UP: evoluir o payload JSON do bloco estruturado para incorporar
-campos hoje tratados como convencoes textuais.
-- campo obrigatorio (permanece): status (string no enum
-  {READY, NOT_READY, NEEDS_EVIDENCE}). Todos os novos campos sao OPCIONAIS;
-  payload apenas com status continua valido em perpetuidade.
-- campos candidatos (opcionais): uncertainty (array), caller_requests
-  (array com { command, purpose, acceptance }), follow_ups (array com
-  { description, why, scope, urgency }).
-- por que: hoje caller extrai essas informacoes por parsing do conteudo
-  livre, o que e fragil. Campos estruturados eliminariam.
-- escopo apropriado: proxima iteracao major do cross-review-mcp (v0.4.0 ou
-  posterior), com migracao controlada (manter campos opcionais).
-- urgencia: desejavel (nao bloqueia uso imediato; textual funciona).
-- pre-requisito: consenso em esquema JSON estavel (requer sessao cross-review
-  dedicada).
-```
+Implementacao aprovada bilateral na sessao 08cd61e6 (2026-04-24). Consenso
+em esquema JSON estavel alcancado em 2 rodadas. Contrato normativo agora em
+secao 2.3.1. Campos canonicos na release v0.4.0: `uncertainty`,
+`caller_requests`, `follow_ups`. Strings em arrays (nao objetos). Extensao
+para objetos reservada a v5 caso strings se mostrem insuficientes (FOLLOW-UP
+registrado na sessao, fora do escopo v0.4.0).
+
+Acessos derivados desta implementacao:
+- `parser_warnings` agora compoe o contrato de retorno do parser (secao 5).
+- Regra `omit-unless-signal` (secao 2.3.1) eh clausula operacional
+  normativa: peers que emitem campos opcionais sem conteudo util cometem
+  violacao operacional, ainda que o parser aceite.
+
+### 6.9 Ferramentas complementares obrigatorias (NOVO em v4)
+
+Duas clausulas operacionais normativas cuja violacao constitui falha de
+processo (diferente de "bloco malformado", que e falha de protocolo).
+
+#### 6.9.1 Tri-tool
+
+Caller e peer MUST usar os tres MCP servers em conjunto em decisoes
+nao-triviais durante qualquer sessao cross-review:
+
+- **cross-review**: orquestrador bilateral (este MCP).
+- **ultrathink**: raciocinio estruturado com quality validation.
+- **code-reasoning**: analise tecnica iterativa com revisao.
+
+Aplicacoes especificas:
+- ANTES de `session_init`: caller DEVE ter trace de thinking visivel em
+  ultrathink/code-reasoning justificando escopo, plano, criterios de
+  sucesso. Sessoes abertas "frias" (sem pre-trace) sao violacao
+  operacional.
+- DURANTE `ask_peer`: prompts do caller DEVEM explicitamente pedir ao peer
+  o mesmo rigor. Prompts cross-review densos pressupoem raciocinio
+  estruturado do peer, nao inspecao superficial.
+- ENTRE rodadas: caller DEVE rodar ultrathink/code-reasoning sobre a
+  resposta do peer antes de formular proximo prompt. Reacao instantanea
+  sem analise eh violacao.
+- Indisponibilidade de ferramenta: quando um dos tres MCP nao responde, a
+  sessao DEVE ser declarada bloqueada/suspensa explicitamente. NAO prosseguir
+  como se nada tivesse mudado.
+
+Motivacao registrada (diretiva do usuario em 2026-04-24): "os tres
+trabalhando em conjunto eh a arma mais letal contra os constantes erros
+cometidos pelos agentes de AI que gastam um tempo imenso e tem um custo de
+tokens gigantescos para efetuar correcoes posteriores." Custo/latencia NAO
+sao alvos de otimizacao (ver tambem 6.9.2).
+
+#### 6.9.2 Modelo top-level
+
+Ambos caller e peer MUST operar sob o modelo mais capaz disponivel na
+assinatura do usuario. IDs canonicos normativos para v0.4.0:
+
+- **Codex (peer quando caller=claude)**: `gpt-5.5` com
+  `model_reasoning_effort=xhigh`. Flag de modelo explicita em
+  `src/lib/peer-spawn.js:buildCodexArgs`.
+- **Claude (peer quando caller=codex)**: `claude-opus-4-7` (ID completo,
+  nao alias). Flag explicita em `src/lib/peer-spawn.js:buildClaudeArgs`.
+
+Clausulas operacionais:
+- SEM fallback silencioso: se o modelo top-level falhar (rate limit,
+  erro 401/429/5xx, indisponibilidade), a sessao DEVE ser abortada com
+  erro explicito. Degradacao para variante menor eh violacao.
+- Troca de modelo exige bump de release (v0.4.x -> v0.5.0+) + edicao
+  explicita desta secao. Atualizacao silenciosa do ID em `peer-spawn.js`
+  sem bump da spec eh violacao.
+- Auditabilidade: cada round persistido em `meta.json.rounds[i]` contem
+  `peer_model` refletindo o ID efetivamente passado. Revisao periodica
+  (em cada release) DEVE confirmar que os IDs continuam top-level -- se
+  um ID listado foi superado por um novo top-level, sessao de cross-review
+  dedicada decide a promocao.
+- Stubs de teste registram `peer_model: 'stub'`, distinguindo execucao
+  sintetica de real.
+
+Motivacao registrada (diretiva do usuario em 2026-04-24): "sempre sempre
+sempre deve chamar o modelo mais atual, mais capaz, mais poderoso, mais
+top level disponivel na assinatura". Usuario eh assinante do tier mais
+caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 
 ---
 
-## 7. Resumo das convencoes para uso imediato (ATUALIZADO em v3)
+## 7. Resumo das convencoes para uso imediato (ATUALIZADO em v4)
 
 | Convencao | Acao do caller |
 |-----------|---------------|
-| Abertura de sessao | Transcript ASCII-only + clausula de escopo + artifacts com fingerprint |
-| Contrato STATUS | Reiterar template em cada prompt; bloco estruturado preferido, fallback legacy aceito; ambos ancorados em tail/last-non-empty-line |
+| Abertura de sessao | Transcript ASCII-only + clausula de escopo + artifacts com fingerprint; trace ultrathink/code-reasoning pre-session_init obrigatorio (secao 6.9.1) |
+| Contrato STATUS | Reiterar template em cada prompt; bloco estruturado preferido com schema expandido v4 opcional (2.3.1), fallback legacy aceito; ambos ancorados em tail |
+| Campos opcionais | Omit-unless-signal: `uncertainty`/`caller_requests`/`follow_ups` apenas quando valor altera leitura do parecer |
 | Validacao dinamica | Matriz pro-ativa; atender CALLER_REQUEST do peer com NEEDS_EVIDENCE |
 | Escopo | FOLLOW-UP para fora-escopo; aborted para nao-convergencia honesta |
-| Ruido | Consumir apenas content + peer_status + peer_structured + status_source |
+| Ruido | Consumir content + peer_status + peer_structured + status_source + parser_warnings + peer_model |
+| Warnings | `parser_warnings` nao eh telemetria morta: inspecionar e agir (peer drift ou schema violation) |
+| Modelo | Peer sempre invocado com top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); sem fallback silencioso |
 | Encoding | ASCII-only em arquivos em disco; prompts podem ter acentos |
 | Continuidade | Manter ledger ASCII-only; anexar em sessoes subsequentes |
 | Janela de transicao | Durante upgrade do server, peer emite ambos formatos ate reload confirmado |
 
 ---
 
-## 8. Criterios de aceitacao da v3
+## 8. Criterios de aceitacao da v4
 
-Esta spec v3 deve ser aprovada bilateralmente (Claude + Codex) em sessao
-cross-review dedicada antes de se tornar normativa. Uma vez aceita:
-- Substitui `cross-review-workflow-spec.md` v2.
+Esta spec v4 foi aprovada bilateralmente (Claude + Codex) na sessao
+cross-review 08cd61e6 (2026-04-24, 2 rodadas). Uma vez aceita e publicada:
+- Substitui `cross-review-workflow-spec.md` v3.
 - Referenciada como a spec ativa em novas sessoes.
 - Fica congelada ate nova sessao de spec ser aberta (sem amend silencioso).
+
+Follow-ups pos-v4 (registrados mas fora do escopo desta release):
+- Secao 6.6 (politica de overflow/truncamento de transcript) -- proxima
+  sessao dedicada.
+- Secao 6.7 (matriz minima de evidencia por classe de artefato) -- sessao
+  dedicada apos 6.6.
+- Secao 6.9.2: auto-discovery controlado de modelo top-level com
+  auditabilidade (registrado como follow_up do Codex na sessao 08cd61e6).
+- Secao 2.3.1: reconsideracao de `caller_requests`/`follow_ups` como arrays
+  de objetos (em vez de strings) caso strings se mostrem insuficientes em
+  uso real (registrado como follow_up do Codex na sessao 08cd61e6).

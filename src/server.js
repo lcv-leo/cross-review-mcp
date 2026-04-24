@@ -45,7 +45,7 @@ function log(msg, meta) {
 }
 
 const server = new Server(
-    { name: 'cross-review-mcp', version: '0.3.0-alpha' },
+    { name: 'cross-review-mcp', version: '0.4.0-alpha' },
     { capabilities: { tools: {} } }
 );
 
@@ -110,7 +110,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: 'ask_peer',
-            description: `Send a prompt to the peer agent (${PEER}) and return its response with parsed STATUS. Caller MUST declare its own caller_status (READY means "I have no further changes or objections this round"; NOT_READY means "I applied changes and want peer to re-review, or I disagree with peer's previous response"). caller_status is restricted to READY|NOT_READY -- if the caller is missing evidence, emit NOT_READY and attach a CALLER_REQUEST block for peer. Peer status may be READY|NOT_READY|NEEDS_EVIDENCE. Convergence requires both READY in the same round. Peer runs under contained spawn with destructive MCPs/apps disabled.\n\nPeer response contract (preferred, since 0.3.0-alpha): the peer SHOULD terminate its response with a structured block whose closing tag is the last non-empty token:\n    <cross_review_status>{"status":"READY"}</cross_review_status>\nwith status in {READY, NOT_READY, NEEDS_EVIDENCE}. Backwards-compat fallback: the peer may instead end with a single canonical line "STATUS: READY", "STATUS: NOT_READY", or "STATUS: NEEDS_EVIDENCE" (case-sensitive, exact) as the last non-empty line. Parser inspects only the tail of the response -- mentions of STATUS: X or </cross_review_status> inside earlier prose do not count. Response payload includes peer_structured (the parsed JSON object when a valid structured block terminates the response, else null) and status_source ('structured' | 'regex' | null).`,
+            description: `Send a prompt to the peer agent (${PEER}) and return its response with parsed STATUS. Caller MUST declare its own caller_status (READY means "I have no further changes or objections this round"; NOT_READY means "I applied changes and want peer to re-review, or I disagree with peer's previous response"). caller_status is restricted to READY|NOT_READY -- if the caller is missing evidence, emit NOT_READY and attach a CALLER_REQUEST block for peer. Peer status may be READY|NOT_READY|NEEDS_EVIDENCE. Convergence requires both READY in the same round. Peer runs under contained spawn with destructive MCPs/apps disabled; peer is invoked with the top-level model explicitly set (spec v4 §6.9.2: codex=gpt-5.5 xhigh, claude=claude-opus-4-7; no silent fallback).\n\nPeer response contract (preferred, since 0.3.0-alpha; schema expanded in 0.4.0-alpha per spec v4 §2.4): the peer SHOULD terminate its response with a structured block whose closing tag is the last non-empty token:\n    <cross_review_status>{"status":"READY"}</cross_review_status>\nwith status in {READY, NOT_READY, NEEDS_EVIDENCE}. The JSON payload may include optional fields: uncertainty (low|medium|high), caller_requests (string[] <=20 items, each <=500 chars), follow_ups (string[] same limits). Optional fields are omit-unless-signal (emit only when the value changes the reading of the parecer). Invalid optional fields are dropped with a parser warning but the block remains valid for status.\n\nBackwards-compat fallback: the peer may instead end with a single canonical line "STATUS: READY", "STATUS: NOT_READY", or "STATUS: NEEDS_EVIDENCE" (case-sensitive, exact) as the last non-empty line. Parser inspects only the tail of the response -- mentions of STATUS: X or </cross_review_status> inside earlier prose do not count.\n\nResponse payload includes peer_structured (the validated clean JSON object when a valid structured block terminates the response, else null), status_source ('structured' | 'regex' | null), parser_warnings (string[], empty when nothing rejected), and peer_model (the top-level model id explicitly passed to the peer CLI).`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -211,12 +211,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         prompt_bytes: Buffer.byteLength(prompt || '', 'utf8'),
                     });
                     const t0 = Date.now();
-                    const { stdout, stderr } = await spawnPeer(PEER, prompt);
+                    const { stdout, stderr, peer_model: peerModel } = await spawnPeer(
+                        PEER,
+                        prompt
+                    );
                     const durationMs = Date.now() - t0;
                     const parsed = parsePeerResponse(stdout);
                     const peerStatus = parsed.status;
                     const peerStructured = parsed.structured;
                     const statusSource = parsed.source;
+                    const parserWarnings = parsed.parser_warnings || [];
                     const fname = store.savePeerResponse(
                         sessionId,
                         roundNum,
@@ -233,6 +237,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         peer_status: peerStatus,
                         peer_structured: peerStructured,
                         status_source: statusSource,
+                        parser_warnings: parserWarnings,
+                        peer_model: peerModel,
                         peer_file: fname,
                         protocol_violation: protocolViolation,
                         duration_ms: durationMs,
@@ -243,6 +249,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         caller_status: callerStatus,
                         peer_status: peerStatus,
                         status_source: statusSource,
+                        peer_model: peerModel,
+                        parser_warnings_count: parserWarnings.length,
                         converged_this_round:
                             callerStatus === 'READY' && peerStatus === 'READY',
                         duration_ms: durationMs,
@@ -258,6 +266,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         peer_status: peerStatus,
                                         peer_structured: peerStructured,
                                         status_source: statusSource,
+                                        parser_warnings: parserWarnings,
+                                        peer_model: peerModel,
                                         protocol_violation: protocolViolation,
                                         duration_ms: durationMs,
                                         content: stdout,
@@ -291,7 +301,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function main() {
-    log(`starting v0.3.0-alpha, caller=${CALLER}, peer=${PEER}`);
+    log(`starting v0.4.0-alpha, caller=${CALLER}, peer=${PEER}`);
     const transport = new StdioServerTransport();
     await server.connect(transport);
     log('stdio transport connected');

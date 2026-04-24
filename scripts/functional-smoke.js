@@ -555,6 +555,201 @@ async function driveMultilineStructured() {
     return { results };
 }
 
+// v0.4.0: schema expandido -- STRUCTURED_V4_FULL com todos os campos validos.
+async function driveStructuredV4Full() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_FULL', 'READY');
+    assert(payload.peer_status === 'READY', 'v4 full: status');
+    assert(payload.status_source === 'structured', 'v4 full: source');
+    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 full: structured.status');
+    assert(payload.peer_structured.uncertainty === 'low', 'v4 full: uncertainty persisted');
+    assert(Array.isArray(payload.peer_structured.caller_requests) && payload.peer_structured.caller_requests.length === 2, 'v4 full: caller_requests persisted');
+    assert(Array.isArray(payload.peer_structured.follow_ups) && payload.peer_structured.follow_ups.length === 1, 'v4 full: follow_ups persisted');
+    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 0, 'v4 full: no warnings');
+    assert(payload.peer_model === 'stub', 'v4 full: peer_model persisted');
+    results.push({ step: 'ask_peer STRUCTURED_V4_FULL -> all fields validated, no warnings, peer_model stub', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-full-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: uncertainty com valor invalido -- campo descartado + warning, status preservado.
+async function driveStructuredV4BadUncertainty() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_UNCERTAINTY', 'READY');
+    assert(payload.peer_status === 'READY', 'v4 bad uncertainty: status preserved');
+    assert(payload.status_source === 'structured', 'v4 bad uncertainty: source still structured');
+    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 bad uncertainty: structured.status');
+    assert(!('uncertainty' in payload.peer_structured), 'v4 bad uncertainty: invalid uncertainty DROPPED from structured');
+    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 1, 'v4 bad uncertainty: exactly one warning');
+    assert(/uncertainty has invalid shape/.test(payload.parser_warnings[0]), 'v4 bad uncertainty: warning message');
+    assert(payload.protocol_violation === false, 'v4 bad uncertainty: NOT a protocol violation (status was valid)');
+    results.push({ step: 'ask_peer STRUCTURED_V4_BAD_UNCERTAINTY -> uncertainty dropped + warning, status preserved', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-bad-uncertainty-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: caller_requests nao-array -- shape invalido primeiro na ordem.
+async function driveStructuredV4BadCallerRequestsShape() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE', 'NOT_READY');
+    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 bad cr shape: status');
+    assert(!('caller_requests' in payload.peer_structured), 'v4 bad cr shape: caller_requests DROPPED');
+    assert(payload.parser_warnings.length === 1, 'v4 bad cr shape: one warning');
+    assert(/caller_requests has invalid shape/.test(payload.parser_warnings[0]), 'v4 bad cr shape: warning message');
+    results.push({ step: 'ask_peer STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE -> non-array dropped + warning', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-bad-cr-shape-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: item nao-string dentro de array (regra deterministica: shape OK, qty OK, item type NAO -> reject no item type).
+async function driveStructuredV4NonStringItem() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_NON_STRING_ITEM', 'READY');
+    assert(payload.peer_status === 'READY', 'v4 non-string item: status');
+    assert(!('follow_ups' in payload.peer_structured), 'v4 non-string item: follow_ups DROPPED');
+    assert(payload.parser_warnings.length === 1, 'v4 non-string item: one warning');
+    assert(/follow_ups has invalid item at index 1/.test(payload.parser_warnings[0]), 'v4 non-string item: warning specifies index');
+    results.push({ step: 'ask_peer STRUCTURED_V4_NON_STRING_ITEM -> array dropped + warning with index', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-non-string-item-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: >20 items -- quantidade excedida.
+async function driveStructuredV4TooManyCallerRequests() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS', 'NOT_READY');
+    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 too many: status');
+    assert(!('caller_requests' in payload.peer_structured), 'v4 too many: caller_requests DROPPED');
+    assert(payload.parser_warnings.length === 1, 'v4 too many: one warning');
+    assert(/caller_requests exceeds 20 items \(got 21\)/.test(payload.parser_warnings[0]), 'v4 too many: warning message');
+    results.push({ step: 'ask_peer STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS -> array dropped + warning with count', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-too-many-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: item >500 chars -- tamanho excedido.
+async function driveStructuredV4OversizedItem() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_OVERSIZED_ITEM', 'NOT_READY');
+    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 oversized: status');
+    assert(!('caller_requests' in payload.peer_structured), 'v4 oversized: caller_requests DROPPED');
+    assert(payload.parser_warnings.length === 1, 'v4 oversized: one warning');
+    assert(/caller_requests item at index 1 exceeds 500 chars/.test(payload.parser_warnings[0]), 'v4 oversized: warning message');
+    results.push({ step: 'ask_peer STRUCTURED_V4_OVERSIZED_ITEM -> array dropped + warning with index+size', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-oversized-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: campos fora da whitelist -- descartados + warning cada.
+async function driveStructuredV4UnknownField() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_UNKNOWN_FIELD', 'READY');
+    assert(payload.peer_status === 'READY', 'v4 unknown field: status');
+    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 unknown field: structured.status');
+    assert(!('extra' in payload.peer_structured), 'v4 unknown field: extra dropped');
+    assert(!('another_unknown' in payload.peer_structured), 'v4 unknown field: another_unknown dropped');
+    assert(payload.parser_warnings.length === 2, 'v4 unknown field: two warnings');
+    assert(payload.parser_warnings.some((w) => /unknown field 'extra' ignored/.test(w)), 'v4 unknown field: extra warning');
+    assert(payload.parser_warnings.some((w) => /unknown field 'another_unknown' ignored/.test(w)), 'v4 unknown field: another warning');
+    results.push({ step: 'ask_peer STRUCTURED_V4_UNKNOWN_FIELD -> 2 unknown fields dropped + 2 warnings', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-unknown-field-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: arrays vazios normalizados para ausencia, sem warnings.
+async function driveStructuredV4EmptyArrays() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_EMPTY_ARRAYS', 'READY');
+    assert(payload.peer_status === 'READY', 'v4 empty arrays: status');
+    assert(!('caller_requests' in payload.peer_structured), 'v4 empty arrays: empty caller_requests normalized to absent');
+    assert(!('follow_ups' in payload.peer_structured), 'v4 empty arrays: empty follow_ups normalized to absent');
+    assert(payload.parser_warnings.length === 0, 'v4 empty arrays: no warnings (empty equals absent)');
+    results.push({ step: 'ask_peer STRUCTURED_V4_EMPTY_ARRAYS -> empty arrays normalized to absent, no warnings', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'v4-empty-arrays-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: fecha gap 4f5d45f6 -- opening tag sem closing tag, cai em legacy sem canonical -> null.
+async function driveStructuredOpenNoClose() {
+    const results = [];
+    const { sessionId, payload, convPayload } = await oneShotAskPeer('STRUCTURED_OPEN_NO_CLOSE', 'NOT_READY');
+    assert(payload.peer_status === null, 'open-no-close: status null (fall through to legacy, no canonical STATUS line)');
+    assert(payload.status_source === null, 'open-no-close: source null');
+    assert(payload.peer_structured === null, 'open-no-close: structured null');
+    assert(payload.protocol_violation === true, 'open-no-close: protocol_violation true');
+    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 0, 'open-no-close: no warnings (failed before validation)');
+    assert(convPayload.converged === false, 'open-no-close: not converged');
+    results.push({ step: 'ask_peer STRUCTURED_OPEN_NO_CLOSE -> tail not closing tag, legacy fails, null (closes 4f5d45f6 gap)', ok: true });
+    cleanupSession(sessionId);
+    results.push({ step: 'open-no-close-cleanup', ok: true });
+    return { results };
+}
+
+// v0.4.0: persistencia de parser_warnings e peer_model em meta.json.rounds[i] via session_read.
+async function drivePeerModelAndWarningsPersisted() {
+    const results = [];
+    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_UNCERTAINTY', 'NOT_READY');
+    // Open a separate server to session_read the persisted meta.
+    const proc = spawn('node', [SERVER], {
+        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+    });
+    const responses = new Map();
+    let buf = '';
+    proc.stdout.on('data', (d) => {
+        buf += d.toString('utf8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) !== -1) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line) continue;
+            try {
+                const msg = JSON.parse(line);
+                if (msg.id != null) responses.set(msg.id, msg);
+            } catch {}
+        }
+    });
+    const call = (id, method, params) =>
+        new Promise((resolve, reject) => {
+            proc.stdin.write(requestLine(id, method, params));
+            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
+            const poll = setInterval(() => {
+                if (responses.has(id)) {
+                    clearInterval(poll);
+                    clearTimeout(t);
+                    resolve(responses.get(id));
+                }
+            }, 25);
+        });
+    try {
+        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-persist', version: '0.1' } });
+        proc.stdin.write(notifLine('notifications/initialized'));
+        const readResp = await call(2, 'tools/call', { name: 'session_read', arguments: { session_id: sessionId } });
+        const meta = JSON.parse(readResp.result.content[0].text);
+        assert(Array.isArray(meta.rounds) && meta.rounds.length === 1, 'persist: one round recorded');
+        const round = meta.rounds[0];
+        assert(round.peer_model === 'stub', 'persist: peer_model persisted in meta.rounds[0]');
+        assert(Array.isArray(round.parser_warnings) && round.parser_warnings.length === 1, 'persist: parser_warnings persisted');
+        assert(/uncertainty has invalid shape/.test(round.parser_warnings[0]), 'persist: warning message preserved');
+        results.push({ step: 'session_read -> meta.rounds[0] has peer_model and parser_warnings persisted', ok: true });
+    } finally {
+        proc.stdin.end();
+        proc.kill();
+    }
+    cleanupSession(sessionId);
+    results.push({ step: 'persist-check-cleanup', ok: true });
+    return { results };
+}
+
 async function runAll() {
     const all = [];
     const s1 = await driveServer();
@@ -587,6 +782,27 @@ async function runAll() {
     all.push(...s14.results);
     const s15 = await driveMultilineStructured();
     all.push(...s15.results);
+    // v0.4.0: schema expandido.
+    const s16 = await driveStructuredV4Full();
+    all.push(...s16.results);
+    const s17 = await driveStructuredV4BadUncertainty();
+    all.push(...s17.results);
+    const s18 = await driveStructuredV4BadCallerRequestsShape();
+    all.push(...s18.results);
+    const s19 = await driveStructuredV4NonStringItem();
+    all.push(...s19.results);
+    const s20 = await driveStructuredV4TooManyCallerRequests();
+    all.push(...s20.results);
+    const s21 = await driveStructuredV4OversizedItem();
+    all.push(...s21.results);
+    const s22 = await driveStructuredV4UnknownField();
+    all.push(...s22.results);
+    const s23 = await driveStructuredV4EmptyArrays();
+    all.push(...s23.results);
+    const s24 = await driveStructuredOpenNoClose();
+    all.push(...s24.results);
+    const s25 = await drivePeerModelAndWarningsPersisted();
+    all.push(...s25.results);
     return all;
 }
 
