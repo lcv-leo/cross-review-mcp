@@ -7,7 +7,7 @@
 [![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io/)
 [![license: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-**Status.** Pre-v1.0 alpha. Current release: **v0.7.0-alpha** runtime paired with **spec v4.11** (spec-only revision). See [CHANGELOG.md](./CHANGELOG.md) for the release history. **Breaking changes are possible between alpha releases.** A v1.0 stable release with frozen protocol contract is planned once the v0.9.0-alpha pre-cut items land.
+**Status.** Pre-v1.0 alpha. Current release: **v0.9.0-alpha.1** runtime paired with **spec v4.11**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. **Breaking changes are possible between alpha releases.** A v1.0 stable release with frozen protocol contract is planned once the field-use validation threshold (10 trilateral sessions under the patched runtime) is met per operator directive 2026-04-24.
 
 The version history at a glance:
 
@@ -17,7 +17,9 @@ The version history at a glance:
 | `v0.5.0-alpha.1` | v4.8 | Gemini pin bumped to `gemini-3.1-pro-preview` under Google One AI Ultra |
 | `v0.6.0-alpha` | v4.9 | Transport-aware model-check bypass + strict-only convergence with persisted snapshot + rate-limit class |
 | `v0.7.0-alpha` | v4.10 | Anti-hallucination / epistemic discipline + CLI banner as authoritative attestation (Codex-specific) |
-| `v0.7.0-alpha` | v4.11 | Spec-only: Claude CLI banner parsing follow-up CLOSED as negative empirical result |
+| (spec-only) | v4.11 | Claude CLI banner parsing follow-up CLOSED as negative empirical result |
+| `v0.9.0-alpha` | v4.11 | Public-GitHub pre-cut: en-US README + CONTRIBUTING + CODE_OF_CONDUCT + NOTICE + Apache-2.0 LICENSE + full-history secrets scan |
+| `v0.9.0-alpha.1` | v4.11 | Fix: Gemini auth detection precedence (settings.json → env → oauth_creds → default); eliminates false-positive `silent_model_downgrade` when `GEMINI_API_KEY` env is present in MCP host with oauth-personal CLI |
 
 ---
 
@@ -285,7 +287,7 @@ The smoke script is organized into small drivers; you can extract one to debug b
 
 ### Spec-versioning convention
 
-Code releases use SemVer (`0.7.0-alpha`, `0.8.0-alpha`, …). Spec revisions use their own `vN.M` sequence (`v4.7`, `v4.8`, `v4.9`, `v4.10`, `v4.11`). A spec-only revision (pure documentation) does NOT bump the code version; an integrated release ships both.
+Code releases use SemVer (`0.9.0-alpha`, `0.9.0-alpha.1`, …). Spec revisions use their own `vN.M` sequence (`v4.7` through `v4.11` so far). A spec-only revision (pure documentation) does NOT bump the code version; an integrated release ships both. Version IDs may skip (e.g. `0.7.0-alpha` → `0.9.0-alpha` with no `0.8.0-alpha` — the skipped slot reflects that spec v4.11 was a spec-only revision that closed a follow-up without a code release).
 
 ---
 
