@@ -159,7 +159,7 @@ cross-review-mcp/
 ```toml
 [mcp_servers.cross-review]
 command = "node"
-args = ["C:/Scripts/cross-review-mcp/src/server.js"]
+args = ["C:/Users/leona/lcv-workspace/cross-review-mcp/src/server.js"]
 env = { CROSS_REVIEW_CALLER = "codex" }
 tool_timeout_sec = 1800
 ```
@@ -214,7 +214,7 @@ codex -a never -s read-only exec --skip-git-repo-check
 ```
 claude -p --output-format text
   --permission-mode default
-  --strict-mcp-config --mcp-config C:/Scripts/cross-review-mcp/reviewer-configs/reviewer-minimal.mcp.json
+  --strict-mcp-config --mcp-config C:/Users/leona/lcv-workspace/cross-review-mcp/reviewer-configs/reviewer-minimal.mcp.json
   --disallowed-tools "Write,Edit,NotebookEdit"
 ```
 
@@ -235,12 +235,12 @@ Design aceito cruzadamente; Commit 2 pode iniciar.
 ### Pre-requisitos
 - Node.js 18+
 - `claude` (Claude Code CLI) e `codex` (Codex CLI) instalados, autenticados, no PATH
-- `cd C:/Scripts/cross-review-mcp && npm install` (instala `@modelcontextprotocol/sdk`)
+- `cd C:/Users/leona/lcv-workspace/cross-review-mcp && npm install` (instala `@modelcontextprotocol/sdk`)
 
 ### Registrar no Claude Code
 
 ```powershell
-claude mcp add -e CROSS_REVIEW_CALLER=claude -s user cross-review -- node C:/Scripts/cross-review-mcp/src/server.js
+claude mcp add -e CROSS_REVIEW_CALLER=claude -s user cross-review -- node C:/Users/leona/lcv-workspace/cross-review-mcp/src/server.js
 ```
 
 Verificar: `claude mcp get cross-review` deve mostrar `Status: Connected`.
@@ -252,7 +252,7 @@ Adicionar ao final de `~/.codex/config.toml`:
 ```toml
 [mcp_servers.cross-review]
 command = "node"
-args = ["C:/Scripts/cross-review-mcp/src/server.js"]
+args = ["C:/Users/leona/lcv-workspace/cross-review-mcp/src/server.js"]
 env = { CROSS_REVIEW_CALLER = "codex" }
 tool_timeout_sec = 1800
 ```
