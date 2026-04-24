@@ -10,7 +10,8 @@
     "start": "node src/server.js",
     "test": "node scripts/functional-smoke.js",
     "smoke": "node scripts/functional-smoke.js",
-    "probe:isolation": "node scripts/probe-reviewer-isolation.js"
+    "probe:isolation": "node scripts/probe-reviewer-isolation.js",
+    "check-models": "node scripts/audit-model-drift.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0"

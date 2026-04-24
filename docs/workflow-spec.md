@@ -752,9 +752,69 @@ sempre deve chamar o modelo mais atual, mais capaz, mais poderoso, mais
 top level disponivel na assinatura". Usuario eh assinante do tier mais
 caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 
+#### 6.9.2.1 Auditoria de drift de modelo (NOVO em v4.3)
+
+STATUS: aprovada bilateral (sessao 9c56005b, 2026-04-24, 4 rodadas,
+outcome=converged).
+
+Complementa secao 6.9.2 com um mecanismo ADVISORY-ONLY de deteccao de
+drift, sem alterar comportamento de runtime nem o processo de troca de
+modelo (que continua exigindo bump + spec edit conforme secao 6.9.2).
+
+Fonte documental curada: `docs/top-models.json` contem entries por
+provider com `id`, `reasoning_effort` (opcional), `validated_at` (ISO
+YYYY-MM-DD), `ref_url`, `notes`, alem de `staleness_threshold_days`
+global (default 30). O usuario eh a fonte de verdade; o JSON apenas
+materializa a curadoria humana para inspecao mecanica.
+
+Ferramenta advisory: `scripts/audit-model-drift.js`, invocada via
+`npm run check-models`. Compara as constantes cravadas em
+`src/lib/peer-spawn.js` (via leitura textual + regex) contra as entries
+de `top-models.json` e emite:
+- Exit 0: IDs batem e validated_at dentro do prazo.
+- Exit 1: drift de ID (ERROR). Mensagem explicita que o fix exige
+  (a) bump + spec edit per secao 6.9.2 em `peer-spawn.js`, E (b)
+  atualizacao de `top-models.json`. O script NAO autofix.
+- Exit 2: staleness (WARN). `validated_at` vencido forca re-verificacao
+  manual; se modelo continua top-tier, atualizar `validated_at`; se foi
+  superado, abrir sessao cross-review dedicada para a promocao (secao
+  6.9.2).
+- Exit 3: erro estrutural (regex nao casou, JSON invalido, file
+  faltando). Indica refator que quebrou o canal advisory; acao e revisar
+  tanto `peer-spawn.js` quanto o script deliberadamente.
+
+Vedacoes explicitas (o que este mecanismo NAO autoriza):
+- NAO autoriza fallback silencioso (mantem secao 6.9.2 clausula "SEM
+  fallback silencioso").
+- NAO autoriza override por config/env em tempo de execucao -- o advisor
+  nao injeta nada no `spawnPeer`.
+- NAO autoriza selecao automatica de modelo -- a escolha permanece
+  cravada em `peer-spawn.js`.
+- NAO autoriza troca de ID sem bump + edicao explicita de secao 6.9.2 --
+  o exit 1 do script deixa isso literal na mensagem de erro.
+
+Cadencia operacional: `npm run check-models` DEVE ser executado pelo
+menos uma vez por release e quando o usuario percebe saida de um novo
+modelo top-tier de qualquer provider. Nao eh gate de CI obrigatorio
+nesta release; pode ser promovido a gate em release futura se
+necessario.
+
+Interacao com tri-tool (secao 6.9.1): o advisory NAO substitui
+ultrathink + code-reasoning pre-session_init para troca real de modelo.
+Drift detectado ainda exige abrir sessao cross-review dedicada aplicando
+tri-tool completa antes de bumpar release.
+
+Motivacao: o usuario registrou em 2026-04-24 (sessao 08cd61e6) follow-up
+"auto-discovery controlado de modelo top-level com auditabilidade
+preservada". A pesquisa empirica em 2026-04-24 demonstrou que nenhum dos
+dois CLIs (codex, claude) expoe listagem de modelos em runtime,
+eliminando auto-discovery dinamico via CLI. Interpretando "auto-discovery
+controlado" como "deteccao auditavel de drift", o follow-up e satisfeito
+por secao 6.9.2.1 sem tocar em comportamento de runtime.
+
 ---
 
-## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.1)
+## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.3)
 
 | Convencao | Acao do caller |
 |-----------|---------------|
@@ -765,7 +825,7 @@ caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 | Escopo | FOLLOW-UP para fora-escopo; aborted para nao-convergencia honesta |
 | Ruido | Consumir content + peer_status + peer_structured + status_source + parser_warnings + peer_model |
 | Warnings | `parser_warnings` nao eh telemetria morta: inspecionar e agir (peer drift ou schema violation) |
-| Modelo | Peer sempre invocado com top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); sem fallback silencioso |
+| Modelo | Peer sempre invocado com top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); sem fallback silencioso; drift audit advisory via `npm run check-models` (secao 6.9.2.1) |
 | Encoding | ASCII-only em arquivos em disco; prompts podem ter acentos |
 | Continuidade | Ledger opcional (§6.5); quando adotado, manter ASCII-only e anexar em sessoes subsequentes |
 | Overflow | Yellow 50k / Red 100k chars no transcript (§6.6.1); compressao non-destructive (§6.6.4) com referencia aos imutaveis; meta.json sem mudanca de API (§6.6.3 YAGNI) |
@@ -773,7 +833,7 @@ caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 
 ---
 
-## 8. Criterios de aceitacao (atualizados em v4.1)
+## 8. Criterios de aceitacao (atualizados em v4.3)
 
 - Spec v4 foi aprovada bilateralmente (Claude + Codex) na sessao
   cross-review 08cd61e6 (2026-04-24, 2 rodadas).
@@ -784,15 +844,30 @@ caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
   cross-review f1fdbee4 (2026-04-24). v4.2 eh revisao spec-only de v4.1
   promovendo §6.7 (matriz minima de evidencia) de FOLLOW-UP para
   normativa -- nao toca em codigo.
+- Spec v4.3 foi aprovada bilateralmente (Claude + Codex) na sessao
+  cross-review 9c56005b (2026-04-24, 4 rodadas). v4.3 adiciona secao
+  6.9.2.1 (auditoria de drift de modelo, advisory-only) e introduz
+  tooling complementar (`docs/top-models.json` +
+  `scripts/audit-model-drift.js` + npm script `check-models`) SEM
+  alterar runtime de peer-spawn.js nem processo de troca de modelo
+  definido em secao 6.9.2.
 
 Uma vez aceita e publicada:
 - Substitui revisao anterior in-place.
 - Referenciada como a spec ativa em novas sessoes.
 - Fica congelada ate nova sessao de spec ser aberta (sem amend silencioso).
 
-Follow-ups pos-v4.2 (registrados mas fora do escopo desta release):
-- Secao 6.9.2: auto-discovery controlado de modelo top-level com
-  auditabilidade (registrado como follow_up do Codex na sessao 08cd61e6).
+Follow-ups pos-v4.3 (registrados mas fora do escopo desta release):
+- Pre-spawn existence check defensivo (abort-only se modelo descontinuado
+  pelo provider): registrado como follow_up separado nesta sessao
+  9c56005b; fora de escopo de secao 6.9.2.1 que eh exclusivamente
+  advisory.
+- Normalizar drift historico de non-ASCII (U+00A7) em
+  docs/workflow-spec.md (20 ocorrencias em v4.2 e anteriores):
+  registrado como follow_up na sessao 9c56005b. Mantido fora do escopo
+  de v4.3 por decisao bilateral; v4.3 transliterou apenas as suas
+  proprias novas ocorrencias. Tratamento sugerido: sessao dedicada ou
+  housekeeping pass antes de v4.4.
 - Secao 2.3.1: reconsideracao de `caller_requests`/`follow_ups` como arrays
   de objetos (em vez de strings) caso strings se mostrem insuficientes em
   uso real (registrado como follow_up do Codex na sessao 08cd61e6).
