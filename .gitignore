@@ -57,6 +57,7 @@ Desktop.ini
 *.swo
 *~
 .cursor/
+.ai/
 
 # Python temp scripts (one-shot helpers)
 __pycache__/
