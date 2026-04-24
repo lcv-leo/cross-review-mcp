@@ -3,29 +3,32 @@
 /**
  * probe-reviewer-isolation.js
  *
- * Hard gate do Commit 1 da Fase 1 do cross-review-mcp.
+ * Hard gate of Commit 1 of Phase 1 of cross-review-mcp.
  *
- * Objetivo: validar empiricamente se o spawn contido do reviewer funciona
- * com o conjunto real de MCPs, ou se e necessario fallback para bypass.
+ * Goal: empirically validate whether the contained reviewer spawn works
+ * with the real set of MCPs, or whether a fallback to bypass is needed.
  *
- * Testa dois caminhos independentes:
+ * Tests two independent paths:
  *
  *   CODEX reviewer:
  *     codex -a never -s read-only exec --skip-git-repo-check
- *       -c mcp_servers.<destrutivo>.enabled=false (para cada item da disable list)
+ *       -c mcp_servers.<destructive>.enabled=false (for each item in the
+ *       disable list)
  *
  *   CLAUDE reviewer:
  *     claude -p --permission-mode default
  *       --strict-mcp-config --mcp-config reviewer-minimal.mcp.json
  *       --disallowed-tools "Write,Edit,NotebookEdit"
  *
- * Em cada caso: spawna CLI, passa um prompt de probe, observa se:
- *   (a) tools listados incluem apenas os esperados (memory, ultrathink, code-reasoning, docs)
- *   (b) invocacao de tool "safe" (memory.search_nodes) funciona
- *   (c) agente termina com "STATUS: PROBE_DONE"
+ * In each case: spawn the CLI, pass a probe prompt, observe whether:
+ *   (a) listed tools include only the expected ones (memory, ultrathink,
+ *       code-reasoning, docs)
+ *   (b) invocation of a "safe" tool (memory.search_nodes) works
+ *   (c) the agent finishes with "STATUS: PROBE_DONE"
  *
- * Se tudo passa: baseline CONTAINED e viavel. Adotar.
- * Se tool essencial e auto-denied: mudar para bypass com justificativa.
+ * If everything passes: CONTAINED baseline is viable. Adopt.
+ * If an essential tool is auto-denied: switch to bypass with a
+ * justification.
  */
 
 const { spawnSync } = require('child_process');
@@ -88,7 +91,7 @@ function runCodexContained() {
     (name) => !CONFIGURED_CODEX_SERVERS.includes(name)
   );
   if (skipped.length) {
-    console.log(`[probe:codex] mcp_servers nao-configurados (skip): ${skipped.join(', ')}`);
+    console.log(`[probe:codex] unconfigured mcp_servers (skip): ${skipped.join(', ')}`);
   }
   const disableArgs = effectiveDisable.flatMap((name) => [
     '-c',

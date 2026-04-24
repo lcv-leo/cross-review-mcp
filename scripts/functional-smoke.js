@@ -3,13 +3,13 @@
 /**
  * functional-smoke.js
  *
- * Drive o server MCP via stdio JSON-RPC e exercita os tools de estado
- * (session_init, session_read, session_check_convergence, session_finalize).
- * PULA deliberadamente ask_peer por envolver spawn real do peer CLI e gasto
- * de LLM; aquele caminho e validado em E2E manual.
+ * Drive the MCP server via stdio JSON-RPC and exercise the state tools
+ * (session_init, session_read, session_check_convergence,
+ * session_finalize). Deliberately SKIPS ask_peer because it involves a
+ * real peer CLI spawn and LLM cost; that path is validated in manual E2E.
  *
- * Sucesso: todos os tools respondem com o shape esperado + arquivos corretos
- * sao criados em ~/.cross-review/<id>/.
+ * Success: every tool responds with the expected shape + the correct
+ * files are created in ~/.cross-review/<id>/.
  */
 
 const { spawn } = require('child_process');
@@ -51,7 +51,7 @@ async function driveServer(extraEnv = {}) {
                 const msg = JSON.parse(line);
                 if (msg.id != null) responses.set(msg.id, msg);
             } catch {
-                // ignora linhas nao-JSON
+                // ignore non-JSON lines
             }
         }
     });
@@ -189,7 +189,7 @@ function assert(cond, msg) {
 
 // === ask_peer tests via CROSS_REVIEW_PEER_STUB ===
 // Spawn separate server instance with stub env set, exercise ask_peer +
-// bilateral convergence matrix. Stub retorna resposta sintetica sem custo LLM.
+// bilateral convergence matrix. Stub returns a synthetic response without LLM cost.
 async function driveAskPeerMatrix() {
     const results = [];
     const proc = spawn('node', [SERVER], {
@@ -391,7 +391,7 @@ function cleanupSession(sid) {
     if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
 }
 
-// Test NEEDS_EVIDENCE (legacy line form): status parseado, nao converge, reason string menciona evidence.
+// Test NEEDS_EVIDENCE (legacy line form): status parsed, does not converge, reason string mentions evidence.
 async function driveNeedsEvidenceLegacy() {
     const results = [];
     const { sessionId, payload, convPayload } = await oneShotAskPeer('NEEDS_EVIDENCE', 'NOT_READY');
@@ -573,7 +573,7 @@ async function driveStructuredV4Full() {
     return { results };
 }
 
-// v0.4.0: uncertainty com valor invalido -- campo descartado + warning, status preservado.
+// v0.4.0: uncertainty with invalid value -- field dropped + warning, status preserved.
 async function driveStructuredV4BadUncertainty() {
     const results = [];
     const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_UNCERTAINTY', 'READY');
@@ -590,7 +590,7 @@ async function driveStructuredV4BadUncertainty() {
     return { results };
 }
 
-// v0.4.0: caller_requests nao-array -- shape invalido primeiro na ordem.
+// v0.4.0: caller_requests non-array -- invalid shape first in the order.
 async function driveStructuredV4BadCallerRequestsShape() {
     const results = [];
     const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE', 'NOT_READY');
@@ -604,7 +604,7 @@ async function driveStructuredV4BadCallerRequestsShape() {
     return { results };
 }
 
-// v0.4.0: item nao-string dentro de array (regra deterministica: shape OK, qty OK, item type NAO -> reject no item type).
+// v0.4.0: non-string item inside array (deterministic rule: shape OK, qty OK, item type NOT OK -> reject at item type).
 async function driveStructuredV4NonStringItem() {
     const results = [];
     const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_NON_STRING_ITEM', 'READY');
@@ -646,7 +646,7 @@ async function driveStructuredV4OversizedItem() {
     return { results };
 }
 
-// v0.4.0: campos fora da whitelist -- descartados + warning cada.
+// v0.4.0: fields outside the whitelist -- dropped + one warning each.
 async function driveStructuredV4UnknownField() {
     const results = [];
     const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_UNKNOWN_FIELD', 'READY');

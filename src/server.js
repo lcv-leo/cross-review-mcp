@@ -3,11 +3,12 @@
 /**
  * cross-review-mcp / server.js
  *
- * MCP server (stdio) que expoe a superficie de orquestracao de cross-review.
- * Identidade e determinada por CROSS_REVIEW_CALLER (claude | codex); a tool
- * `ask_peer` spawna o complementar com o spawn contido definitivo.
+ * MCP server (stdio) exposing the cross-review orchestration surface.
+ * Identity is determined by CROSS_REVIEW_CALLER (claude | codex); the
+ * `ask_peer` tool spawns the complement under the definitive contained
+ * spawn configuration.
  *
- * Tools expostas:
+ * Exposed tools:
  *   - session_init(task, artifacts[])
  *   - session_read(session_id)
  *   - session_check_convergence(session_id)

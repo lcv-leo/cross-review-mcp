@@ -1,5 +1,5 @@
-// Session state em ~/.cross-review/<session-id>/. Escritas atomicas via
-// temp+rename. Lock por mkdir atomico (POSIX e Windows) com TTL + PID.
+// Session state in ~/.cross-review/<session-id>/. Atomic writes via
+// temp+rename. Lock via atomic mkdir (POSIX and Windows) with TTL + PID.
 
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +29,7 @@ function acquireLock(sessionId) {
         fs.mkdirSync(lockDir);
     } catch (e) {
         if (e.code !== 'EEXIST') throw e;
-        // Lock existe -- verificar TTL
+        // Lock exists -- check TTL
         try {
             const infoPath = path.join(lockDir, 'info.json');
             const info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
@@ -41,7 +41,7 @@ function acquireLock(sessionId) {
                 return false;
             }
         } catch {
-            // info corrompido -> derrubar lock e reassumir
+            // info corrupted -> drop the lock and reacquire
             fs.rmSync(lockDir, { recursive: true, force: true });
             fs.mkdirSync(lockDir);
         }
@@ -58,7 +58,7 @@ function releaseLock(sessionId) {
     try {
         fs.rmSync(lockDir, { recursive: true, force: true });
     } catch {
-        // silencioso: se nao existir, ja esta destrancado
+        // silent: if absent, it's already unlocked
     }
 }
 

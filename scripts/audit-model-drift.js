@@ -1,35 +1,36 @@
 #!/usr/bin/env node
-// Drift-audit advisory para os IDs de modelo top-level referenciados em
+// Drift-audit advisory for the top-level model IDs referenced in
 // src/lib/peer-spawn.js.
 //
-// Escopo (spec v4.3 secao 6.9.2.1): este script e ADVISORY-ONLY. Ele NAO altera
-// comportamento de runtime, NAO seleciona modelo automaticamente, NAO
-// habilita fallback, NAO sobrepoe a fonte cravada em peer-spawn.js. Serve
-// exclusivamente para detectar dois tipos de drift:
+// Scope (spec v4.3 section 6.9.2.1): this script is ADVISORY-ONLY. It does
+// NOT change runtime behavior, does NOT auto-select a model, does NOT
+// enable fallback, does NOT override the source pinned in peer-spawn.js.
+// It serves exclusively to detect two kinds of drift:
 //
-//   1) ID divergente entre docs/top-models.json (fonte documental curada
-//      pelo usuario) e as constantes JS cravadas em peer-spawn.js.
-//      Divergencia => exit code 1 com mensagem explicando.
+//   1) ID divergence between docs/top-models.json (documentary source
+//      curated by the user) and the JS constants pinned in peer-spawn.js.
+//      Divergence => exit code 1 with explanatory message.
 //
-//   2) validated_at com idade maior que staleness_threshold_days. Significa
-//      que a curadoria humana nao foi renovada no prazo configurado;
-//      forca cadencia de revisao manual. Divergencia => exit code 2 com
-//      aviso.
+//   2) validated_at older than staleness_threshold_days. Means the human
+//      curation has not been renewed within the configured window; forces
+//      a manual-revision cadence. Divergence => exit code 2 with a
+//      warning.
 //
-// O script le peer-spawn.js como texto (fs.readFileSync) e extrai as
-// constantes por regex fixo. A fragilidade do regex eh INTENCIONAL: se
-// alguem refatorar os nomes das constantes, o script falha explicitamente
-// (exit 3) forcando revisao humana da auditoria. NAO exportamos as
-// constantes do modulo por design (manter peer-spawn.js imutavel a este
-// tooling).
+// The script reads peer-spawn.js as text (fs.readFileSync) and extracts
+// the constants via fixed regex. The fragility of the regex is
+// INTENTIONAL: if anyone renames the constant names, the script fails
+// explicitly (exit 3), forcing a deliberate human revision of the audit.
+// We do NOT export the constants from the module by design (keep
+// peer-spawn.js immutable to this tooling).
 //
 // Exit codes:
-//   0 = tudo OK (IDs batem + validated_at dentro do prazo).
-//   1 = drift de ID (ERROR, divergencia entre peer-spawn.js e JSON).
-//   2 = staleness (WARN, validated_at vencido).
-//   3 = erro estrutural (regex nao casou, JSON invalido, file faltando).
+//   0 = all OK (IDs match + validated_at within window).
+//   1 = ID drift (ERROR, divergence between peer-spawn.js and JSON).
+//   2 = staleness (WARN, validated_at expired).
+//   3 = structural error (regex did not match, invalid JSON, file
+//       missing).
 //
-// Uso: `npm run check-models` ou `node scripts/audit-model-drift.js`.
+// Usage: `npm run check-models` or `node scripts/audit-model-drift.js`.
 
 'use strict';
 
@@ -87,7 +88,7 @@ function main() {
         fail(3, `STRUCTURAL ERROR: top-models.json parse failed: ${err.message}`);
     }
 
-    const cravadas = {
+    const pinned = {
         codex_id: mustMatch(peerSrc, RE_CODEX_MODEL, 'CODEX_MODEL'),
         codex_effort: mustMatch(peerSrc, RE_CODEX_EFFORT, 'CODEX_REASONING_EFFORT'),
         claude_id: mustMatch(peerSrc, RE_CLAUDE_MODEL, 'CLAUDE_MODEL'),
@@ -100,19 +101,19 @@ function main() {
     const errors = [];
     const warnings = [];
 
-    if (codexEntry.id !== cravadas.codex_id) {
+    if (codexEntry.id !== pinned.codex_id) {
         errors.push(
-            `CODEX_MODEL drift: peer-spawn.js='${cravadas.codex_id}' vs top-models.json='${codexEntry.id}'`
+            `CODEX_MODEL drift: peer-spawn.js='${pinned.codex_id}' vs top-models.json='${codexEntry.id}'`
         );
     }
-    if (codexEntry.reasoning_effort !== cravadas.codex_effort) {
+    if (codexEntry.reasoning_effort !== pinned.codex_effort) {
         errors.push(
-            `CODEX_REASONING_EFFORT drift: peer-spawn.js='${cravadas.codex_effort}' vs top-models.json='${codexEntry.reasoning_effort}'`
+            `CODEX_REASONING_EFFORT drift: peer-spawn.js='${pinned.codex_effort}' vs top-models.json='${codexEntry.reasoning_effort}'`
         );
     }
-    if (claudeEntry.id !== cravadas.claude_id) {
+    if (claudeEntry.id !== pinned.claude_id) {
         errors.push(
-            `CLAUDE_MODEL drift: peer-spawn.js='${cravadas.claude_id}' vs top-models.json='${claudeEntry.id}'`
+            `CLAUDE_MODEL drift: peer-spawn.js='${pinned.claude_id}' vs top-models.json='${claudeEntry.id}'`
         );
     }
 
@@ -135,7 +136,7 @@ function main() {
     }
 
     process.stdout.write('cross-review-mcp: model drift audit\n');
-    process.stdout.write(`  peer-spawn.js cravadas: codex='${cravadas.codex_id}' effort='${cravadas.codex_effort}' claude='${cravadas.claude_id}'\n`);
+    process.stdout.write(`  peer-spawn.js pinned: codex='${pinned.codex_id}' effort='${pinned.codex_effort}' claude='${pinned.claude_id}'\n`);
     process.stdout.write(`  top-models.json entries: codex.id='${codexEntry.id}' codex.reasoning_effort='${codexEntry.reasoning_effort}' claude.id='${claudeEntry.id}'\n`);
     process.stdout.write(`  staleness_threshold_days=${threshold}\n`);
 
@@ -143,8 +144,8 @@ function main() {
         process.stderr.write('\nERROR: drift detected.\n');
         for (const e of errors) process.stderr.write('  - ' + e + '\n');
         process.stderr.write(
-            '\nAdvisory-only per spec v4.3 secao 6.9.2.1: resolve by (a) updating peer-spawn.js with ' +
-                'explicit bump and spec edit per secao 6.9.2, AND (b) updating top-models.json validated_at. ' +
+            '\nAdvisory-only per spec v4.3 section 6.9.2.1: resolve by (a) updating peer-spawn.js with ' +
+                'explicit bump and spec edit per section 6.9.2, AND (b) updating top-models.json validated_at. ' +
                 'This script does NOT autofix.\n'
         );
         process.exit(1);
@@ -154,10 +155,10 @@ function main() {
         process.stderr.write('\nWARN: staleness detected.\n');
         for (const w of warnings) process.stderr.write('  - ' + w + '\n');
         process.stderr.write(
-            '\nAdvisory-only per spec v4.3 secao 6.9.2.1: re-verify that each listed ID is still the ' +
+            '\nAdvisory-only per spec v4.3 section 6.9.2.1: re-verify that each listed ID is still the ' +
                 'top-tier model available in the user subscription. If still top-tier, update ' +
                 'validated_at. If superseded, open a cross-review session to decide the promotion ' +
-                'and bump the release per secao 6.9.2.\n'
+                'and bump the release per section 6.9.2.\n'
         );
         process.exit(2);
     }

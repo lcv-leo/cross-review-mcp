@@ -1,22 +1,24 @@
-// Spawn do peer CLI com a arvore de flags definitiva da README canonica.
-// - Codex: -a never -s read-only + mcp_servers.*.enabled=false (intersecao com
-//   configured) + apps.*.enabled=false + approval_mode=approve para tools
-//   read-only essenciais + recursao prevenida (cross-review fica desabilitado
-//   se configurado em config.toml).
-// - Claude: --permission-mode default + --strict-mcp-config + MCP minimo +
-//   tools de escrita/edit desabilitados.
+// Spawn of the peer CLI with the definitive flag tree from the canonical
+// README.
+// - Codex: -a never -s read-only + mcp_servers.*.enabled=false (intersected
+//   with configured) + apps.*.enabled=false + approval_mode=approve for
+//   essential read-only tools + recursion prevented (cross-review stays
+//   disabled if configured in config.toml).
+// - Claude: --permission-mode default + --strict-mcp-config + minimal MCP +
+//   write/edit tools disabled.
 //
-// Desde v0.4.0-alpha (spec v4 §6.9.2), ambos os caminhos passam flag de
-// modelo EXPLICITA para o top-level disponivel na assinatura do usuario --
-// nunca confiar em default do CLI (que pode regredir para variantes menores
-// em releases futuras). IDs cravados em v0.4.0:
+// Since v0.4.0-alpha (spec v4 section 6.9.2), both paths pass an EXPLICIT
+// model flag targeting the top-tier model available in the user's
+// subscription -- never rely on CLI defaults (which may regress to smaller
+// variants in future releases). IDs pinned in v0.4.0:
 //   - Codex: model `gpt-5.5` + reasoning_effort `xhigh` (via -c override,
-//            equivalente a flag dedicada de alto reasoning onde disponivel).
-//   - Claude: model `claude-opus-4-7` (ID completo, nao alias, por
-//             auditabilidade).
-// Troca de modelo exige bump/alteracao explicita de spec/config; sem
-// fallback silencioso. `spawnPeer` retorna `peer_model` para persistencia
-// no meta.json.rounds[i].peer_model, atendendo auditabilidade normativa.
+//            equivalent to a dedicated high-reasoning flag where available).
+//   - Claude: model `claude-opus-4-7` (full ID, not an alias, for
+//             auditability).
+// Model change requires explicit spec/config bump/edit; no silent fallback.
+// `spawnPeer` returns `peer_model` for persistence in
+// meta.json.rounds[i].peer_model, meeting the normative auditability
+// requirement.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -26,7 +28,7 @@ const CONFIGS_DIR = path.resolve(__dirname, '..', '..', 'reviewer-configs');
 const EXCLUSIONS_PATH = path.join(CONFIGS_DIR, 'peer-exclusions.json');
 const REVIEWER_MCP_JSON = path.join(CONFIGS_DIR, 'reviewer-minimal.mcp.json');
 
-// IDs normativos para v0.4.0 (spec v4 §6.9.2).
+// Normative IDs for v0.4.0 (spec v4 section 6.9.2).
 const CODEX_MODEL = 'gpt-5.5';
 const CODEX_REASONING_EFFORT = 'xhigh';
 const CLAUDE_MODEL = 'claude-opus-4-7';
@@ -54,8 +56,8 @@ function buildCodexArgs() {
     const ex = loadExclusions();
     const configured = listCodexConfiguredServers();
 
-    // Intersecao: override de mcp_servers.* so se existir em config.toml,
-    // senao gera "invalid transport".
+    // Intersection: only override mcp_servers.* if it exists in config.toml,
+    // otherwise the CLI yields "invalid transport".
     const effectiveDisable = (ex.codex_disable || []).filter((n) =>
         configured.includes(n)
     );
@@ -115,44 +117,45 @@ function modelForPeer(peerAgent) {
     return peerAgent === 'codex' ? CODEX_MODEL : CLAUDE_MODEL;
 }
 
-// Stub de teste. Nao spawna CLI real -- retorna resposta sintetica para
-// functional-smoke cobrir ask_peer sem custo de LLM. Fora de teste, nunca
-// deve ser setado.
+// Test stub. Does NOT spawn a real CLI -- returns a synthetic response so
+// functional-smoke can cover ask_peer without LLM cost. Must never be set
+// outside tests.
 //
-// Formas suportadas de CROSS_REVIEW_PEER_STUB:
+// Supported forms for CROSS_REVIEW_PEER_STUB:
 //   READY | NOT_READY | NEEDS_EVIDENCE
-//     -> corpo + linha final "STATUS: X" como ultima linha nao-vazia (legacy).
+//     -> body + final line "STATUS: X" as last non-empty line (legacy).
 //   MISSING
-//     -> corpo sem STATUS parseavel; dispara protocol_violation.
+//     -> body without parseable STATUS; triggers protocol_violation.
 //   ERROR
-//     -> rejeita a promise simulando falha de spawn.
+//     -> rejects the promise simulating a spawn failure.
 //   STRUCTURED:READY | STRUCTURED:NOT_READY | STRUCTURED:NEEDS_EVIDENCE
-//     -> corpo + bloco estruturado como TAIL.
+//     -> body + structured block as TAIL.
 //   STRUCTURED_EARLY_REGEX_LAST:<STRUCTURED_STATUS>:<REGEX_STATUS>
-//     -> bloco estruturado no meio do corpo e linha "STATUS: <REGEX_STATUS>"
-//        como ultima linha nao-vazia. Semantica esperada: regex vence
+//     -> structured block mid-body and line "STATUS: <REGEX_STATUS>" as the
+//        last non-empty line. Expected semantics: regex wins
 //        (anchor = last-non-empty-line).
 //   STRUCTURED_LAST_REGEX_EARLY:<REGEX_STATUS>:<STRUCTURED_STATUS>
-//     -> linha "STATUS: <REGEX_STATUS>" no meio do corpo e bloco estruturado
-//        como TAIL. Semantica esperada: structured vence.
+//     -> line "STATUS: <REGEX_STATUS>" mid-body and structured block as
+//        TAIL. Expected semantics: structured wins.
 //   MALFORMED_STRUCTURED_TAIL
-//     -> tail com </cross_review_status> cujo JSON interno e invalido. Nao
-//        deve cair no regex (tail eh o closing tag). Esperado: status=null.
+//     -> tail with </cross_review_status> whose inner JSON is invalid. Must
+//        NOT fall through to regex (tail is the closing tag). Expected:
+//        status=null.
 //   INVALID_STATUS_STRUCTURED_TAIL
-//     -> tail com bloco estruturado bem-formado mas status fora do enum
-//        (ex: {"status":"MAYBE"}). Esperado: status=null, structured=null.
+//     -> tail with well-formed structured block but status outside the enum
+//        (e.g. {"status":"MAYBE"}). Expected: status=null, structured=null.
 //   LOWERCASE_STATUS
-//     -> ultima linha "STATUS: ready" (minusculo). Regex case-sensitive
-//        rejeita. Esperado: status=null.
+//     -> last line "STATUS: ready" (lowercase). Case-sensitive regex
+//        rejects. Expected: status=null.
 //   PROSE_MENTION_STATUS
-//     -> corpo com "STATUS: READY" citado em prosa (ex: dentro de crases), e
-//        ultima linha nao-vazia diferente. Esperado: status=null (protecao
-//        contra false positive).
+//     -> body with "STATUS: READY" cited in prose (e.g. inside backticks)
+//        and a different last non-empty line. Expected: status=null
+//        (false-positive protection).
 //   PROSE_MENTION_BLOCK
-//     -> corpo com bloco "<cross_review_status>..." citado em prosa, e tail
-//        terminando em texto livre. Esperado: status=null.
+//     -> body with "<cross_review_status>..." cited in prose and tail
+//        ending in free text. Expected: status=null.
 //   DOUBLE_STRUCTURED:<EARLY>:<LAST>
-//     -> dois blocos estruturados; o ULTIMO (tail) vence. Esperado: status=LAST.
+//     -> two structured blocks; the LAST (tail) wins. Expected: status=LAST.
 const LEGACY_STATUSES = new Set(['READY', 'NOT_READY', 'NEEDS_EVIDENCE']);
 
 function assertLegacy(status, label) {
@@ -225,8 +228,8 @@ function resolveStub(stub) {
     if (stub.startsWith('MULTILINE_STRUCTURED:')) {
         const status = stub.slice('MULTILINE_STRUCTURED:'.length);
         assertLegacy(status, 'MULTILINE_STRUCTURED');
-        // Payload JSON pretty-printed entre tags multi-linha. Parser deve
-        // extrair corpo via slice e JSON.parse tolerar o whitespace.
+        // Pretty-printed JSON payload between multi-line tags. Parser must
+        // extract body via slice and JSON.parse must tolerate the whitespace.
         const prettyPayload = `{\n  "status": ${JSON.stringify(status)}\n}`;
         return {
             stdout: `${body}\n\n<cross_review_status>\n${prettyPayload}\n</cross_review_status>\n`,
@@ -234,7 +237,7 @@ function resolveStub(stub) {
             peer_model,
         };
     }
-    // Stubs v0.4.0 -- schema expandido e gap missing-close-tag.
+    // v0.4.0 stubs -- expanded schema and missing-close-tag gap.
     if (stub === 'STRUCTURED_V4_FULL') {
         const block = `<cross_review_status>${JSON.stringify({
             status: 'READY',
@@ -298,11 +301,12 @@ function resolveStub(stub) {
         return { stdout: `${body}\n\n${block}\n`, stderr, peer_model };
     }
     if (stub === 'STRUCTURED_OPEN_NO_CLOSE') {
-        // Open tag presente mas sem close tag. Tail nao termina com close,
-        // cai em tryLegacyLastLine; sem "STATUS: X" canonico na ultima linha,
-        // retorna null (protocol_violation esperado).
+        // Open tag present but no close tag. Tail does not end with close,
+        // falls through to tryLegacyLastLine; without a canonical
+        // "STATUS: X" on the last line, returns null (protocol_violation
+        // expected).
         const fakeOpen = '<cross_review_status>{"status":"READY"}';
-        return { stdout: `${body}\n\n${fakeOpen}\n\nprose apos a abertura sem fechar.\n`, stderr, peer_model };
+        return { stdout: `${body}\n\n${fakeOpen}\n\nprose after the unclosed opening.\n`, stderr, peer_model };
     }
     throw new Error(`stub: unknown CROSS_REVIEW_PEER_STUB form '${stub}'`);
 }
@@ -320,10 +324,10 @@ function peerStub() {
     }
 }
 
-// Monta uma command line quotada para passar ao shell. Evita o pattern
-// spawn(cmd, args, {shell: true}) que Node 20+ sinaliza como inseguro para
-// args com chars especiais. Nossos args sao internos (nao user input), mas
-// vale seguir o pattern seguro.
+// Build a quoted command line to pass to the shell. Avoids the pattern
+// spawn(cmd, args, {shell: true}) that Node 20+ flags as unsafe for args
+// with special chars. Our args are internal (not user input), but the safe
+// pattern is still worth following.
 function buildCommandLine(cmd, args) {
     const quote = (s) => {
         const str = String(s);

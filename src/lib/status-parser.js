@@ -1,51 +1,55 @@
-// Parse STATUS marker emitido pelo peer. Ancorado na spec v4 secao 2.1
-// ("ultima linha nao-vazia", trim, regex exata) + 2.3 (bloco estruturado
-// tail-anchored desde 0.3.0-alpha) + 2.4 (schema expandido com campos
-// opcionais validados per-field desde 0.4.0-alpha).
+// Parse STATUS marker emitted by the peer. Anchored on spec v4 section 2.1
+// ("last non-empty line", trim, exact regex) + 2.3 (tail-anchored
+// structured block since 0.3.0-alpha) + 2.4 (expanded schema with
+// per-field validated optional fields since 0.4.0-alpha).
 //
-// Contrato (em ordem de tentativa; apenas o TAIL nao-branco do texto eh
-// inspecionado, garantindo que menciones de STATUS: X no corpo nao disparem):
+// Contract (in order of attempt; ONLY the non-blank TAIL of the text is
+// inspected, ensuring in-body mentions of STATUS: X do not fire):
 //
-//   1) PREFERIDO v4: se o tail termina com </cross_review_status>, localiza
-//      o <cross_review_status> imediatamente a esquerda; extrai o conteudo,
-//      faz trim(), JSON.parse(), valida que o objeto tem { status: string }
-//      com status em { READY, NOT_READY, NEEDS_EVIDENCE }. Se status eh
-//      valido, aplica validacao per-field aos campos opcionais v4
-//      (uncertainty, caller_requests, follow_ups). Campos invalidos sao
-//      descartados com warning; status valido eh sempre preservado.
-//      Campos fora da whitelist sao descartados com warning.
-//      Retorna { status, structured: <clean>, source: 'structured',
+//   1) PREFERRED v4: if the tail ends with </cross_review_status>, locate
+//      the <cross_review_status> immediately to the left; extract the
+//      content, trim(), JSON.parse(), validate the object has
+//      { status: string } with status in
+//      { READY, NOT_READY, NEEDS_EVIDENCE }. If status is valid, apply
+//      per-field validation to the v4 optional fields (uncertainty,
+//      caller_requests, follow_ups). Invalid fields are dropped with a
+//      warning; valid status is always preserved. Unknown whitelist-miss
+//      fields are dropped with a warning.
+//      Returns { status, structured: <clean>, source: 'structured',
 //               parser_warnings: [...] }.
-//      Se status invalido/ausente, retorna { status: null, structured: null,
-//      source: null, parser_warnings: [] }. Bloco com status invalido NAO
-//      cai no fallback regex, porque a ultima linha nao-vazia ja eh o
-//      closing tag, e a regex legacy nao casa com ela.
+//      If status invalid/absent, returns { status: null, structured: null,
+//      source: null, parser_warnings: [] }. A block with invalid status
+//      does NOT fall through to the legacy regex because the last
+//      non-empty line is already the closing tag and the legacy regex
+//      cannot match it.
 //
-//   2) FALLBACK legacy (v3 §2.1): examina SOMENTE a ultima linha nao-vazia
-//      (apos trim). Aceita regex EXATA e case-sensitive:
-//      ^STATUS: (READY|NOT_READY|NEEDS_EVIDENCE)$. Retorna { status,
+//   2) LEGACY FALLBACK (v3 section 2.1): inspects ONLY the last non-empty
+//      line (after trim). Accepts EXACT and case-sensitive regex:
+//      ^STATUS: (READY|NOT_READY|NEEDS_EVIDENCE)$. Returns { status,
 //      structured: null, source: 'regex', parser_warnings: [] }.
 //
-//   3) Nada casou: { status: null, structured: null, source: null,
-//                    parser_warnings: [] }.
+//   3) Nothing matched: { status: null, structured: null, source: null,
+//                         parser_warnings: [] }.
 //
-// Regras de validacao per-field (spec v4 §2.4, ordem deterministica
-// shape -> quantidade -> tipo-dos-itens -> tamanho-dos-itens):
+// Per-field validation rules (spec v4 section 2.4, deterministic order
+// shape -> count -> item-type -> item-length):
 //
-//   uncertainty:  string em {'low','medium','high'} OU descarta + warning.
-//                 Regra normativa: peers DEVEM omitir por padrao e emitir
-//                 apenas quando o valor altera a leitura do parecer.
+//   uncertainty:  string in {'low','medium','high'} OR drop + warning.
+//                 Normative rule: peers MUST omit by default and emit
+//                 only when the value changes the reading of the parecer.
 //
-//   caller_requests e follow_ups:
-//     1) shape: deve ser Array (senao descarta).
-//     2) quantidade: <=20 items (senao descarta).
-//     3) tipo dos itens: cada item deve ser string (senao descarta).
-//     4) tamanho dos itens: cada item <=500 chars (senao descarta).
-//     Arrays vazios sao normalizados para ausencia (campo nao aparece em
-//     `structured`), sem warning -- coerente com "empty equivale a absent".
+//   caller_requests and follow_ups:
+//     1) shape: must be Array (otherwise drop).
+//     2) count: <=20 items (otherwise drop).
+//     3) item type: each item must be string (otherwise drop).
+//     4) item length: each item <=500 chars (otherwise drop).
+//     Empty arrays are normalized to absence (the field does not appear in
+//     `structured`), without a warning -- consistent with
+//     "empty equivalent to absent".
 //
-// Um warning eh emitido por campo rejeitado (nao multiplo por defeito
-// multiplo). Primeira regra violada na ordem acima decide o tipo do warning.
+// One warning is emitted per rejected field (not multiple per multi-defect
+// field). The first rule violated in the order above decides the warning
+// kind.
 
 const VALID_STATUSES = new Set(['READY', 'NOT_READY', 'NEEDS_EVIDENCE']);
 const VALID_UNCERTAINTY = new Set(['low', 'medium', 'high']);
@@ -64,18 +68,18 @@ function validateStringArray(value, fieldName, warnings) {
         );
         return undefined;
     }
-    // empty array -> normalizar para ausencia, sem warning
+    // empty array -> normalize to absence, no warning
     if (value.length === 0) {
         return undefined;
     }
-    // 2) quantidade
+    // 2) count
     if (value.length > MAX_ARRAY_ITEMS) {
         warnings.push(
             `${fieldName} exceeds ${MAX_ARRAY_ITEMS} items (got ${value.length})`
         );
         return undefined;
     }
-    // 3) tipo dos itens
+    // 3) item type
     for (let i = 0; i < value.length; i++) {
         if (typeof value[i] !== 'string') {
             warnings.push(
@@ -84,7 +88,7 @@ function validateStringArray(value, fieldName, warnings) {
             return undefined;
         }
     }
-    // 4) tamanho dos itens
+    // 4) item length
     for (let i = 0; i < value.length; i++) {
         if (value[i].length > MAX_ITEM_CHARS) {
             warnings.push(
@@ -128,7 +132,7 @@ function validateOptionalFields(parsed) {
         if (v !== undefined) clean.follow_ups = v;
     }
 
-    // campos desconhecidos
+    // unknown fields
     for (const key of Object.keys(parsed)) {
         if (key === 'status') continue;
         if (!OPTIONAL_FIELDS.has(key)) {
@@ -204,8 +208,8 @@ function parsePeerResponse(text) {
     return empty;
 }
 
-// Backwards-compat: parseStatus continua retornando string|null para call
-// sites antigos. Preferir parsePeerResponse em codigo novo.
+// Backwards-compat: parseStatus still returns string|null for legacy
+// call sites. Prefer parsePeerResponse in new code.
 function parseStatus(text) {
     return parsePeerResponse(text).status;
 }

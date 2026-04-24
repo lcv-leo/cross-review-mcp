@@ -1,6 +1,6 @@
 {
     "schema_version": 1,
-    "description": "Authoritative source-of-truth for top-level model IDs referenced by peer-spawn.js. Curated manually by the user. Drift between the constants cravadas in src/lib/peer-spawn.js and the entries here triggers ERROR in scripts/audit-model-drift.js. Staleness of validated_at beyond staleness_threshold_days triggers WARN (forcing a cadence of human revalidation). This file is advisory-only per workflow-spec v4.3 secao 6.9.2.1: it does NOT drive runtime model selection. Changes to runtime model IDs still require bump + spec edit per secao 6.9.2.",
+    "description": "Authoritative source-of-truth for top-level model IDs referenced by peer-spawn.js. Curated manually by the user. Drift between the constants pinned in src/lib/peer-spawn.js and the entries here triggers ERROR in scripts/audit-model-drift.js. Staleness of validated_at beyond staleness_threshold_days triggers WARN (forcing a cadence of human revalidation). This file is advisory-only per workflow-spec v4.3 section 6.9.2.1: it does NOT drive runtime model selection. Changes to runtime model IDs still require bump + spec edit per section 6.9.2.",
     "staleness_threshold_days": 30,
     "entries": {
         "codex": {
@@ -14,7 +14,7 @@
             "id": "claude-opus-4-7",
             "validated_at": "2026-04-24",
             "ref_url": "https://docs.anthropic.com/en/docs/about-claude/models",
-            "notes": "Full ID, not alias, per secao 6.9.2 auditability clause. Top-tier Anthropic model at validated_at. User is on highest Anthropic subscription tier."
+            "notes": "Full ID, not alias, per section 6.9.2 auditability clause. Top-tier Anthropic model at validated_at. User is on highest Anthropic subscription tier."
         }
     }
 }
