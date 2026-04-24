@@ -11,7 +11,47 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — próximos follow-ups após v0.9.0-alpha: v1.0 stable cut pendente de field-use validation + comunidade inicial + eventual novo round trilateral de review. Registered issues rastreadas via `docs/workflow-spec.md` §8 e GitHub issues.)
+- (em aberto — próximos follow-ups após v0.9.0-alpha.1: v1.0 stable cut pendente de 9 sessões trilaterais adicionais (field-use validation #2/10 … #10/10) + eventual novo round trilateral de review para o freeze proposal apresentado em session 6cf09af3. Registered issues rastreadas via `docs/workflow-spec.md` §8 e GitHub issues.)
+
+---
+
+## [0.9.0-alpha.1] — 2026-04-24
+
+Patch release: field-use validation session #1/10 (`6cf09af3-163c-49c2-98ae-435e6c62a686`) surfacou bug crítico em `detectGeminiAuth()` que reintroduzia false-positive `silent_model_downgrade` quando `GEMINI_API_KEY` estava presente no env do MCP host enquanto o CLI Gemini internamente usava `oauth-personal` via `~/.gemini/settings.json`. Round 1 do Codex NOT_READY com `caller_request` explícito para patch antes do v1.0 cut; Round 1 do Gemini READY concordando. Ambos peers concurring: ship como v0.9.0-alpha.1 próprio release (não absorber diretamente em v1.0) para que a correção tenha field-validation antes do freeze permanente.
+
+### Corrigido
+- **`detectGeminiAuth()` em `src/lib/peer-spawn.js`** refatorado em dois níveis:
+  - `geminiAuthFromSignals({ settingsSelectedType, hasApiKeyEnv, hasOauthCreds })` — pure decision function, sem fs/env reads. Exportada para testabilidade.
+  - `detectGeminiAuth()` — production wrapper que lê os três signals e delega.
+- **Nova precedence** (era env-var first em v0.6.0-alpha → v0.9.0-alpha):
+  1. `~/.gemini/settings.json` `security.auth.selectedType` se parseável. Valores reconhecidos: `'oauth-personal'` → `'oauth-personal'`; `'api-key'` ou `'gemini-api-key'` → `'api-key'`. Valores desconhecidos caem para o próximo nível.
+  2. `GEMINI_API_KEY` env var presence → `'api-key'`.
+  3. `~/.gemini/oauth_creds.json` fs.existsSync → `'oauth-personal'`.
+  4. Default → `'oauth-personal'` (CLI documented default).
+- **Rationale:** o CLI Gemini decide auth mode internamente via `settings.json`; presença de env var no host MCP NÃO força o CLI para api-key. Sessão 6cf09af3 probe capturou `transport_descriptor: { auth: 'api-key', endpoint_class: 'generativelanguage-v1beta' }` incorretamente para Gemini, executando o model-check no path api-key (que é autoritative), recebendo `model_reported: "Gemini"` (self-report terse), comparando contra `gemini-3.1-pro-preview`, → mismatch → `tier: offline` + `failure_class: silent_model_downgrade`. Com a precedence corrigida, `detectGeminiAuth()` lê o `selectedType: 'oauth-personal'` do settings.json primeiro e retorna `'oauth-personal'`, ativando o §6.11 skip path adequadamente.
+
+### Adicionado
+- **Smoke coverage (125 steps total, 117 → 125, +8 assertions):** novo `driveV091GeminiAuthPrecedenceUnit` em `scripts/functional-smoke.js` cobrindo as 8 combinações de signal relevantes:
+  - settings=oauth-personal + env=T + oauth_creds=T → oauth-personal (**regression explícita da sessão 6cf09af3**).
+  - settings=oauth-personal + env=T + oauth_creds=F → oauth-personal.
+  - settings=api-key + env=F + oauth_creds=T → api-key.
+  - settings=gemini-api-key alias → api-key.
+  - settings=null + env=T + oauth_creds=T → api-key (env beats oauth_creds).
+  - settings=null + env=F + oauth_creds=T → oauth-personal.
+  - settings=null + env=F + oauth_creds=F → oauth-personal (default).
+  - settings='future-auth-type' (unrecognized) → fall-through para env signal.
+
+### Alterado
+- `src/server.js` `VERSION` bumpado `0.9.0-alpha` → `0.9.0-alpha.1`.
+- `package.json` version bumpado `0.9.0-alpha` → `0.9.0-alpha.1`.
+
+### Não alterado (invariantes preservadas)
+- Spec `docs/workflow-spec.md` permanece v4.11 — a correção é implementation-layer bug fix, não spec change. §6.11 transport-descriptor shape + gate semantics permanecem idênticos.
+- `parsePeerOutputs` + `classifyModelMatch` inalterados — a fix é upstream em `detectGeminiAuth()` e o downstream chain continua correto.
+- Contract público (7 MCP tools + structured block schema + meta.json schema) não tocado. Eligível para v1.0 freeze inalterado pós-patch.
+
+### Field-use session registered
+- Session `6cf09af3-163c-49c2-98ae-435e6c62a686` (#1/10): v1.0 cut scope review (§8 closures + frozen surface + semver policy + D bug). Outcome pendente Round 2 — necessita reapresentação com patch landed + expanded FROZEN surface per Codex's 3 caller_requests.
 
 ---
 

@@ -809,7 +809,73 @@ async function runAll() {
     all.push(...s41.results);
     const s42 = await driveV7EscalateToOperatorUnit();
     all.push(...s42.results);
+    const s43 = await driveV091GeminiAuthPrecedenceUnit();
+    all.push(...s43.results);
     return all;
+}
+
+// v0.9.0-alpha.1 / spec v4.11 fix — Gemini transport-detection precedence.
+// Regression for session 6cf09af3 Round 1 (field-use validation #1/10) which
+// surfaced a false-positive `silent_model_downgrade` for Gemini when
+// GEMINI_API_KEY env var was present in the MCP host while the CLI's own
+// settings.json selected oauth-personal. Fix: settings.json precedence
+// first, then env, then oauth_creds, then default.
+async function driveV091GeminiAuthPrecedenceUnit() {
+    const results = [];
+    const { geminiAuthFromSignals } = require('../src/lib/peer-spawn.js');
+
+    // Canonical settings.json values win over every env/fs signal.
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: 'oauth-personal', hasApiKeyEnv: true, hasOauthCreds: true }) === 'oauth-personal',
+        'v0.9.0-alpha.1: settings=oauth-personal wins even with env=T + oauth_creds=T (6cf09af3 regression)'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings=oauth-personal precedence over env+creds (session 6cf09af3 regression)', ok: true });
+
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: 'oauth-personal', hasApiKeyEnv: true, hasOauthCreds: false }) === 'oauth-personal',
+        'v0.9.0-alpha.1: settings=oauth-personal wins over env=T'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings=oauth-personal precedence over env', ok: true });
+
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: 'api-key', hasApiKeyEnv: false, hasOauthCreds: true }) === 'api-key',
+        'v0.9.0-alpha.1: settings=api-key wins over oauth_creds presence'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings=api-key precedence over oauth_creds', ok: true });
+
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: 'gemini-api-key', hasApiKeyEnv: false, hasOauthCreds: false }) === 'api-key',
+        'v0.9.0-alpha.1: settings=gemini-api-key alias accepted as api-key'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings=gemini-api-key alias → api-key', ok: true });
+
+    // Unrecognized/missing settingsSelectedType → fall through to env.
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: true, hasOauthCreds: true }) === 'api-key',
+        'v0.9.0-alpha.1: settings absent, env=T → api-key (env beats oauth_creds)'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings null, env=T wins over oauth_creds', ok: true });
+
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: false, hasOauthCreds: true }) === 'oauth-personal',
+        'v0.9.0-alpha.1: settings absent, env=F, oauth_creds=T → oauth-personal'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: settings null, oauth_creds=T → oauth-personal', ok: true });
+
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: false, hasOauthCreds: false }) === 'oauth-personal',
+        'v0.9.0-alpha.1: all absent → oauth-personal (documented CLI default)'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: all signals absent → default oauth-personal', ok: true });
+
+    // Unrecognized settingsSelectedType string must fall through, not crash.
+    assert(
+        geminiAuthFromSignals({ settingsSelectedType: 'future-auth-type', hasApiKeyEnv: true, hasOauthCreds: false }) === 'api-key',
+        'v0.9.0-alpha.1: unrecognized settings value falls through to env signal'
+    );
+    results.push({ step: 'v0.9.0-alpha.1: unrecognized settingsSelectedType falls through', ok: true });
+
+    return { results };
 }
 
 // v0.7.0-alpha / spec v4.10 unit coverage.

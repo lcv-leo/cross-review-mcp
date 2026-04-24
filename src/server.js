@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '0.9.0-alpha';
+const VERSION = '0.9.0-alpha.1';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,

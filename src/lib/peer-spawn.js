@@ -97,18 +97,58 @@ const GEMINI_ALLOWED_MCP_SERVERS = ['memory', 'ultrathink', 'code-reasoning'];
 // v0.6.0-alpha / spec v4.9 — transport_descriptor + rate-limit detection
 // ---------------------------------------------------------------------------
 
-// Detect Gemini CLI auth mode. Precedence:
-//   1. GEMINI_API_KEY env var → 'api-key' (api-public transport, future path).
-//   2. ~/.gemini/oauth_creds.json present → 'oauth-personal' (current path).
-//   3. Fallback → 'oauth-personal' (matches CLI's own default).
-function detectGeminiAuth() {
-    if (process.env.GEMINI_API_KEY) return 'api-key';
-    const home = os.homedir() || '';
-    if (home) {
-        const oauthCreds = path.join(home, '.gemini', 'oauth_creds.json');
-        if (fs.existsSync(oauthCreds)) return 'oauth-personal';
+// Pure decision function — composes the three transport signals into the
+// final auth class. Exported for testing; callers in production code use
+// `detectGeminiAuth()` which reads the signals from fs + env.
+//
+// Precedence (v0.9.0-alpha.1 / field-use session 6cf09af3 fix):
+//   1. `~/.gemini/settings.json` `security.auth.selectedType` if parseable.
+//      The CLI itself decides auth mode via this field; anything it
+//      declares is authoritative.
+//   2. `GEMINI_API_KEY` env var presence → 'api-key' (only consulted when
+//      settings.json does NOT declare a selectedType).
+//   3. `~/.gemini/oauth_creds.json` presence → 'oauth-personal'.
+//   4. Default → 'oauth-personal' (matches CLI's documented default).
+//
+// Rationale: previous v0.6.0-alpha precedence put env-var first, which
+// caused false-positive `silent_model_downgrade` for operators who set
+// `GEMINI_API_KEY` for unrelated reasons while the CLI itself stayed on
+// oauth-personal via settings.json. Session 6cf09af3 field-use validation
+// surfaced this bug; Round 1 trilateral concurred on the settings.json-first
+// precedence as the v1.0-blocker fix.
+function geminiAuthFromSignals({ settingsSelectedType, hasApiKeyEnv, hasOauthCreds }) {
+    if (settingsSelectedType === 'oauth-personal') return 'oauth-personal';
+    if (settingsSelectedType === 'api-key' || settingsSelectedType === 'gemini-api-key') {
+        return 'api-key';
     }
+    // settingsSelectedType absent, null, or unrecognized → fall through to
+    // env + fs signals.
+    if (hasApiKeyEnv) return 'api-key';
+    if (hasOauthCreds) return 'oauth-personal';
     return 'oauth-personal';
+}
+
+// Production wrapper: reads fs + env, delegates the pure decision.
+function detectGeminiAuth() {
+    const home = os.homedir() || '';
+    let settingsSelectedType = null;
+    if (home) {
+        const settingsPath = path.join(home, '.gemini', 'settings.json');
+        if (fs.existsSync(settingsPath)) {
+            try {
+                const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+                settingsSelectedType = settings?.security?.auth?.selectedType ?? null;
+            } catch {
+                // Malformed settings.json: fall through to env + fs signals.
+                settingsSelectedType = null;
+            }
+        }
+    }
+    const hasApiKeyEnv = Boolean(process.env.GEMINI_API_KEY);
+    const hasOauthCreds = Boolean(
+        home && fs.existsSync(path.join(home, '.gemini', 'oauth_creds.json'))
+    );
+    return geminiAuthFromSignals({ settingsSelectedType, hasApiKeyEnv, hasOauthCreds });
 }
 
 // Build a transport descriptor for the peer. The `auth` field gates the
@@ -1067,6 +1107,7 @@ module.exports = {
     GEMINI_ALLOWED_MCP_SERVERS,
     // v0.6.0-alpha / spec v4.9 additions.
     detectGeminiAuth,
+    geminiAuthFromSignals,
     buildTransportDescriptor,
     authoritativeModelAttestationAvailable,
     RATE_LIMIT_LEXEMES,
