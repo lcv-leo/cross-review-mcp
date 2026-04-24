@@ -1,12 +1,36 @@
-# Cross-Review MCP Workflow Specification v4
+# Cross-Review MCP Workflow Specification v4.1
 
-**Status**: normativa absorvendo `cross-review-mcp` v0.4.0-alpha (sessao
-08cd61e6, aprovada bilateral em 2 rodadas em 2026-04-24). Elevada a partir da
-v3 normativa (sessao 806a1c4f). Precursores: v2 (sessao 7d745f38); mudancas
-arquiteturais de v0.3.0-alpha (sessao 0e427278).
+**Status**: v4.1 eh revisao spec-only de v4 via sessao a847f897 (2026-04-24,
+aprovada bilateral). v4.1 altera APENAS politica de processo -- NAO toca em
+schema, parser, server, session-store, peer-spawn ou qualquer codigo. Logo,
+v4.1 NAO requer bump do `cross-review-mcp` (permanece em v0.4.0-alpha).
+Precursores: v2 (sessao 7d745f38); v3 (sessao 806a1c4f); v4 normativa
+absorvendo v0.4.0-alpha (sessao 08cd61e6).
 
 Encoding: ASCII-only com transliteracao de acentos do portugues. Motivo
 operacional em secao 6.4.
+
+---
+
+## 0b. Delta v4 -> v4.1 (sumario executivo)
+
+- **Secao 6.5 SUAVIZADA**: linguagem de ledger passa de obrigatoria ("mantem")
+  para opcional ("pode manter"; "Quando adotado...") para coerencia com
+  evidencia empirica de nao-adocao (auditoria 2026-04-24: nenhum `ledger.md`
+  em `~/.cross-review/`).
+- **Secao 6.6 PROMOVIDA DE FOLLOW-UP PARA NORMATIVA**: contrato normativo com
+  thresholds concretos e ordem de compressao mandatoria, dividido em 4
+  subsecoes: 6.6.1 Transcript, 6.6.2 Ledger, 6.6.3 meta.json, 6.6.4
+  Non-destructive compression.
+- **Secao 7 AJUSTADA**: linha de ledger suavizada para coerencia com §6.5;
+  nova linha "Overflow" com ponteiros para §6.6.
+- **Secao 8 AJUSTADA**: criterios de aceitacao registram aprovacao bilateral
+  da sessao a847f897.
+
+Toda mudanca em v4.1 eh policy/documentacao. Nenhum contrato programatico
+(tools MCP, formato do bloco, schema de payload, session-store on-disk layout)
+foi alterado. Qualquer leitor que infira necessidade de bump do server por
+conta de v4.1 esta equivocado.
 
 ---
 
@@ -427,31 +451,141 @@ que viram artifacts de sessao de review. Na sessao 0e427278 round 1 o peer
 flaggou `README.md` do proprio cross-review-mcp como nao-ASCII; a correcao
 foi reescrever o README inteiro com transliteracao antes do READY.
 
-### 6.5 Ledger de continuidade entre sessoes (MANTIDO de v2)
+### 6.5 Ledger de continuidade entre sessoes (SUAVIZADO em v4.1)
 
-Caller mantem ledger em arquivo persistente (ex:
-`C:\Users\leona\.cross-review\ledger.md`) com:
+Caller **pode** manter ledger em arquivo persistente (ex:
+`C:\Users\leona\.cross-review\ledger.md`). Quando adotado, o ledger contem:
 - Sessoes anteriores (id, data, outcome, escopo).
 - Achados fechados.
 - Achados residuais aceitos + fronteira arquitetural.
 - Follow-ups pendentes.
 
-Ledger em ASCII-only. Novo session_init anexa ledger como artifact quando o
-alvo relaciona-se a sessoes previas.
+Ledger em ASCII-only. Quando o ledger for adotado, novo session_init anexa-o
+como artifact sempre que o alvo relaciona-se a sessoes previas.
 
-### 6.6 Overflow / truncamento (MANTIDO como FOLLOW-UP nao-bloqueante)
+Nota empirica (auditoria 2026-04-24): ate a data de v4.1 nenhum
+`~/.cross-review/ledger.md` foi produzido em uso real. §6.5 permanece como
+convencao opcional; politica de compactacao do ledger entra em vigor se/quando
+ele for adotado (§6.6.2).
+
+### 6.6 Overflow / truncamento (NORMATIVA em v4.1)
+
+Promovido de FOLLOW-UP para contrato normativo via sessao a847f897
+(2026-04-24, aprovada bilateral). Politica policy-only -- nenhum code change
+em cross-review-mcp foi feito, e nenhum eh justificado pelos dados empiricos
+coletados ate aqui.
+
+#### 6.6.1 Transcript (artefato montado pelo caller)
+
+O transcript (artefato temp produzido pelo caller e entregue como artifact em
+`session_init`) tem limites de tamanho operacional:
+
+- **Yellow line**: 50000 chars (~12-15k tokens em ASCII). Acima, caller DEVE
+  aplicar a ordem de compressao abaixo.
+- **Red line**: 100000 chars (~25k tokens). Acima, caller DEVE remontar
+  transcript por inteiro ou abortar a sessao. Red line eh hard stop porque o
+  transcript comeca a dominar o orcamento de contexto do peer.
+
+Os thresholds sao de **higiene operacional**, nao limites tecnicos do modelo
+(janelas modernas sao muito maiores). O objetivo eh preservar atencao do peer
+em evidencia viva, nao acomodar o maximo possivel.
+
+Ordem de preservacao (MANDATORIA; comprimir/remover de BAIXO PRA CIMA ao
+atingir yellow line):
+
+1. Diretivas verbatim do usuario (normativas, feedback de coaching, mudancas
+   de prioridade) -- NUNCA comprimir nem remover.
+2. Achados residuais abertos + follow-ups com urgencia bloqueante em prazo --
+   preservar integrais.
+3. Evidencias validas (fingerprint match, nao stale) -- preservar.
+4. Timeline das rodadas desta sessao: ultimas 2 rodadas integrais; rodadas
+   anteriores compactadas para sumario de 3-5 linhas por rodada (achado,
+   resposta, motivo do estado).
+5. Evidencias stale -- remover ao atingir yellow line (stale ja nao conta
+   para validacao por §3.4).
+6. Apendices verbatim -- remover ao atingir yellow line.
+7. Cross-session timeline (sessoes anteriores): apenas 1 linha por sessao
+   (id, data, outcome, 1 achado significativo). Detalhamento adicional so
+   se explicitamente exigido pelo escopo.
+
+#### 6.6.2 Ledger (condicional ao uso; §6.5)
+
+Ledger como artefato eh opcional (ver §6.5). Politica abaixo aplica-se
+quando e se o ledger for adotado:
+
+- Compactacao eh **manual** (trigger explicito pelo caller), nao automatica.
+  Nenhum mecanismo de compactacao automatica ao abrir sessao eh permitido --
+  automatizar aqui arrisca mudanca silenciosa de contrato entre sessoes.
+- Sessoes com outcome=converged e idade superior a 90 dias podem ser
+  reduzidas a sumario de 1 linha (id, data, outcome, 1 achado significativo).
+- Sessoes com outcome=aborted ou outcome=max-rounds preservam-se integrais
+  como debris operacional para aprendizado. Nao compactar.
+- Threshold de 90 dias eh recomendacao prudencial; caller pode ajustar na
+  ferramenta manual que eventualmente construir.
+
+Ate 2026-04-24 nenhum ledger foi produzido em uso real; esta subsecao eh
+contrato condicional, nao tarefa pendente.
+
+#### 6.6.3 meta.json (artefato do MCP server)
+
+Observacao empirica (auditoria 2026-04-24): nas 9 sessoes presentes em
+`~/.cross-review/`, tamanhos de `meta.json` variaram de ~1KB a ~3KB; maior
+sessao histrorica teve 6 rodadas. Sem pressao de overflow real.
+
+Regra de contrato atual:
+- `session_read` retorna `meta.json` integral.
+- Nenhuma mudanca de API (ex: parametro `rounds_limit`, endpoint
+  `session_digest`) eh justificada pelos dados empiricos disponiveis.
+- Se no futuro uma sessao com 20+ rounds + peer_structured carregado produzir
+  `meta.json` > 500KB e isso gerar pressao mensuravel em consumidores, spec
+  futura (v4.2+) pode adicionar parametro opcional ao `session_read`. Ate la,
+  YAGNI -- construir preventivamente leva a pick a shape errada.
+
+Motivacao explicita: respeitar o principio "nao desenhar para requisitos
+hipoteticos". Evidencia de pressao real eh condicao necessaria para mudanca
+de API.
+
+#### 6.6.4 Non-destructive compression (invariante normativa)
+
+Quando o caller, humano ou ferramenta, montar transcript ou ledger
+compactado para envio ao peer, o artefato compactado DEVE declarar
+explicitamente quais trechos foram resumidos, removidos ou substituidos por
+referencia, incluindo o caminho dos artefatos imutaveis que preservam o
+detalhe original.
+
+Exemplo de declaracao aceitavel dentro do transcript compactado:
 
 ```
-FOLLOW-UP: politica de overflow e truncamento do transcript/ledger.
-- por que: artefatos crescem monotonicamente com o tempo.
-- escopo apropriado: sessao dedicada a politicas de compactacao.
-- urgencia: desejavel (nao bloqueia uso imediato enquanto artefatos sao
-  pequenos).
-- primeira aproximacao: ordem de preservacao = diretivas verbatim do user >
-  achados residuais > timeline das sessoes > evidencias validas > evidencias
-  stale > apendices. Comprimir/remover de baixo pra cima ao encostar em
-  orcamento de contexto.
+[SUMMARY round 1-3 da sessao X: 1 achado cada; detalhe integral em
+ C:/Users/leona/.cross-review/<sid>/round-01-peer-codex.md (e 02, 03)]
+[REMOVED apendice verbatim Y: 2300 chars; reconstruivel a partir do commit
+ Z do repo W]
 ```
+
+Historico runtime do MCP eh **imutavel**. Os arquivos
+`~/.cross-review/<sid>/meta.json`,
+`~/.cross-review/<sid>/round-NN-prompt.md` e
+`~/.cross-review/<sid>/round-NN-peer-<agent>.md` NAO podem ser mutados apos
+escrita pelo server -- nem pelo caller, nem por ferramenta auxiliar,
+nem como efeito colateral de compactacao do transcript. Mutar historico eh
+violacao estrutural do contrato (perde auditabilidade, invalida fingerprints,
+quebra continuidade entre sessoes).
+
+Exclusao explicita: `~/.cross-review/<sid>/.lock/info.json` eh mecanismo
+interno de controle de concorrencia do session-store (ver §6.5 do
+peer-spawn/session-store em codigo). Lock diretorio eh criado e removido
+pelo server dentro do ciclo de `ask_peer`; seu conteudo nao eh parte do
+registro auditavel da sessao e nao esta coberto pela invariante de
+imutabilidade acima. Caller/ferramentas externas continuam proibidas de
+mutar o lock (invadir controle de concorrencia eh outro tipo de violacao
+estrutural), mas a razao eh diferente da invariante de historico.
+
+Compactacao/compressao ocorre EXCLUSIVAMENTE em:
+- Transcript montado pelo caller em path temp, proprio da sessao atual.
+- Ledger opcional, que pertence ao caller (§6.5).
+
+Ambos artefatos montados pelo caller, ambos fora da arvore
+`~/.cross-review/<sid>/` gerenciada pelo server.
 
 ### 6.7 Matriz minima de evidencia por classe de artefato (ATUALIZADO como FOLLOW-UP nao-bloqueante)
 
@@ -561,7 +695,7 @@ caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 
 ---
 
-## 7. Resumo das convencoes para uso imediato (ATUALIZADO em v4)
+## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.1)
 
 | Convencao | Acao do caller |
 |-----------|---------------|
@@ -574,26 +708,37 @@ caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
 | Warnings | `parser_warnings` nao eh telemetria morta: inspecionar e agir (peer drift ou schema violation) |
 | Modelo | Peer sempre invocado com top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); sem fallback silencioso |
 | Encoding | ASCII-only em arquivos em disco; prompts podem ter acentos |
-| Continuidade | Manter ledger ASCII-only; anexar em sessoes subsequentes |
+| Continuidade | Ledger opcional (§6.5); quando adotado, manter ASCII-only e anexar em sessoes subsequentes |
+| Overflow | Yellow 50k / Red 100k chars no transcript (§6.6.1); compressao non-destructive (§6.6.4) com referencia aos imutaveis; meta.json sem mudanca de API (§6.6.3 YAGNI) |
 | Janela de transicao | Durante upgrade do server, peer emite ambos formatos ate reload confirmado |
 
 ---
 
-## 8. Criterios de aceitacao da v4
+## 8. Criterios de aceitacao (atualizados em v4.1)
 
-Esta spec v4 foi aprovada bilateralmente (Claude + Codex) na sessao
-cross-review 08cd61e6 (2026-04-24, 2 rodadas). Uma vez aceita e publicada:
-- Substitui `cross-review-workflow-spec.md` v3.
+- Spec v4 foi aprovada bilateralmente (Claude + Codex) na sessao
+  cross-review 08cd61e6 (2026-04-24, 2 rodadas).
+- Spec v4.1 foi aprovada bilateralmente (Claude + Codex) na sessao
+  cross-review a847f897 (2026-04-24). v4.1 eh revisao spec-only de v4 --
+  nao toca em codigo.
+
+Uma vez aceita e publicada:
+- Substitui revisao anterior in-place.
 - Referenciada como a spec ativa em novas sessoes.
 - Fica congelada ate nova sessao de spec ser aberta (sem amend silencioso).
 
-Follow-ups pos-v4 (registrados mas fora do escopo desta release):
-- Secao 6.6 (politica de overflow/truncamento de transcript) -- proxima
+Follow-ups pos-v4.1 (registrados mas fora do escopo desta release):
+- Secao 6.7 (matriz minima de evidencia por classe de artefato) -- proxima
   sessao dedicada.
-- Secao 6.7 (matriz minima de evidencia por classe de artefato) -- sessao
-  dedicada apos 6.6.
 - Secao 6.9.2: auto-discovery controlado de modelo top-level com
   auditabilidade (registrado como follow_up do Codex na sessao 08cd61e6).
 - Secao 2.3.1: reconsideracao de `caller_requests`/`follow_ups` como arrays
   de objetos (em vez de strings) caso strings se mostrem insuficientes em
   uso real (registrado como follow_up do Codex na sessao 08cd61e6).
+- Drift de versao entre `package.json` (0.3.0-alpha), `package-lock.json`
+  (0.2.0-alpha) e `src/server.js` (0.4.0-alpha) -- saneamento de higiene de
+  versionamento em sessao separada (registrado como follow_up do Codex na
+  sessao a847f897).
+- Gatilho opcional para `rounds_limit`/`session_digest` em `session_read` --
+  somente se/quando meta.json real atingir pressao de overflow mensuravel
+  (§6.6.3).
