@@ -1061,11 +1061,13 @@ Follow-ups post-v4.6 (registered but out of scope for this release):
   in session 9c56005b; out of scope for section 6.9.2.1 which is
   exclusively advisory.
 - Normalize historical non-ASCII drift (U+00A7) in
-  docs/workflow-spec.md (20 occurrences in v4.2 and earlier):
-  registered as a follow-up in session 9c56005b. Kept out of scope
-  for v4.3 by bilateral decision; v4.3 transliterated only its own
-  new occurrences. Suggested handling: a dedicated session or
-  housekeeping pass before v4.7.
+  docs/workflow-spec.md -- effectively RESOLVED in commit ffee38d
+  (Phase B3 bulk translation under v4.6 section 6.10). Pre-v4.6 count:
+  24 occurrences; post-v4.6 count: 1 occurrence, located inside the
+  v4.2 section 8 sealed entry ("promovendo section 6.7 (matriz..."),
+  which is non-retroactive per section 6.10 exception (b). No further
+  housekeeping is needed; the remaining occurrence is preserved by
+  design.
 - Schema v5 with objects for `caller_requests`/`follow_ups` instead of
   arrays of strings -- SUSPENDED by YAGNI in session bd8c3cfb
   (2026-04-24, outcome=converged in 2 rounds). Empirical evidence: v4
