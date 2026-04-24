@@ -814,7 +814,7 @@ por secao 6.9.2.1 sem tocar em comportamento de runtime.
 
 ---
 
-## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.4)
+## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.5)
 
 | Convencao | Acao do caller |
 |-----------|---------------|
@@ -833,7 +833,20 @@ por secao 6.9.2.1 sem tocar em comportamento de runtime.
 
 ---
 
-## 8. Criterios de aceitacao (atualizados em v4.4)
+## 8. Criterios de aceitacao (atualizados em v4.5)
+
+**Regra editorial normativa (NOVO em v4.5):** Entradas nesta secao que usem
+linguagem de aprovacao bilateral, incluindo "Spec vX.Y foi aprovada
+bilateralmente...", SO PODEM ser gravadas em disco apos READY bilateral
+confirmado na sessao cross-review referenciada, com
+`session_check_convergence` retornando `converged=true`. Durante a sessao
+(pre-sealing), a entrada deve usar "em revalidacao bilateral (sessao XXX,
+iniciada DATA)" ou equivalente. A promocao de "em revalidacao" para
+"aprovada bilateralmente" exige edit separado pos-sealing. Esta regra nao
+reescreve retroativamente entradas historicas ja seladas. Historico
+empirico: aplicado de facto em v4.1 (a847f897), v4.2 (f1fdbee4), v4.3
+(9c56005b); pulado em v4.4 (bd8c3cfb). Esta clausula remedia a
+inconsistencia.
 
 - Spec v4 foi aprovada bilateralmente (Claude + Codex) na sessao
   cross-review 08cd61e6 (2026-04-24, 2 rodadas).
@@ -857,13 +870,22 @@ por secao 6.9.2.1 sem tocar em comportamento de runtime.
   "Schema v5 com objetos" de 08cd61e6 -- nao toca em codigo, nao muda
   o contrato do bloco estruturado, nao altera parser. Registra criterio
   de reabertura baseado em falha concreta v4-era.
+- Spec v4.5 foi aprovada bilateralmente (Claude + Codex) na sessao
+  cross-review 843d57eb (2026-04-24, 3 rodadas). v4.5 eh revisao
+  spec-only de v4.4 adicionando preambulo normativo no inicio desta
+  secao formalizando o padrao "em revalidacao bilateral -> aprovada
+  bilateral" registrado como follow-up na sessao f1fdbee4. SPEC-only
+  -- nao toca em codigo, nao muda API, nao altera parser. A propria
+  promocao desta entrada de "em revalidacao bilateral" para "aprovada
+  bilateralmente" foi feita em edit separado pos-sealing, honrando
+  auto-demonstrativamente a clausula que esta entrada estabelece.
 
 Uma vez aceita e publicada:
 - Substitui revisao anterior in-place.
 - Referenciada como a spec ativa em novas sessoes.
 - Fica congelada ate nova sessao de spec ser aberta (sem amend silencioso).
 
-Follow-ups pos-v4.4 (registrados mas fora do escopo desta release):
+Follow-ups pos-v4.5 (registrados mas fora do escopo desta release):
 - Pre-spawn existence check defensivo (abort-only se modelo descontinuado
   pelo provider): registrado como follow_up separado nesta sessao
   9c56005b; fora de escopo de secao 6.9.2.1 que eh exclusivamente
