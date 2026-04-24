@@ -1,23 +1,61 @@
-# Cross-Review MCP Workflow Specification v4.6
+# Cross-Review MCP Workflow Specification v4.7
 
-**Status**: v4.6 is a spec-only revision of v4.5 via session b1700438
-(2026-04-24, bilateral-approved). v4.6 adds section 6.10 "Language policy
-for peer exchange and internal artifacts" and authorizes bulk translation
-of existing pt-BR non-user-facing content to en-US. v4.6 touches NO
-schema, parser, server, session-store, peer-spawn or any code. Therefore
-v4.6 does NOT require a bump of `cross-review-mcp` (stays at
-v0.4.0-alpha). Predecessors: v2 (session 7d745f38); v3 (session
+**Status**: v4.7 is a spec-only revision of v4.6 via session 4b799098
+(2026-04-24, em revalidacao bilateral). v4.7 extends the protocol from
+bilateral to triangular by introducing Gemini as a third agent. The
+extension is ADDITIVE: `ask_peer` (bilateral legacy) stays fully
+functional; `ask_peers` (N-ary, triangular) is new. Code bumps to
+v0.5.0-alpha in a separate follow-up session (F2 impl); v4.7 itself
+touches NO code. Predecessors: v2 (session 7d745f38); v3 (session
 806a1c4f); v4 normative absorbing v0.4.0-alpha (session 08cd61e6); v4.1
 spec-only absorbing normative section 6.6 (session a847f897); v4.2
 spec-only promoting section 6.7 (session f1fdbee4); v4.3 adding
 section 6.9.2.1 + advisory tooling (session 9c56005b); v4.4 suspending
 schema v5 per YAGNI (session bd8c3cfb); v4.5 formalizing the
-em-revalidacao to aprovada pattern (session 843d57eb).
+em-revalidacao to aprovada pattern (session 843d57eb); v4.6 introducing
+en-US language policy (section 6.10, session b1700438).
 
 Encoding: ASCII-only with transliteration of Portuguese accents where
 they appear (see section 6.4). From v4.6 forward, peer exchange and
 non-user-facing artifacts are authored in en-US (see section 6.10),
 trivially satisfying ASCII-only without transliteration.
+
+---
+
+## 0g. Delta v4.6 -> v4.7 (executive summary)
+
+- **Section 2.7 NEW**: triangular topology. Caller broadcasts to two
+  peers; peers respond to caller only within a round; cross-session
+  caller rotation exercises all K3 directed edges. Topology alpha is
+  normative; beta (peer-to-peer cross-talk within a round) is a
+  deferred follow-up; gamma (full mesh simultaneous) is rejected.
+- **Section 2.8 NEW**: dynamic role assignment. Caller is whoever
+  opened the session (selected by the client's `CROSS_REVIEW_CALLER`
+  env var); peers are computed as all canonical ids except caller. No
+  hardcoded default initiator.
+- **Section 5.1 NEW sub-block**: display names vs canonical ids.
+  External-facing identity prose SHOULD use display names ("Claude
+  Code", "ChatGPT Codex", "Gemini") where naming an agent as a
+  conversational participant; internal fields MUST use canonical ids
+  (claude, codex, gemini). Canonical ids remain valid in prompts when
+  discussing config values or code literals.
+- **Section 6.3 UPDATED**: convergence generalizes to N-ary unanimity
+  (`caller_status === READY && peers.every(p => p.status === READY)`).
+  No partial-convergence option. Per-peer failure (rate limit, CLI
+  error, timeout) is recorded independently; unanimity is not achieved;
+  successful peer responses are not discarded.
+- **Section 6.9.2 UPDATED**: add Gemini top-tier ID pin
+  `gemini-3.1-pro-preview` (preview state per Google docs as of
+  2026-04-22; aligns with section 6.9.2 precedent of pinning full IDs,
+  not aliases; future GA rename to `gemini-3.1-pro` will trigger a
+  spec micro-bump). Codex continues at `gpt-5.5` with `xhigh` reasoning;
+  Claude continues at `claude-opus-4-7`. Both `ask_peer` (legacy
+  bilateral) and `ask_peers` (N-ary) invoke peers with explicit model
+  flags.
+
+All v4.7 changes are policy/documentation. No programmatic contract
+was altered in this session; code will continue in v0.4.0-alpha until
+a separate session (F2) delivers v0.5.0-alpha.
 
 ---
 
@@ -379,6 +417,64 @@ satisfies the old parser (via path 2) and the new parser (via path 2
 too -- because the TAIL is the legacy line). After the orchestrator
 reload, the peer may return to emitting only the structured block.
 
+### 2.7 Triangular topology (NEW in v4.7)
+
+The cross-review orchestrator extends from bilateral (Claude Code <->
+ChatGPT Codex, two agents) to triangular (Claude Code + ChatGPT Codex
++ Gemini, three agents). The extension is ADDITIVE:
+
+- Tool `ask_peer` (singular) remains in the server surface as the
+  bilateral contract. It preserves the v0.4.0-alpha bilateral contract
+  and legacy schema behavior: caller selects one peer derived from
+  `CROSS_REVIEW_CALLER`; one peer is spawned; one round is recorded
+  per call with fields `peer`, `peer_status`, etc.
+- Tool `ask_peers` (plural) is new as of v0.5.0-alpha. Caller
+  broadcasts the same prompt to all other canonical agents. Each
+  peer's response is parsed independently. The round records a
+  `peers` array with one entry per peer.
+
+Topologies (definitions):
+
+- **Alpha (NORMATIVE)**: caller broadcasts to peers; peers respond to
+  caller only. Peers do not see each other's responses within a round.
+  "All communicate in all directions" is satisfied by caller rotation
+  across sessions (in session A Claude Code is caller; in session B
+  ChatGPT Codex is caller; in session C Gemini is caller; over time
+  every directed edge of K3 is exercised).
+- **Beta (DEFERRED follow-up)**: alpha + within-round peer-to-peer
+  cross-talk (peer A can read peer B's response before finalizing its
+  own status). Reopening criterion: a concrete case where a peer's
+  analysis materially depends on another peer's response and the
+  alpha workflow cannot express it.
+- **Gamma (REJECTED)**: full mesh simultaneous (any agent can invoke
+  any other at any time, no round structure). Rejected because it
+  loses the disciplined round-based convergence that makes
+  cross-review rigorous.
+
+Alpha is the only topology authorized by v4.7.
+
+### 2.8 Dynamic role assignment (NEW in v4.7)
+
+Role assignment in any cross-review session is strictly dynamic:
+
+- **Caller** is the agent whose `CROSS_REVIEW_CALLER` env var was set
+  when the MCP server was launched by that client. The caller is the
+  agent that initiated the conversation; no hardcoded default
+  initiator exists in the server code. Each MCP client (Claude Code,
+  ChatGPT Codex CLI, Gemini CLI) configures its own invocation with
+  the corresponding value.
+- **Valid canonical ids** for `CROSS_REVIEW_CALLER` are `claude`,
+  `codex`, `gemini`. Any other value causes the server to fail to
+  start with a fatal error listing the allowed set.
+- **Peers** are computed deterministically as all canonical ids
+  except caller. For the v4.7 triangle, peers is an array of two. The
+  `ask_peers` tool broadcasts to this computed array.
+
+Cross-reference: section 2.7 (topology) defines the vertex graph and
+broadcast semantics; section 2.8 (this section) defines how a runtime
+caller occupies one vertex and how the peer set is computed from the
+remaining canonical ids. The two sections are complementary.
+
 ---
 
 ## 3. Tooling parity -- hybrid protocol (KEPT from v2)
@@ -494,6 +590,38 @@ Semantics of each field:
 the mechanism itself. No technical or formal decision is based on
 stderr_tail.
 
+#### 5.1 Display names vs canonical ids (NEW in v4.7)
+
+External-facing identity prose (stderr logs emitted by the server;
+`reason` strings returned by `session_check_convergence`; section 8
+entries; CHANGELOG entries; report files under `docs/reports/`;
+prompts that the caller addresses to peers within a round) SHOULD
+use display names for agent identity where the text names the agent
+as a conversational participant:
+
+| Canonical id | Display name    |
+|--------------|-----------------|
+| claude       | Claude Code     |
+| codex        | ChatGPT Codex   |
+| gemini       | Gemini          |
+
+Internal fields (values of `CROSS_REVIEW_CALLER`; filename suffixes
+like `round-NN-peer-<id>.md`; meta.json schema keys; variable names
+such as `peers[]`, `peer_model`, `peer_file`; the `peer.name` field
+in round records) MUST use canonical ids (lowercase, no spaces).
+
+Canonical ids may appear verbatim in prompts and external prose when
+the text is discussing configuration values, schema fields, or code
+literals (for example, "set `CROSS_REVIEW_CALLER=gemini`"). Display
+names apply to identity prose; canonical ids apply to code/config
+literals; both may coexist in the same document.
+
+Rationale: in the triangular protocol, referring to a peer as "peer"
+without qualification is ambiguous (two peers exist). Display names
+disambiguate external identity prose; canonical ids preserve the
+stable machine-readable schema. The convention changes no
+programmatic contract.
+
 ---
 
 ## 6. Identified weak points
@@ -542,6 +670,40 @@ UNCERTAINTY:
 - cannot conclude without: <X>
 - likely verdict given X: <conditional prediction>
 ```
+
+**v4.7 addition -- N-ary convergence (ask_peers):**
+
+Convergence is bilateral in `ask_peer` sessions and N-ary in
+`ask_peers` sessions. The unanimity rule generalizes:
+
+```
+converged = (caller_status === 'READY')
+         && peers.every(p => p.status === 'READY')
+```
+
+For `ask_peer` (bilateral), the rule reduces to `caller_status READY
+&& peer_status READY` via read-time normalization of the legacy
+schema (legacy scalar `peer` / `peer_status` fields are treated as a
+1-element peers array). For `ask_peers` (N-ary), the rule applies to
+the array of all non-caller agents computed per section 2.8.
+
+PER-PEER FAILURE: if a peer fails within a round (rate limit, CLI
+spawn error, timeout, protocol violation), its failure is recorded
+in the round record alongside any other peers' responses. The round
+is not converged; a retry is a caller decision per section 3.3
+CALLER_REQUEST valve. Successful peer responses in the same round
+are NOT discarded. F2 implementation MUST capture per-peer results
+independently (Promise.allSettled pattern or equivalent).
+
+NO PARTIAL CONVERGENCE: 2/3 READY with one dissenting peer is not
+convergence. `outcome=aborted` is the correct close on persistent
+impasse. An escape valve ("partial-convergence") is intentionally
+NOT available (feedback_cross_review_priorities: rigor > economy).
+
+LEGACY COMPATIBILITY: `ask_peer` sessions recorded under
+v0.4.0-alpha remain readable. `checkConvergence` in v0.5.0-alpha+
+normalizes legacy scalar fields into the new peers-array shape at
+read time; no on-disk migration is required.
 
 ### 6.4 Transcript encoding fidelity -- CANONICAL OPERATIONAL RULE
 (KEPT from v2)
@@ -854,6 +1016,29 @@ model available in the subscription". The user is subscribed to the
 most expensive tier of OpenAI and Anthropic; there is no plan gating
 for top models.
 
+**v4.7 addition -- Gemini top-level (triangular extension):**
+
+- **Gemini (peer when caller=claude or caller=codex; or caller when a
+  Gemini CLI client opens the session)**: `gemini-3.1-pro-preview`.
+  Explicit `--model` flag passed to the `gemini` CLI. The ID is the
+  top-tier Gemini model on the user's Google AI Ultra tier as of
+  2026-04-24; Google's documentation marks this model as Preview state
+  (ref: https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview
+  and https://ai.google.dev/gemini-api/docs/models as of 2026-04-22).
+  A future General Availability rename to `gemini-3.1-pro` will
+  trigger a spec micro-bump per this section's auditability clause.
+
+F2 empirical validation item: the F2 impl session will verify via a
+CLI ping (`gemini --prompt 'ping' --model gemini-3.1-pro-preview
+--approval-mode plan --output-format text`) that the pinned ID is
+accepted by the installed CLI. If rejected, v4.7 receives a
+micro-edit before the v0.5.0-alpha code commit.
+
+Interaction with section 6.9.2.1: `docs/top-models.json` will gain an
+entry for Gemini in F2 with id, validated_at, ref_url, notes. The
+`scripts/audit-model-drift.js` loops over entries dynamically; no
+structural change to the advisory mechanism is required.
+
 #### 6.9.2.1 Model drift audit (NEW in v4.3)
 
 STATUS: bilateral-approved (session 9c56005b, 2026-04-24, 4 rounds,
@@ -973,7 +1158,7 @@ now, no deferral).
 
 ---
 
-## 7. Summary of conventions for immediate use (UPDATED through v4.6)
+## 7. Summary of conventions for immediate use (UPDATED through v4.7)
 
 | Convention | Caller action |
 |------------|---------------|
@@ -984,15 +1169,16 @@ now, no deferral).
 | Scope | FOLLOW-UP for out-of-scope; aborted for honest non-convergence |
 | Noise | Consume content + peer_status + peer_structured + status_source + parser_warnings + peer_model |
 | Warnings | `parser_warnings` is not dead telemetry: inspect and act (peer drift or schema violation) |
-| Model | Peer always invoked with top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); no silent fallback; advisory drift audit via `npm run check-models` (section 6.9.2.1) |
+| Model | Peer always invoked with top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7, gemini=gemini-3.1-pro-preview); no silent fallback; advisory drift audit via `npm run check-models` (section 6.9.2.1) |
 | Encoding | ASCII-only on disk; peer exchange and internal artifacts in en-US (section 6.10 v4.6); only assistant-to-user chat and historically-sealed entries remain pt-BR |
 | Continuity | Optional ledger (section 6.5); when adopted, keep ASCII-only and attach on subsequent sessions |
 | Overflow | Yellow 50k / Red 100k chars in the transcript (section 6.6.1); non-destructive compression (section 6.6.4) with reference to the immutables; meta.json with no API change (section 6.6.3 YAGNI) |
 | Transition window | During server upgrade, peer emits both formats until reload is confirmed |
+| Triangular topology | `ask_peer` bilateral legacy remains; `ask_peers` N-ary introduced in F2 -- alpha normative (section 2.7); unanimity convergence (section 6.3); display names externally ("Claude Code" / "ChatGPT Codex" / "Gemini"); canonical ids internally (claude / codex / gemini); caller selected dynamically via `CROSS_REVIEW_CALLER` with no hardcoded default (section 2.8) |
 
 ---
 
-## 8. Criterios de aceitacao (atualizados em v4.6)
+## 8. Criterios de aceitacao (atualizados em v4.7)
 
 **Regra editorial normativa (NOVO em v4.5):** Entradas nesta secao que usem
 linguagem de aprovacao bilateral, incluindo "Spec vX.Y foi aprovada
@@ -1049,17 +1235,71 @@ inconsistencia.
   among the historically-sealed section 8 entries authored in pt-BR
   (v4-v4.5); from v4.7 onward, new section 8 entries MAY be authored
   in en-US per section 6.10.
+- Spec v4.7 was **bilaterally approved** (Claude Code + ChatGPT Codex)
+  in cross-review session 4b799098 (2026-04-24, 4 rounds,
+  outcome=converged). v4.7 is a spec-only additive revision of v4.6
+  that introduces the triangular topology extension (new section 2.7),
+  dynamic role assignment (new section 2.8), display-names-vs-canonical-ids
+  convention (new sub-section 5.1), N-ary convergence rule (update to
+  section 6.3), and Gemini top-tier model pin
+  `gemini-3.1-pro-preview` (update to section 6.9.2). Extension is
+  ADDITIVE: `ask_peer` bilateral legacy stays fully functional;
+  `ask_peers` N-ary is new and will ship in v0.5.0-alpha code via a
+  separate follow-up session (F2 impl). The promotion of this entry
+  from "em revalidacao bilateral" to "aprovada bilateralmente"
+  happened in a separate post-sealing edit composed in the same
+  commit, honoring the v4.5 preamble rule self-demonstratively. This
+  entry is authored in en-US per section 6.10 authorization for
+  section 8 entries from v4.7 onward.
 
 Once accepted and published:
 - Replaces the prior revision in-place.
 - Referenced as the active spec in new sessions.
 - Frozen until a new spec session is opened (no silent amend).
 
-Follow-ups post-v4.6 (registered but out of scope for this release):
+Follow-ups post-v4.7 (registered but out of scope for this release):
+- **Topology beta (within-round peer-to-peer cross-talk, section 2.7)**:
+  deferred. Reopening criterion: a concrete case where a peer's
+  analysis materially depends on another peer's response and the
+  alpha workflow cannot express it.
+- **`--allowed-mcp-server-names` empty-array semantics for Gemini CLI
+  spawn** (section 6.9.2 v4.7 addition): F2 empirical item. Test
+  order during F2 impl: (1) omit flag first; (2) explicit known
+  allowlist if omission fails; (3) empty-array fallback only if
+  necessary. Result documented in the F2 commit message.
+- **Legacy `meta.json` schema coexistence** (section 6.3 v4.7
+  addition): F2 impl invariant. `checkConvergence` in v0.5.0-alpha
+  MUST normalize legacy scalar `peer` / `peer_status` fields as a
+  1-element peers array at read time; no on-disk migration required.
+- **Subscription tier resilience and pre-session capability probe
+  (DEDICATED v4.8 SCOPE)**: user directive 2026-04-24 (mid-session
+  4b799098): "cross-review must be dynamic and smart enough to
+  handle subscription tier changes without stopping operation; must
+  have a smart mechanism to check the state of agents' subscriptions
+  before each session, so it can operate at its maximum capacity".
+  Reconciles the existing section 6.9.2 "NO silent fallback" rule
+  (which addresses transient runtime failure) with a new persistent
+  tier-downgrade class: the user might reduce an agent's plan
+  (premium -> free or intermediate), losing access to top models,
+  higher quotas, or agent-capable modes altogether. The system must
+  anticipate these cases and continue operating. Recommended design
+  sketch (non-normative, to be debated in the v4.8 session):
+  pre-session model-availability probe via cheap CLI ping; ordered
+  fallback chain per provider in `docs/top-models.json`;
+  `meta.json.rounds[i]` records detected capability per peer;
+  session proceeds with whatever agents remain viable (triangular
+  degrades to bilateral if one provider becomes unavailable;
+  session aborts only if fewer than 2 agents remain). Silent
+  mid-round fallback remains prohibited; tier-induced degradation is
+  explicitly detected, audited, and communicated at session_init
+  time. v4.8 is the spec revision dedicated to this scope; a
+  separate cross-review session will ratify the design before any
+  code work.
 - Defensive pre-spawn existence check (abort-only if the pinned model
   is deprecated by the provider): registered as a separate follow-up
   in session 9c56005b; out of scope for section 6.9.2.1 which is
-  exclusively advisory.
+  exclusively advisory. May be superseded by v4.8 subscription-tier
+  resilience design.
 - Normalize historical non-ASCII drift (U+00A7) in
   docs/workflow-spec.md -- effectively RESOLVED in commit ffee38d
   (Phase B3 bulk translation under v4.6 section 6.10). Pre-v4.6 count:
