@@ -1,24 +1,86 @@
-# Cross-Review MCP Workflow Specification v4.7
+# Cross-Review MCP Workflow Specification v4.8
 
-**Status**: v4.7 is a spec-only revision of v4.6 via session 4b799098
-(2026-04-24, em revalidacao bilateral). v4.7 extends the protocol from
-bilateral to triangular by introducing Gemini as a third agent. The
-extension is ADDITIVE: `ask_peer` (bilateral legacy) stays fully
-functional; `ask_peers` (N-ary, triangular) is new. Code bumps to
-v0.5.0-alpha in a separate follow-up session (F2 impl); v4.7 itself
-touches NO code. Predecessors: v2 (session 7d745f38); v3 (session
-806a1c4f); v4 normative absorbing v0.4.0-alpha (session 08cd61e6); v4.1
-spec-only absorbing normative section 6.6 (session a847f897); v4.2
-spec-only promoting section 6.7 (session f1fdbee4); v4.3 adding
-section 6.9.2.1 + advisory tooling (session 9c56005b); v4.4 suspending
-schema v5 per YAGNI (session bd8c3cfb); v4.5 formalizing the
-em-revalidacao to aprovada pattern (session 843d57eb); v4.6 introducing
-en-US language policy (section 6.10, session b1700438).
+**Status**: v4.8 is a spec-only revision of v4.7 via session 5fce39ce
+(2026-04-24, em revalidacao bilateral). v4.8 adds section 6.9.3
+"Subscription tier resilience and transient failure handling" with
+six subsections (absorbing operator directives D3 persistent tier
+downgrade + D4 moderation flags and rate limits + D5 outages and
+overload), a clarification paragraph to section 6.9.2 scoping
+"NO silent fallback" to mid-round behavior, and a new Section 7
+summary row. v4.8 touches NO code;
+code remains v0.4.0-alpha until the integrated F2 impl session
+delivers v0.5.0-alpha with both v4.7 triangular extension and v4.8
+probe + degradation mechanisms. Predecessors: v2 (session 7d745f38);
+v3 (session 806a1c4f); v4 normative absorbing v0.4.0-alpha (session
+08cd61e6); v4.1 spec-only absorbing section 6.6 (session a847f897);
+v4.2 spec-only promoting section 6.7 (session f1fdbee4); v4.3 adding
+section 6.9.2.1 advisory drift audit (session 9c56005b); v4.4
+suspending schema v5 per YAGNI (session bd8c3cfb); v4.5 formalizing
+the em-revalidacao to aprovada pattern (session 843d57eb); v4.6
+language policy section 6.10 (session b1700438); v4.7 triangular
+topology additive extension (session 4b799098, bilateral-approved,
+commit 3f89435).
 
 Encoding: ASCII-only with transliteration of Portuguese accents where
-they appear (see section 6.4). From v4.6 forward, peer exchange and
-non-user-facing artifacts are authored in en-US (see section 6.10),
-trivially satisfying ASCII-only without transliteration.
+they appear (see section 6.4). Peer exchange and non-user-facing
+artifacts are authored in en-US (see section 6.10), trivially
+satisfying ASCII-only without transliteration.
+
+---
+
+## 0h. Delta v4.7 -> v4.8 (executive summary)
+
+- **Section 6.9.3 NEW** with six subsections:
+  - **6.9.3.1 Pre-session capability probe**: minimal CLI invocation
+    per canonical agent at `session_init`; probes run in parallel
+    across providers; the walk over each provider's `fallback_chain`
+    is sequential. Deterministic failure classes defined
+    (unreachable_with_pinned_id, response_timeout,
+    spawn_error_or_cli_missing, auth_or_permission_denied, other).
+    Tool-use-not-verified is a capability note, not a failure.
+  - **6.9.3.2 Fallback chain in top-models.json**: per-provider
+    `fallback_chain` ordered array of model ids, minimum length 1,
+    with invariant `fallback_chain[0] === id`. This is `session_init`
+    probe input (NEW runtime role for top-models.json since v4.3).
+  - **6.9.3.3 Graceful degradation rules**: triangular session when
+    at least 2 peers are viable; bilateral when exactly 1 peer is
+    viable; session aborts at init when 0 peers are viable. Mid-
+    session peer failure does NOT trigger fallback walk.
+  - **6.9.3.4 Session-level `meta.capability_snapshot`** recording
+    probe outcomes; `rounds[i].peers[]` contains only active peers
+    (never excluded); active-peer records carry
+    `peer_capability_tier` ("top" | "fallback").
+  - **6.9.3.5 Interaction with section 6.9.2.1**: `id` remains
+    advisory (drift-gated); `fallback_chain` is runtime probe input
+    (not drift-gated). Dual role formalized.
+  - **6.9.3.6 Resilience to transient provider failures (NEW scope
+    D4/D5, absorbed mid-session)**: mid-round treatment for
+    `prompt_flagged_by_provider`, `rate_limit_exceeded`, and
+    `provider_error_transient` (outage/overload/5xx) classes.
+    Same-model retry-once with back-off allowed; server-side
+    auto-rephrase of flagged prompts prohibited (surfaced to caller
+    for judgment); silent model switch mid-round prohibited
+    (section 6.9.2 rule preserved); peers NOT excluded mid-round on
+    transient failure. New `transient_failure` response field plus
+    `attempts` array under `rounds[i].peers[j]` for audit. Clients
+    MUST distinguish parse-null (protocol violation) from
+    transient-null (transient failure) by checking
+    `transient_failure != null`. Cross-reference to 6.9.1 for
+    non-stop handling of mandatory local reasoning dependencies
+    (ultrathink / code-reasoning); the two domains are NOT
+    conflated.
+- **Section 6.9.2 CLARIFIED** (small added paragraph): "NO silent
+  fallback" scope is explicitly mid-round; pre-session adaptive
+  path under 6.9.3 is audited, not silent.
+- **Section 7 summary table** updated with a new Tier resilience
+  row.
+- **Section 8** gains v4.8 entry per the v4.5 preamble rule.
+- **`docs/top-models.json`** schema extends to `schema_version: 2`
+  with per-provider `fallback_chain` field (F2 populates concrete
+  model ids; description text updated to reflect dual role).
+
+All v4.8 changes are policy/documentation. No programmatic contract
+was altered in this session.
 
 ---
 
@@ -1039,6 +1101,20 @@ entry for Gemini in F2 with id, validated_at, ref_url, notes. The
 `scripts/audit-model-drift.js` loops over entries dynamically; no
 structural change to the advisory mechanism is required.
 
+**Clarification (added in v4.8).** The "NO silent fallback" rule in
+this section specifically addresses MID-ROUND behavior. Pre-session
+deliberate capability probing and adaptation to the operator's
+currently reachable models are governed by section 6.9.3 and are
+NOT silent: they are audited in `meta.capability_snapshot` and
+reported to the caller at `session_init` time. Mid-round silent
+downgrade remains prohibited. If an active peer fails during a round
+(not at session_init), the round aborts per this section; the server
+does NOT silently try the next fallback-chain entry -- that decision
+is reserved to a new explicit session with a fresh probe (section
+6.9.3.1). Same-model retry-once-with-backoff for transient provider
+failures (rate limit / 5xx / outage) is permitted per section
+6.9.3.6 and is explicitly distinct from silent model switching.
+
 #### 6.9.2.1 Model drift audit (NEW in v4.3)
 
 STATUS: bilateral-approved (session 9c56005b, 2026-04-24, 4 rounds,
@@ -1101,6 +1177,247 @@ eliminating dynamic CLI auto-discovery. Interpreting "controlled
 auto-discovery" as "auditable drift detection", the follow-up is
 satisfied by section 6.9.2.1 without touching runtime behavior.
 
+#### 6.9.3 Subscription tier resilience and transient failure handling (NEW in v4.8)
+
+The operator's available model set may change between sessions (for
+example, changes to the subscription plan of any provider). The top
+model pinned in section 6.9.2 for a given provider may become
+unreachable at any future `session_init`. Additionally, providers may
+experience transient mid-round failures (content moderation flags,
+rate limits, outages) that interrupt a request without representing
+a permanent change. A session cannot productively run if it aborts
+every time any of these happen; v4.8 introduces a pre-session
+deliberate adaptation path (6.9.3.1 through 6.9.3.5) and a mid-round
+transient failure handling regime (6.9.3.6) that together keep
+section 6.9.2 "NO silent fallback" intact while satisfying the
+invariant that cross-review-mcp MUST NOT stop due to provider-side
+conditions it can reasonably handle.
+
+##### 6.9.3.1 Pre-session capability probe
+
+At `session_init`, before the first round can be requested, the
+server probes each canonical agent for the ability to invoke the
+pinned model (plus any fallbacks in the provider's ordered chain).
+The probe is a minimal CLI invocation per agent using the canonical
+spawn path and read-only flags identical to real peer spawn, with a
+short prompt (e.g., "ping") and a per-provider total time budget
+(default: 30 seconds, covering all fallback-chain attempts for that
+provider).
+
+- Probes run in parallel across the three providers
+  (`Promise.allSettled` pattern in the F2 impl).
+- Within a single provider, the walk over `fallback_chain` is
+  sequential: try the top id first; on deterministic failure, try
+  the next entry; repeat until success or the chain is exhausted.
+- The 30-second budget is the total per-provider allotment covering
+  ALL sequential attempts within that provider's chain.
+
+Deterministic failure classes recognized by the probe:
+
+- `unreachable_with_pinned_id`: provider explicitly responds that
+  the model is not available (not-found or equivalent).
+- `response_timeout`: no response within the per-provider budget.
+- `spawn_error_or_cli_missing`: CLI not installed or fails to start.
+- `auth_or_permission_denied`: provider rejects authentication.
+- `other`: unspecified failure not matching the above.
+
+Capability notes (informational, do not cause exclusion):
+
+- `tool_use_not_verified`: probe response arrived as text but the
+  probe did not verify tool invocation ability. Recorded as a
+  capability note. Caller-side obligations under section 6.9.1
+  (tri-tool availability of ultrathink + code-reasoning MCPs) are
+  unrelated to this probe note and remain hard gates in their own
+  right.
+
+##### 6.9.3.2 Fallback chain in top-models.json
+
+Each entry in `docs/top-models.json:entries.<provider>` gains a
+`fallback_chain` field: an ordered array of model id strings,
+most-capable-first, representing the operator's curated preference
+order.
+
+Invariants:
+
+- `fallback_chain[0] === id` (structural invariant; the F2 impl
+  adds a gate in `scripts/audit-model-drift.js`).
+- Minimum length: 1. A provider without a documented lower fallback
+  is represented as `fallback_chain: [id]`; this is the correct
+  representation, not a defect.
+- Ordering is semantic (most-capable-first) and relies on operator
+  curation, same precedent as the `id` field in section 6.9.2.1.
+
+`fallback_chain` is `session_init` probe input (NEW runtime role for
+top-models.json since v4.3). The file's description text is updated
+in the F2 impl to reflect this dual role; prior language implying
+"advisory-only" is qualified.
+
+top-models.json `schema_version` bumps from 1 to 2 in F2 to signal
+the shape change.
+
+##### 6.9.3.3 Graceful degradation rules
+
+Let N be the number of viable peers after the `session_init` probe
+(viable = probe succeeded with at least one entry in the provider's
+`fallback_chain`). N does NOT include the caller.
+
+- `N >= 2`: session proceeds at full triangular capacity (or N-ary
+  for N > 2; current triangle implies N in {0, 1, 2}).
+- `N == 1`: session proceeds as BILATERAL (caller + single active
+  peer). Functionally equivalent to a v0.4.0-alpha `ask_peer`
+  session.
+- `N == 0`: session ABORTS at `session_init` with an explicit error
+  naming the excluded providers and their failure classes.
+  Cross-review requires at least two participants by definition.
+
+Notes:
+
+- Degradation is deterministic from the snapshot; the caller sees
+  the degradation via `session_read` or the response of the first
+  `ask_peer` / `ask_peers` call after init.
+- Mid-session failure of an active peer does NOT trigger a
+  fallback-chain walk. Per section 6.9.2 mid-round rule, the round
+  aborts; transient failure treatment per section 6.9.3.6 allows
+  same-model retry only.
+
+##### 6.9.3.4 Session-level capability snapshot
+
+`meta.json` gains a new top-level field `capability_snapshot`
+written once at `session_init`:
+
+```
+"capability_snapshot": {
+  "probed_at": "<ISO timestamp>",
+  "active_peers": ["<canonical id>", ...],
+  "excluded_peers": ["<canonical id>", ...],
+  "per_provider": {
+    "<canonical id>": {
+      "selected_model": "<id or null>",
+      "tier": "top" | "fallback" | "excluded",
+      "capability_notes": ["<note>", ...],
+      "probe_duration_ms": <int>,
+      "attempted_chain": ["<id>", ...],
+      "excluded_reason": "<failure class>"
+    }
+  }
+}
+```
+
+`active_peers` and `excluded_peers` are disjoint subsets of the
+canonical id set minus the caller. `attempted_chain` is present
+whenever the selected model is not `fallback_chain[0]` OR the
+provider is excluded (documents the walk). `excluded_reason` is
+present only when `tier` is `excluded`.
+
+`rounds[i].peers[]` contains only active peers; their records gain
+a `peer_capability_tier` field with value `"top"` or `"fallback"`,
+mirroring the snapshot for self-contained audit of a round record.
+Excluded providers never appear in `rounds[i].peers[]`; the
+unanimity rule in section 6.3 applies over the array of active
+peers, unchanged.
+
+Tier enum (normative): `top` | `fallback` | `excluded`. Only `top`
+and `fallback` may appear in `rounds[i].peers[j].peer_capability_tier`;
+`excluded` is exclusively a snapshot-level classification.
+
+##### 6.9.3.5 Interaction with section 6.9.2.1 advisory drift audit
+
+`docs/top-models.json` now serves two distinct roles:
+
+- `entries.<provider>.id` remains an ADVISORY-only documentary pin,
+  gated by `scripts/audit-model-drift.js` against the constant pinned
+  in `src/lib/peer-spawn.js` per section 6.9.2.1 (v4.3 role,
+  preserved).
+- `entries.<provider>.fallback_chain` is RUNTIME input to the
+  `session_init` probe per section 6.9.3.1 (v4.8 NEW role). It is
+  NOT gated by the drift audit (the script continues gating only
+  `id`).
+
+The drift-audit F2 update must:
+
+- Add Gemini entry recognition (prior to F2 the script gates only
+  Codex and Claude IDs).
+- Add `schema_version: 2` validation.
+- Verify the invariant `fallback_chain[0] === id` per provider.
+
+These are F2 impl tasks, not spec-level. The spec only states the
+invariants and the separation of roles.
+
+##### 6.9.3.6 Resilience to transient provider failures (NEW scope D4/D5)
+
+Beyond persistent tier changes handled at session_init (6.9.3.1
+through 6.9.3.5), providers may experience mid-round transient
+conditions that interrupt a request without representing a
+permanent change. Observed classes (some confirmed empirically in
+session 5fce39ce round 1 before the agreed session prompt landed):
+
+- `prompt_flagged_by_provider`: provider content moderation flagged
+  the prompt.
+- `rate_limit_exceeded`: provider rate-limit temporarily exceeded
+  (typically HTTP 429 or the equivalent CLI signal).
+- `provider_error_transient`: provider-side HTTP 5xx, outage,
+  incident, or server overload.
+
+The invariant "cross-review-mcp must not stop due to transient
+provider-side conditions" applies. Treatment:
+
+- Server MAY retry the SAME prompt to the SAME model once with a
+  short back-off (default 10 seconds; respect `Retry-After` when
+  the provider supplies it) for `rate_limit_exceeded` and
+  `provider_error_transient` classes.
+- Server MUST NOT auto-rephrase a `prompt_flagged_by_provider`
+  prompt. The server lacks safe rephrasing context; risk of
+  distorting caller intent is too high. Flagged prompts are
+  surfaced to the caller along with the flagged response text for
+  caller judgment and manual rephrase.
+- Server MUST NOT silently switch to a fallback model mid-round
+  (section 6.9.2 rule preserved; section 6.9.3 pre-session path is
+  distinct).
+
+When treatment fails or is not attempted:
+
+- The round completes with `peer_status: null`,
+  `protocol_violation: false`, and a new response field
+  `transient_failure` set to the applicable class enum.
+- Session state is preserved. The caller may issue a new `ask_peer`
+  / `ask_peers` call (re-using the same round number when providing
+  a rephrased prompt for the same attempt, or opening a new round
+  at caller discretion).
+- An active peer is NOT excluded from `active_peers` due to a
+  transient mid-round failure. Exclusion is only a session_init
+  decision (section 6.9.3.3). Persistent mid-round transient
+  failures across multiple caller retries converge to
+  `outcome=aborted` at caller discretion, not server auto-exclusion.
+
+Clients MUST distinguish parse-null (protocol violation) from
+transient-null (transient failure) by checking the value of the
+new `transient_failure` field: non-null means transient failure;
+null combined with `protocol_violation: true` means parse failure
+per section 2.4.
+
+Audit trail in `rounds[i].peers[j]`:
+
+- `attempts`: array of objects
+  `{attempt_number, outcome, class, duration_ms, started_at,
+  signal_or_error_message, retry_after_ms}`. `signal_or_error_message`
+  carries the provider-reported reason string when available;
+  `retry_after_ms` carries the `Retry-After` value (or equivalent)
+  when the provider supplies it.
+- `retry_count`: integer summary. Redundant with `attempts.length`
+  but useful for dashboards and quick audit queries.
+- `transient_failure`: enum string or null.
+- Failed attempt bodies are saved in sibling files
+  `round-NN-peer-<id>-attempt-<N>.md`. The main `peer_file`
+  contains the first successful attempt; it is empty or absent if
+  all attempts failed transiently.
+
+Cross-reference: this subsection covers peer-provider request
+failures. Equivalent non-stop handling for mandatory LOCAL
+reasoning dependencies (ultrathink / code-reasoning MCP servers per
+section 6.9.1) is specified in section 6.9.1 and MUST NOT be
+silently conflated with peer-provider fallback logic. The two
+failure domains are normatively distinct.
+
 ### 6.10 Language policy for peer exchange and internal artifacts (NEW in v4.6)
 
 STATUS: bilateral-approved (session b1700438, 2026-04-24, 5 rounds,
@@ -1158,7 +1475,7 @@ now, no deferral).
 
 ---
 
-## 7. Summary of conventions for immediate use (UPDATED through v4.7)
+## 7. Summary of conventions for immediate use (UPDATED through v4.8)
 
 | Convention | Caller action |
 |------------|---------------|
@@ -1175,10 +1492,11 @@ now, no deferral).
 | Overflow | Yellow 50k / Red 100k chars in the transcript (section 6.6.1); non-destructive compression (section 6.6.4) with reference to the immutables; meta.json with no API change (section 6.6.3 YAGNI) |
 | Transition window | During server upgrade, peer emits both formats until reload is confirmed |
 | Triangular topology | `ask_peer` bilateral legacy remains; `ask_peers` N-ary introduced in F2 -- alpha normative (section 2.7); unanimity convergence (section 6.3); display names externally ("Claude Code" / "ChatGPT Codex" / "Gemini"); canonical ids internally (claude / codex / gemini); caller selected dynamically via `CROSS_REVIEW_CALLER` with no hardcoded default (section 2.8) |
+| Tier + transient resilience | Pre-session capability probe per agent with per-provider `fallback_chain` walk (6.9.3.1, 6.9.3.2); graceful degrade triangular -> bilateral when exactly one peer is excluded, abort only when <2 peers viable (6.9.3.3); session-level `meta.capability_snapshot` + active-peer-only rounds (6.9.3.4); dual runtime vs advisory role of top-models.json (6.9.3.5); mid-round transient provider failures (prompt flag / rate limit / 5xx) treated with same-model retry-once-with-backoff; server-side auto-rephrase prohibited; silent mid-round model switch remains prohibited (6.9.3.6); `transient_failure` enum in response distinguishes transient from protocol failure |
 
 ---
 
-## 8. Criterios de aceitacao (atualizados em v4.7)
+## 8. Criterios de aceitacao (atualizados em v4.8)
 
 **Regra editorial normativa (NOVO em v4.5):** Entradas nesta secao que usem
 linguagem de aprovacao bilateral, incluindo "Spec vX.Y foi aprovada
@@ -1251,6 +1569,31 @@ inconsistencia.
   commit, honoring the v4.5 preamble rule self-demonstratively. This
   entry is authored in en-US per section 6.10 authorization for
   section 8 entries from v4.7 onward.
+- Spec v4.8 was **bilaterally approved** (Claude Code + ChatGPT Codex)
+  in cross-review session 5fce39ce (2026-04-24, 5 rounds,
+  outcome=converged). v4.8 is a spec-only additive revision of v4.7
+  that introduces section 6.9.3 "Subscription tier resilience and
+  transient failure handling" with six subsections (pre-session
+  capability probe, fallback chain in top-models.json, graceful
+  degradation rules, session-level capability snapshot, interaction
+  with 6.9.2.1, mid-round transient failure handling), a clarification
+  paragraph in section 6.9.2 scoping "NO silent fallback" to mid-round
+  behavior, a new Section 7 resilience row, and a top-models.json
+  `schema_version: 2` bump with per-provider `fallback_chain` (F2
+  populates concrete model ids). Scope absorbs three operator
+  directives captured mid-session 5fce39ce: D3 persistent tier
+  downgrade (subscription plan changes), D4 provider moderation
+  flagging and rate limiting, D5 outages/overload. All three share
+  the invariant "cross-review-mcp must not stop due to provider-side
+  conditions it can reasonably handle" while preserving section 6.9.2
+  "NO silent fallback" for mid-round model switching. Code remains
+  v0.4.0-alpha; the integrated F2 impl session delivers v0.5.0-alpha
+  absorbing both v4.7 triangular extension and v4.8 probe + degrade
+  + retry mechanisms, per operator's preference for a single reload.
+  The promotion of this entry from "em revalidacao bilateral" to
+  "aprovada bilateralmente" happened in a separate post-sealing edit
+  composed in the same commit, honoring the v4.5 preamble rule
+  self-demonstratively. Authored in en-US per section 6.10.
 
 Once accepted and published:
 - Replaces the prior revision in-place.
