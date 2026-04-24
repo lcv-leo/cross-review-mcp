@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '0.6.0-alpha';
+const VERSION = '0.7.0-alpha';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -128,7 +128,17 @@ function attachPromptTailDirective(prompt) {
 1. \`${MODEL_OPEN_TAG}{"model_id":"<your exact canonical model id>"}${MODEL_CLOSE_TAG}\`
 2. \`<cross_review_status>{"status":"READY|NOT_READY|NEEDS_EVIDENCE", ...}</cross_review_status>\`
 
-The peer-model block enables the caller to detect silent CLI downgrade (spec v4.8 section 6.9.2 + TODO-spec-v4.9). Your reported model_id is compared against the canonical id the caller passed via \`-m\` / equivalent. Mismatch terminates the round as protocol_violation (class: silent_model_downgrade) -- it is NOT retried.`;
+The peer-model block enables the caller to detect silent CLI downgrade (spec v4.9 section 6.11 — transport-aware model-check discipline). Under non-api-key transports (cli-subscription / oauth-personal) the text self-report is unreliable and the check is SKIPPED with an audit record; under api-key transports the check is authoritative and a mismatch terminates the round as protocol_violation (class: silent_model_downgrade).
+
+**Anti-hallucination (spec v4.10 section 6.14 — NEW in v0.7.0-alpha):** If you lack verified information to answer a claim or complete a step:
+- DO NOT fabricate. No plausible-sounding guesses presented as fact, no hallucinated function signatures / CLI flags / model IDs / file contents / commit SHAs.
+- Exhaustively search first (re-read artifacts, re-query tools, consult primary sources: official docs, CLI \`--help\`, live probes). If a peer exchange can resolve it, respond with status=\`NEEDS_EVIDENCE\` and list specific \`caller_requests\`.
+- If after exhaustive search the gap remains, mark status=\`NEEDS_EVIDENCE\` with a \`caller_requests\` item explicitly requesting operator escalation; the caller orchestrator will surface it.
+
+Optional structured fields (spec v4.10 section 6.14):
+- \`confidence: 'verified' | 'inferred' | 'unknown'\` — self-declared epistemic state for this response.
+- \`evidence_sources: ["file:path.ext", "tool:name", "url:https://...", "cli:command --help"]\` — concrete sources consulted. Under \`confidence='verified'\` SHOULD include at least one entry.
+- Hard-pair rule: \`confidence='unknown'\` MUST pair with \`status='NEEDS_EVIDENCE'\`. Violating the pairing emits a parser warning and signals a protocol discipline break.`;
 }
 
 // Run the full parser stack against a peer's stdout: status parser for
@@ -153,7 +163,22 @@ The peer-model block enables the caller to detect silent CLI downgrade (spec v4.
 // Response-level rate-limit detection also runs here (orthogonal to the
 // model check). When detected, `rate_limit` carries the detection_source +
 // retry_after_seconds + lexeme_matched payload.
-function parsePeerOutputs(stdout, peerModel, transportDescriptor) {
+// v0.7.0-alpha / spec v4.10 (Item E) fourth arg: `cliAttestedModel` is the
+// model id extracted from the CLI's own stderr banner (Codex CLI emits
+// `model: <id>` at the top of every exec). When parseable, the banner is
+// treated as AUTHORITATIVE attestation for cli-subscription transports —
+// stronger than the model's text self-report (which is known-unreliable)
+// and sourced from the CLI layer that negotiates with the provider. A
+// parseable banner that MISMATCHES the pinned peer_model is a hard gate:
+// `cli_banner_attestation_mismatch` + protocol_violation=true. A parseable
+// banner that MATCHES the pinned peer_model elevates the audit trail:
+// `cli_banner_attested: true` alongside the §6.11 skip (the text check
+// stays suppressed under §6.11 discipline; the banner is what attests).
+// When the banner is absent/null (e.g. Claude CLI has no documented banner
+// format yet, Gemini oauth-personal has no banner), §6.11 skip applies
+// unchanged. Claude banner parsing is DEFERRED to v0.8+ pending empirical
+// format survey.
+function parsePeerOutputs(stdout, peerModel, transportDescriptor, cliAttestedModel = null) {
     const statusParsed = parsePeerResponse(stdout);
     const isStub = peerModel === 'stub';
 
@@ -163,6 +188,7 @@ function parsePeerOutputs(stdout, peerModel, transportDescriptor) {
     let modelFailureClass = null;
     let modelCheckApplicable = false;
     let modelCheckSkipped = null;
+    let cliBannerAttested = false;
     let modelWarnings = [];
 
     if (!isStub) {
@@ -181,18 +207,44 @@ function parsePeerOutputs(stdout, peerModel, transportDescriptor) {
             modelMatch = clazz === 'ok';
             modelFailureClass = modelMatch ? null : clazz;
         } else {
-            // Item A bypass: cli-subscription / oauth-personal transports do
-            // not expose an authoritative modelVersion. Skip the check and
-            // record the audit reason. model_match stays null (not false) to
-            // distinguish bypass from a real mismatch.
-            modelCheckSkipped = {
-                reason: 'unreliable_text_self_report_on_cli',
-                auth: transportDescriptor.auth,
-                endpoint_class: transportDescriptor.endpoint_class,
-            };
-            // Suppress peer-model parser warnings under bypass: the block is
-            // advisory-only when the transport has no authoritative field.
-            modelWarnings = [];
+            // Item E (spec v4.10): if a CLI banner attestation is available,
+            // treat it as authoritative for cli-subscription. Banner is
+            // Codex-specific in v0.7.0-alpha; Claude CLI parsing deferred.
+            const bannerPresent =
+                typeof cliAttestedModel === 'string' && cliAttestedModel.length > 0;
+            if (bannerPresent && transportDescriptor.auth === 'cli-subscription') {
+                if (cliAttestedModel === modelRequested) {
+                    // Banner matches pin: elevated confidence. Text-level
+                    // self-report check stays skipped (§6.11 discipline) —
+                    // the CLI banner is the attestation that matters.
+                    cliBannerAttested = true;
+                    modelCheckSkipped = {
+                        reason: 'unreliable_text_self_report_on_cli',
+                        auth: transportDescriptor.auth,
+                        endpoint_class: transportDescriptor.endpoint_class,
+                        cli_banner_attested: true,
+                    };
+                    modelWarnings = [];
+                } else {
+                    // Banner mismatches pin: hard gate. This is a REAL
+                    // downgrade — the CLI itself reported a different model
+                    // than the one we requested. Not a text-self-report
+                    // hallucination; the CLI layer attests the mismatch.
+                    modelCheckApplicable = true;
+                    modelMatch = false;
+                    modelFailureClass = 'cli_banner_attestation_mismatch';
+                    modelWarnings = [];
+                }
+            } else {
+                // Item A bypass: cli-subscription / oauth-personal without
+                // a parseable banner. Skip the check and record audit reason.
+                modelCheckSkipped = {
+                    reason: 'unreliable_text_self_report_on_cli',
+                    auth: transportDescriptor.auth,
+                    endpoint_class: transportDescriptor.endpoint_class,
+                };
+                modelWarnings = [];
+            }
         }
     }
 
@@ -218,6 +270,8 @@ function parsePeerOutputs(stdout, peerModel, transportDescriptor) {
         model_reported: modelReported,
         model_match: modelMatch,
         model_failure_class: modelFailureClass,
+        cli_banner_attested: cliBannerAttested,
+        cli_attested_model: cliAttestedModel,
         protocol_violation: protocolViolation,
         rate_limit: rateLimit,
     };
@@ -285,6 +339,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     },
                 },
                 required: ['session_id', 'outcome'],
+            },
+        },
+        {
+            name: 'escalate_to_operator',
+            description:
+                'v0.7.0-alpha / spec v4.10 Item D. Record an anti-hallucination escalation: the caller or peer has exhausted peer-exchange evidence gathering and still cannot answer the question without fabrication. The MCP server persists the escalation under meta.escalations[]; the caller orchestrator (Claude Code) surfaces the question to the operator via chat. Returns the escalation record with escalation_id. Does NOT auto-dispatch to the operator — the caller is responsible for the chat surface.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    session_id: { type: 'string' },
+                    question: {
+                        type: 'string',
+                        description: 'Concrete question the operator needs to answer to unblock the session.',
+                    },
+                    context: {
+                        type: 'string',
+                        description: 'Optional context: what was searched, what was ruled out, why the peer exchange could not resolve it.',
+                    },
+                },
+                required: ['session_id', 'question'],
             },
         },
         {
@@ -431,6 +505,30 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     ],
                 };
             }
+            case 'escalate_to_operator': {
+                const sessionId = args.session_id;
+                const question = args.question;
+                const context = args.context ?? null;
+                if (typeof question !== 'string' || question.trim().length === 0) {
+                    throw new Error(
+                        `escalate_to_operator requires a non-empty 'question' string.`
+                    );
+                }
+                const entry = store.saveEscalation(sessionId, CALLER, question, context);
+                log('escalate_to_operator: recorded', {
+                    session: sessionId,
+                    escalation_id: entry.escalation_id,
+                    round: entry.round_index,
+                });
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(entry, null, 2),
+                        },
+                    ],
+                };
+            }
             case 'ask_peer': {
                 if (LEGACY_PEER == null) {
                     throw new Error(
@@ -474,7 +572,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         cli_attested_model_raw: cliAttestedModelRaw,
                     } = spawnResult;
                     const durationMs = Date.now() - t0;
-                    const parsed = parsePeerOutputs(stdout, peerModel, transportDescriptor);
+                    const parsed = parsePeerOutputs(
+                        stdout,
+                        peerModel,
+                        transportDescriptor,
+                        cliAttestedModelRaw
+                    );
                     const fname = store.savePeerResponse(
                         sessionId,
                         roundNum,
@@ -663,7 +766,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                             transport_descriptor: transportDescriptor,
                             cli_attested_model_raw: cliAttestedModelRaw,
                         } = entry.value;
-                        const parsed = parsePeerOutputs(stdout, peerModel, transportDescriptor);
+                        const parsed = parsePeerOutputs(
+                            stdout,
+                            peerModel,
+                            transportDescriptor,
+                            cliAttestedModelRaw
+                        );
                         const fname = store.savePeerResponse(
                             sessionId,
                             roundNum,

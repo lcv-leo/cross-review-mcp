@@ -11,7 +11,54 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — v0.7+ planejada: anti-hallucination safeguards, open-source readiness (LICENSE/README/SECURITY), CLI stderr banner como authoritative attestation.)
+- (em aberto — v0.8+ planejada: Claude CLI stderr banner parsing empírica; README hardening para v1.0 pre-cut; outras follow-ups registradas em `docs/workflow-spec.md` §8.)
+
+---
+
+## [0.7.0-alpha] — 2026-04-24
+
+Release: spec v4.10 implementation. Executa os dois scope items diferidos da sessão trilateral c9508617 (v4.9 convergida) sem nova sessão de design, per operator directive 2026-04-24: (D) anti-hallucination / epistemic discipline, (E) CLI banner como authoritative attestation. Item F (open-source readiness) confirmado já-em-vigor: `LICENSE` (AGPLv3, alinhado ao workspace) e `SECURITY.md` presentes em disco desde antes de v0.5.0-alpha.
+
+### Adicionado
+- **Anti-hallucination / epistemic discipline (Item D / spec v4.10 §6.14):**
+- `src/lib/status-parser.js` aceita dois novos campos opcionais no bloco estruturado:
+  - `confidence: 'verified' | 'inferred' | 'unknown'` — peer self-declara o estado epistemológico da resposta.
+  - `evidence_sources: [string]` — array de fontes concretas consultadas (shape validado como `caller_requests`, max 20 entradas, max 500 chars cada). Prefixos recomendados: `file:`, `tool:`, `cli:`, `url:`, `memory:`.
+- Regras cross-field (parser-enforced):
+  - Hard-pair: `confidence='unknown'` MUST pair with `status='NEEDS_EVIDENCE'`. Violação emite parser warning.
+  - Advisory: `confidence='verified'` sem `evidence_sources` (ausente ou vazio) emite parser warning.
+- `src/server.js` `attachPromptTailDirective` estendido com diretiva explícita anti-fabricação, NEEDS_EVIDENCE-first discipline, exhaustive-search mandate, e descrição do shape dos dois campos novos.
+- Novo tool MCP `escalate_to_operator(session_id, question, context)` que persiste o registro de escalação em `meta.escalations[]` com `escalation_id` (UUIDv4), `from_agent`, `question`, `context`, `round_index`, `timestamp`. O tool NÃO auto-dispatcha ao operador — o caller orchestrator (Claude Code) é responsável por surfacing via chat. Empty/whitespace question é rejeitado com validation error.
+- `src/lib/session-store.js` novo export `saveEscalation(sessionId, fromAgent, question, context)`; `meta.escalations[]` é lazy-created na primeira chamada; backward compat preservado para sessões que nunca escalam (campo ausente).
+
+- **CLI banner as authoritative attestation (Item E / spec v4.10 §6.11 amendment):**
+- `src/server.js` `parsePeerOutputs` aceita quarto argumento opcional `cliAttestedModel` (sourced de `spawnPeer`'s `cli_attested_model_raw`). Quando transport.auth === 'cli-subscription' E cliAttestedModel é uma string parseável:
+  - Banner MATCHES pinned peer_model → audit elevation: `cli_banner_attested: true` no per-peer round entry; `model_check_skipped.cli_banner_attested: true` no sub-registro de audit. Text-level self-report check continua SKIPPED per §6.11 (discipline preservada; o banner é o que atesta).
+  - Banner MISMATCHES pinned peer_model → hard gate: `model_check_applicable: true`, `model_match: false`, `model_failure_class: 'cli_banner_attestation_mismatch'`, `protocol_violation: true`. Não é retried (mesma disciplina do silent_model_downgrade sob §6.11 api-key path).
+  - Banner ABSENT/UNPARSEABLE → fall-through ao v4.9 `model_check_skipped` path inalterado.
+- Banner parsing confinado a Codex CLI em v0.7.0-alpha; Claude CLI banner parsing DIFERIDO para v0.8+ pending empirical format survey; oauth-personal (Gemini v1internal) não tem banner e continua na §6.11 skip discipline independente do cliAttestedModel passado.
+- `src/lib/peer-spawn.js` já expõe `cli_attested_model_raw` via `extractCodexAttestedModelRaw` (v0.6.0-alpha) — v0.7.0-alpha apenas promove o consumo downstream de forensic-only para authoritative gate.
+
+- **Smoke (`scripts/functional-smoke.js`) expandido de 103 para 117 steps:** +14 novas assertions cobrindo:
+  - v4.10 Item D: confidence field parsing (verified-without-evidence advisory, unknown-without-NE hard-pair, unknown+NE compliant, evidence_sources validation, invalid confidence drop).
+  - v4.10 Item D: escalate_to_operator end-to-end (return shape, empty question rejection, persistência em meta.escalations[], cleanup) + saveEscalation unit.
+  - v4.10 Item E: banner match (elevated audit), banner mismatch (hard gate), no banner (fall-through), oauth-personal indifference ao banner.
+- Novo env var `CROSS_REVIEW_TEST_IMPORT=1` em `src/server.js`: quando setado, pula `main()` e relaxa a validação de `CROSS_REVIEW_CALLER` (default 'claude'). Permite `require('../src/server.js')` nos smoke unit drivers sem ativar o stdio transport. Smoke drivers que spawnam o server como child process agora removem explicitamente essa env do childEnv para evitar leak que skiparia o main() do subprocesso.
+
+### Alterado
+- `src/server.js` `VERSION` bumpado `0.6.0-alpha` → `0.7.0-alpha`.
+- `package.json` `version` bumpado `0.6.0-alpha` → `0.7.0-alpha`.
+- `parsePeerOutputs` signature estendida para `(stdout, peerModel, transportDescriptor, cliAttestedModel = null)`. Callers sem o 4º arg (null default) preservam comportamento v0.6.0-alpha (Item E não se ativa; §6.11 skip puro).
+- `attachPromptTailDirective` tail text cresce para incluir diretiva anti-hallucination + descrição dos dois campos estruturados novos. Shape do tail preserva os dois structured blocks canônicos (peer_model + status) — os campos novos vão dentro do status block.
+- Tool list do server retorna 7 tools agora (vs 6 em v0.6.0-alpha): `session_init`, `session_read`, `session_check_convergence`, `session_finalize`, `ask_peer`, `ask_peers`, **`escalate_to_operator`** (novo em v4.10).
+
+### Confirmado / no-change
+- **Open-source readiness (Item F):** `LICENSE` (AGPLv3 per workspace default; recomendação de revisitar Apache-2.0 permanece registrada para v0.9.0-alpha pre-cut) e `SECURITY.md` (responsible disclosure, canais privados, CodeQL + Dependabot mencionados) já estavam em disco antes de v0.5.0-alpha. `README.md` em pt-BR permanece — tradução en-US para público internacional é follow-up de v0.9+ pre-cut conforme `project_cross_review_mcp_open_source_plan`. Nenhum código mudou por conta de Item F em v0.7.0-alpha.
+
+### Trade-offs documentados / deferred
+- **Claude CLI banner parsing:** diferido para v0.8+ pending empirical survey do formato do banner Claude CLI. v0.7.0-alpha Codex-only para Item E.
+- **README hardening (en-US + setup + architecture):** diferido para v0.9.0-alpha pre-cut (próximo antes de v1.0 stable público no GitHub), conforme `project_cross_review_mcp_open_source_plan.md`.
+- **License revisit (AGPLv3 vs Apache-2.0):** operator pré-decisão pendente para v0.9.0-alpha. v0.7.0-alpha preserva AGPLv3 workspace-default.
 
 ---
 

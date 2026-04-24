@@ -53,7 +53,22 @@
 
 const VALID_STATUSES = new Set(['READY', 'NOT_READY', 'NEEDS_EVIDENCE']);
 const VALID_UNCERTAINTY = new Set(['low', 'medium', 'high']);
-const OPTIONAL_FIELDS = new Set(['uncertainty', 'caller_requests', 'follow_ups']);
+// v0.7.0-alpha / spec v4.10 (Item D): anti-hallucination fields.
+//   confidence: 'verified' | 'inferred' | 'unknown' — peer self-declares
+//     epistemic state. Hard-pair rule: confidence='unknown' MUST pair with
+//     status='NEEDS_EVIDENCE'; mismatch emits a parser warning.
+//   evidence_sources: array of strings (same shape as caller_requests).
+//     Files read, tools invoked, URLs fetched, primary docs consulted.
+//     Empty or absent is allowed but under confidence='verified' an empty
+//     set emits an advisory warning.
+const VALID_CONFIDENCE = new Set(['verified', 'inferred', 'unknown']);
+const OPTIONAL_FIELDS = new Set([
+    'uncertainty',
+    'caller_requests',
+    'follow_ups',
+    'confidence',
+    'evidence_sources',
+]);
 const MAX_ARRAY_ITEMS = 20;
 const MAX_ITEM_CHARS = 500;
 const OPEN_TAG = '<cross_review_status>';
@@ -130,6 +145,46 @@ function validateOptionalFields(parsed) {
     if ('follow_ups' in parsed) {
         const v = validateStringArray(parsed.follow_ups, 'follow_ups', warnings);
         if (v !== undefined) clean.follow_ups = v;
+    }
+
+    // v0.7.0-alpha / spec v4.10 Item D: confidence.
+    if ('confidence' in parsed) {
+        const c = parsed.confidence;
+        if (typeof c === 'string' && VALID_CONFIDENCE.has(c)) {
+            clean.confidence = c;
+        } else {
+            warnings.push(
+                `confidence has invalid shape; expected string in verified|inferred|unknown`
+            );
+        }
+    }
+
+    // v0.7.0-alpha / spec v4.10 Item D: evidence_sources.
+    if ('evidence_sources' in parsed) {
+        const v = validateStringArray(
+            parsed.evidence_sources,
+            'evidence_sources',
+            warnings
+        );
+        if (v !== undefined) clean.evidence_sources = v;
+    }
+
+    // v0.7.0-alpha Item D: cross-field consistency rules.
+    //   confidence='unknown' MUST pair with status='NEEDS_EVIDENCE'.
+    //   confidence='verified' SHOULD include at least one evidence_sources
+    //     entry (advisory).
+    if (clean.confidence === 'unknown' && clean.status !== 'NEEDS_EVIDENCE') {
+        warnings.push(
+            `confidence='unknown' must pair with status='NEEDS_EVIDENCE' (got status='${clean.status}')`
+        );
+    }
+    if (
+        clean.confidence === 'verified'
+        && (!clean.evidence_sources || clean.evidence_sources.length === 0)
+    ) {
+        warnings.push(
+            `confidence='verified' should include at least one evidence_sources entry (got empty)`
+        );
     }
 
     // unknown fields
@@ -219,6 +274,7 @@ module.exports = {
     parsePeerResponse,
     VALID_STATUSES,
     VALID_UNCERTAINTY,
+    VALID_CONFIDENCE,
     OPTIONAL_FIELDS,
     MAX_ARRAY_ITEMS,
     MAX_ITEM_CHARS,

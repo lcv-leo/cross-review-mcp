@@ -464,6 +464,28 @@ function finalize(sessionId, outcome) {
     writeMeta(sessionId, meta);
 }
 
+// v0.7.0-alpha / spec v4.10 Item D: operator escalation record.
+// Called when an agent has exhausted peer-exchange evidence gathering and
+// still lacks information to answer. The MCP server persists the escalation
+// under meta.escalations[]; the caller orchestrator (Claude Code) surfaces
+// the question to the operator via chat. Returns the escalation record.
+function saveEscalation(sessionId, fromAgent, question, context) {
+    const meta = readMeta(sessionId);
+    if (!Array.isArray(meta.escalations)) meta.escalations = [];
+    const entry = {
+        escalation_id: crypto.randomUUID(),
+        from_agent: String(fromAgent || 'unknown'),
+        question: String(question || ''),
+        context: context == null ? null : String(context),
+        round_index: meta.rounds?.length || 0,
+        timestamp: new Date().toISOString(),
+    };
+    meta.escalations.push(entry);
+    meta.last_updated_at = new Date().toISOString();
+    writeMeta(sessionId, meta);
+    return entry;
+}
+
 module.exports = {
     STATE_DIR,
     ensureStateDir,
@@ -478,6 +500,7 @@ module.exports = {
     saveFailedAttempt,
     checkConvergence,
     finalize,
+    saveEscalation,
     acquireLock,
     releaseLock,
     // Exported for tests and ad-hoc audit.

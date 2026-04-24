@@ -109,6 +109,7 @@ async function driveServer(extraEnv = {}) {
         const expected = [
             'ask_peer',
             'ask_peers',
+            'escalate_to_operator',
             'session_check_convergence',
             'session_finalize',
             'session_init',
@@ -802,7 +803,244 @@ async function runAll() {
     all.push(...s38.results);
     const s39 = await driveV6ConvergenceSnapshotUnit();
     all.push(...s39.results);
+    const s40 = await driveV7AntiHallucinationUnit();
+    all.push(...s40.results);
+    const s41 = await driveV7BannerAttestationUnit();
+    all.push(...s41.results);
+    const s42 = await driveV7EscalateToOperatorUnit();
+    all.push(...s42.results);
     return all;
+}
+
+// v0.7.0-alpha / spec v4.10 unit coverage.
+async function driveV7AntiHallucinationUnit() {
+    const results = [];
+    const sp = require('../src/lib/status-parser.js');
+
+    // confidence='verified' without evidence_sources -> advisory warning.
+    const stdoutVerifiedEmpty = `body\n\n<cross_review_status>${JSON.stringify({
+        status: 'READY',
+        confidence: 'verified',
+    })}</cross_review_status>\n`;
+    const pv = sp.parsePeerResponse(stdoutVerifiedEmpty);
+    assert(pv.status === 'READY', 'v4.10 Item D: status READY preserved');
+    assert(pv.structured.confidence === 'verified', 'v4.10 Item D: confidence preserved');
+    assert(
+        pv.parser_warnings.some((w) => w.includes("confidence='verified'")),
+        'v4.10 Item D: advisory warning for verified without evidence'
+    );
+    results.push({ step: 'v4.10 Item D: confidence=verified without evidence_sources emits advisory', ok: true });
+
+    // confidence='unknown' with status=READY -> hard-pair violation warning.
+    const stdoutUnknownReady = `body\n\n<cross_review_status>${JSON.stringify({
+        status: 'READY',
+        confidence: 'unknown',
+    })}</cross_review_status>\n`;
+    const pu = sp.parsePeerResponse(stdoutUnknownReady);
+    assert(
+        pu.parser_warnings.some((w) => w.includes(`confidence='unknown'`) && w.includes('NEEDS_EVIDENCE')),
+        'v4.10 Item D: hard-pair warning for unknown+READY'
+    );
+    results.push({ step: 'v4.10 Item D: confidence=unknown must pair with NEEDS_EVIDENCE (hard-pair rule)', ok: true });
+
+    // confidence='unknown' + status='NEEDS_EVIDENCE' -> no hard-pair warning.
+    const stdoutUnknownNE = `body\n\n<cross_review_status>${JSON.stringify({
+        status: 'NEEDS_EVIDENCE',
+        confidence: 'unknown',
+        caller_requests: ['need primary source X'],
+    })}</cross_review_status>\n`;
+    const pun = sp.parsePeerResponse(stdoutUnknownNE);
+    assert(
+        !pun.parser_warnings.some((w) => w.includes('hard-pair') || (w.includes('confidence') && w.includes('pair'))),
+        'v4.10 Item D: unknown+NEEDS_EVIDENCE: no hard-pair violation'
+    );
+    assert(pun.structured.confidence === 'unknown', 'v4.10 Item D: confidence=unknown preserved');
+    results.push({ step: 'v4.10 Item D: unknown+NEEDS_EVIDENCE compliant', ok: true });
+
+    // evidence_sources validated like caller_requests.
+    const stdoutEvidence = `body\n\n<cross_review_status>${JSON.stringify({
+        status: 'READY',
+        confidence: 'verified',
+        evidence_sources: ['file:src/lib/peer-spawn.js', 'cli:gemini --help'],
+    })}</cross_review_status>\n`;
+    const pe = sp.parsePeerResponse(stdoutEvidence);
+    assert(
+        Array.isArray(pe.structured.evidence_sources) && pe.structured.evidence_sources.length === 2,
+        'v4.10 Item D: evidence_sources parsed as array'
+    );
+    assert(
+        !pe.parser_warnings.some((w) => w.includes("confidence='verified'") && w.includes('evidence_sources')),
+        'v4.10 Item D: no advisory when verified + evidence_sources populated'
+    );
+    results.push({ step: 'v4.10 Item D: evidence_sources validated + advisory suppressed', ok: true });
+
+    // invalid confidence value -> warning, not accepted.
+    const stdoutBadConfidence = `body\n\n<cross_review_status>${JSON.stringify({
+        status: 'READY',
+        confidence: 'super-sure',
+    })}</cross_review_status>\n`;
+    const pbc = sp.parsePeerResponse(stdoutBadConfidence);
+    assert(pbc.status === 'READY', 'v4.10 Item D: status preserved despite invalid confidence');
+    assert(pbc.structured.confidence === undefined, 'v4.10 Item D: invalid confidence dropped');
+    assert(
+        pbc.parser_warnings.some((w) => w.includes('confidence has invalid shape')),
+        'v4.10 Item D: invalid confidence emits warning'
+    );
+    results.push({ step: 'v4.10 Item D: invalid confidence dropped + warning', ok: true });
+
+    return { results };
+}
+
+async function driveV7BannerAttestationUnit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    const server = require('../src/server.js');
+
+    const stdout = 'body\n\n<cross_review_peer_model>{"model_id":"gpt-4"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n';
+    const descriptor = {
+        agent: 'codex',
+        auth: 'cli-subscription',
+        endpoint_class: 'chatgpt-pro-backend',
+    };
+
+    // Case 1: banner matches pin -> cli_banner_attested=true, skip audit retained
+    const parsedMatch = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, 'gpt-5.5');
+    assert(parsedMatch.cli_banner_attested === true, 'v4.10 Item E: cli_banner_attested true on match');
+    assert(
+        parsedMatch.model_check_skipped
+            && parsedMatch.model_check_skipped.cli_banner_attested === true,
+        'v4.10 Item E: model_check_skipped carries cli_banner_attested=true audit'
+    );
+    assert(parsedMatch.model_failure_class === null, 'v4.10 Item E: no failure class on banner match');
+    assert(parsedMatch.protocol_violation === false, 'v4.10 Item E: no protocol_violation on banner match');
+    results.push({ step: 'v4.10 Item E: banner match -> elevated audit (cli_banner_attested=true)', ok: true });
+
+    // Case 2: banner mismatches pin -> hard gate + cli_banner_attestation_mismatch.
+    const parsedMismatch = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, 'gpt-4.5-deprecated');
+    assert(
+        parsedMismatch.model_failure_class === 'cli_banner_attestation_mismatch',
+        'v4.10 Item E: cli_banner_attestation_mismatch class on mismatch'
+    );
+    assert(parsedMismatch.protocol_violation === true, 'v4.10 Item E: protocol_violation true on banner mismatch');
+    assert(parsedMismatch.model_check_applicable === true, 'v4.10 Item E: check applicable under banner mismatch');
+    assert(parsedMismatch.cli_banner_attested === false, 'v4.10 Item E: cli_banner_attested false on mismatch');
+    assert(parsedMismatch.cli_attested_model === 'gpt-4.5-deprecated', 'v4.10 Item E: cli_attested_model surfaced raw');
+    results.push({ step: 'v4.10 Item E: banner mismatch -> cli_banner_attestation_mismatch hard gate', ok: true });
+
+    // Case 3: no banner present -> fall through to §6.11 skip.
+    const parsedNoBanner = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, null);
+    assert(
+        parsedNoBanner.model_check_skipped
+            && parsedNoBanner.model_check_skipped.reason === 'unreliable_text_self_report_on_cli'
+            && !parsedNoBanner.model_check_skipped.cli_banner_attested,
+        'v4.10 Item E: no banner -> §6.11 skip applies unchanged'
+    );
+    assert(parsedNoBanner.cli_banner_attested === false, 'v4.10 Item E: cli_banner_attested false without banner');
+    results.push({ step: 'v4.10 Item E: no banner -> §6.11 skip path unchanged', ok: true });
+
+    // Case 4: oauth-personal transport ignores banner (banner is Codex-specific domain).
+    const geminiDesc = { agent: 'gemini', auth: 'oauth-personal', endpoint_class: 'v1internal' };
+    const parsedGemini = server.parsePeerOutputs(stdout, 'gemini-3.1-pro-preview', geminiDesc, 'gemini-banner-does-not-exist');
+    assert(
+        parsedGemini.model_check_skipped
+            && parsedGemini.model_check_skipped.reason === 'unreliable_text_self_report_on_cli',
+        'v4.10 Item E: oauth-personal takes §6.11 skip path regardless of banner'
+    );
+    assert(parsedGemini.cli_banner_attested === false, 'v4.10 Item E: banner promotion confined to cli-subscription');
+    results.push({ step: 'v4.10 Item E: banner promotion confined to cli-subscription (oauth-personal uses §6.11)', ok: true });
+
+    return { results };
+}
+
+async function driveV7EscalateToOperatorUnit() {
+    const results = [];
+    const store = require('../src/lib/session-store.js');
+
+    // Drive the MCP escalate_to_operator tool end-to-end via stdio JSON-RPC.
+    // Explicitly unset CROSS_REVIEW_TEST_IMPORT — earlier unit drivers set it
+    // in this process's env for direct require(), but it would otherwise
+    // propagate to the child and skip the stdio transport main().
+    const childEnv = { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1' };
+    delete childEnv.CROSS_REVIEW_TEST_IMPORT;
+    const proc = spawn('node', [SERVER], {
+        env: childEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+    });
+    const responses = new Map();
+    attachJsonRpcReader(proc.stdout, responses);
+    const call = (id, method, params) =>
+        new Promise((resolve, reject) => {
+            proc.stdin.write(requestLine(id, method, params));
+            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
+            const poll = setInterval(() => {
+                if (responses.has(id)) {
+                    clearInterval(poll);
+                    clearTimeout(t);
+                    resolve(responses.get(id));
+                }
+            }, 25);
+        });
+    const notify = (method, params) => proc.stdin.write(notifLine(method, params));
+
+    try {
+        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-escalate', version: '0.1' } });
+        notify('notifications/initialized');
+
+        const init = await call(2, 'tools/call', { name: 'session_init', arguments: { task: 'escalate smoke', artifacts: [] } });
+        const sid = JSON.parse(init.result.content[0].text).session_id;
+
+        const esc = await call(3, 'tools/call', {
+            name: 'escalate_to_operator',
+            arguments: {
+                session_id: sid,
+                question: 'Primary source X is unreachable; operator clarification needed',
+                context: 'tried docs/ + CLI --help + live probe; all three returned nothing',
+            },
+        });
+        const escPayload = JSON.parse(esc.result.content[0].text);
+        assert(typeof escPayload.escalation_id === 'string' && escPayload.escalation_id.length > 10, 'v4.10 Item D: escalation_id returned (uuid)');
+        assert(escPayload.from_agent === 'claude', 'v4.10 Item D: from_agent captured');
+        assert(escPayload.question.includes('Primary source X'), 'v4.10 Item D: question persisted');
+        assert(escPayload.round_index === 0, 'v4.10 Item D: round_index=0 for pre-round escalation');
+        results.push({ step: 'v4.10 Item D: escalate_to_operator returns escalation record with uuid', ok: true });
+
+        // Invalid input (empty question) must error.
+        const bad = await call(4, 'tools/call', {
+            name: 'escalate_to_operator',
+            arguments: { session_id: sid, question: '   ' },
+        });
+        const badPayload = JSON.parse(bad.result.content[0].text);
+        assert(typeof badPayload.error === 'string' && badPayload.error.includes('non-empty'), 'v4.10 Item D: empty question rejected');
+        results.push({ step: 'v4.10 Item D: escalate_to_operator rejects empty question', ok: true });
+
+        // Verify persistence via session_read.
+        const read = await call(5, 'tools/call', { name: 'session_read', arguments: { session_id: sid } });
+        const meta = JSON.parse(read.result.content[0].text);
+        assert(Array.isArray(meta.escalations) && meta.escalations.length === 1, 'v4.10 Item D: meta.escalations[] persisted exactly one entry');
+        assert(meta.escalations[0].escalation_id === escPayload.escalation_id, 'v4.10 Item D: persisted id matches returned id');
+        results.push({ step: 'v4.10 Item D: meta.escalations[] persisted and readable via session_read', ok: true });
+
+        // Cleanup
+        await call(6, 'tools/call', { name: 'session_finalize', arguments: { session_id: sid, outcome: 'aborted' } });
+        const sessPath = path.join(os.homedir(), '.cross-review', sid);
+        if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
+        results.push({ step: 'v4.10 Item D: escalate smoke cleanup', ok: true });
+    } finally {
+        proc.stdin.end();
+        proc.kill();
+    }
+
+    // Unit check on store.saveEscalation directly (test_import bypass).
+    const id = store.initSession({ task: 'unit', artifacts: [], callerAgent: 'claude', peers: ['codex', 'gemini'] });
+    const entry = store.saveEscalation(id, 'codex', 'another question', null);
+    assert(entry.from_agent === 'codex', 'v4.10 Item D: saveEscalation accepts arbitrary agent');
+    assert(entry.context === null, 'v4.10 Item D: saveEscalation accepts null context');
+    const cleanup = path.join(os.homedir(), '.cross-review', id);
+    if (fs.existsSync(cleanup)) fs.rmSync(cleanup, { recursive: true, force: true });
+    results.push({ step: 'v4.10 Item D: saveEscalation unit (null context + non-caller agent)', ok: true });
+
+    return { results };
 }
 
 // v0.6.0-alpha / spec v4.9 unit coverage. Three compact drivers exercising

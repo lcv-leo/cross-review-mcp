@@ -1,14 +1,16 @@
-# Cross-Review MCP Workflow Specification v4.9
+# Cross-Review MCP Workflow Specification v4.10
 
-**Status**: v4.9 is a spec + code revision approved by trilateral session
-c9508617 (2026-04-24, caller=claude + peers=codex+gemini, 3 rounds,
-outcome=converged, 3/3 READY). v4.9 adds three normative sections —
-§6.11 "Transport-aware model-check discipline" (Item A), §6.12
-"Strict-only convergence with persisted snapshot" (Item B), §6.13
-"Rate-limit class distinct from silent-downgrade" (Item C) — and
-retires the ambiguous probe `tier: 'fallback'` in favor of canonical
-`tier: 'ok' | 'offline'`. v4.9 ships integrated with code release
-v0.6.0-alpha. Predecessors: v2 (session 7d745f38);
+**Status**: v4.10 is a spec + code revision shipped integrated with code
+release v0.7.0-alpha on 2026-04-24, executing operator directive to
+land the remaining v4.9-backlog items without a new design session
+(anti-hallucination safeguards + CLI banner as authoritative attestation
+were already ratified as deferred items in session c9508617's approved
+scope). v4.10 adds §6.14 "Anti-hallucination / epistemic discipline"
+(Item D) and amends §6.11 with Item E "CLI banner as authoritative
+attestation" for cli-subscription transports when the banner is
+parseable. Predecessors: v4.9 trilateral-approved in session c9508617
+(2026-04-24, 3 rounds, 3/3 READY), code release v0.6.0-alpha at
+commit ae3df46. Predecessors: v2 (session 7d745f38);
 v3 (session 806a1c4f); v4 normative absorbing v0.4.0-alpha (session
 08cd61e6); v4.1 spec-only absorbing section 6.6 (session a847f897);
 v4.2 spec-only promoting section 6.7 (session f1fdbee4); v4.3 adding
@@ -23,6 +25,44 @@ Encoding: ASCII-only with transliteration of Portuguese accents where
 they appear (see section 6.4). Peer exchange and non-user-facing
 artifacts are authored in en-US (see section 6.10), trivially
 satisfying ASCII-only without transliteration.
+
+---
+
+## 0j. Delta v4.9 -> v4.10 (executive summary)
+
+- **Section 6.14 NEW — Anti-hallucination / epistemic discipline
+  (Item D).** Peer prompt tail directive extended with mandatory
+  NEEDS_EVIDENCE-first + exhaustive-search language. Structured
+  status block accepts two optional fields: `confidence: 'verified' |
+  'inferred' | 'unknown'` and `evidence_sources: [string]`. Hard-pair
+  rule: `confidence='unknown'` MUST pair with `status='NEEDS_EVIDENCE'`
+  — violating the pairing emits a parser warning. `confidence='verified'`
+  SHOULD include at least one `evidence_sources` entry (advisory warning
+  when empty). New MCP tool `escalate_to_operator(session_id, question,
+  context)` persists operator-escalation requests under
+  `meta.escalations[]`; the caller orchestrator surfaces the question
+  via chat (the tool does NOT auto-dispatch).
+- **Section 6.11 AMENDED — Item E: CLI banner as authoritative
+  attestation.** For cli-subscription transports when the CLI stderr
+  banner is parseable (Codex CLI `model: <id>` line; Claude CLI
+  deferred to v0.8+), the banner is promoted from forensic-only
+  (v4.9) to AUTHORITATIVE attestation. A parseable banner that
+  MATCHES the pinned `peer_model` elevates the audit record with
+  `cli_banner_attested: true`; a parseable banner that MISMATCHES
+  is a hard gate — `model_failure_class: 'cli_banner_attestation_mismatch'`
+  with `protocol_violation=true`. Absent/unparseable banner
+  falls through to §6.11's unchanged `model_check_skipped` path.
+  The banner attestation is confined to cli-subscription; oauth-personal
+  (Gemini via v1internal) has no banner equivalent and continues on
+  the §6.11 skip discipline.
+- **Section 7 summary table** extended with anti-hallucination row.
+- **Section 8** gains v4.10 entry per the v4.5 preamble rule.
+
+All v4.10 changes ship integrated with code release v0.7.0-alpha in a
+single commit. Items D and E were already ratified as deferred scope
+in session c9508617 (v4.9 approved design); v4.10 executes the
+implementation without a new design session per operator directive
+2026-04-24.
 
 ---
 
@@ -1734,7 +1774,127 @@ only manifests on api-key transports.
 
 ---
 
-## 7. Summary of conventions for immediate use (UPDATED through v4.9)
+### 6.14 Anti-hallucination / epistemic discipline (NEW in v4.10)
+
+STATUS: implementation-ratified (Item D of session c9508617's approved
+v4.9 deferred-to-v4.10 scope, 2026-04-24; coded in v0.7.0-alpha).
+
+**Principle.** Three top-tier AIs converging via cross-review is the
+canonical defense against confabulation (one model hallucinates, the
+peers catch it). The protocol MUST codify this defense rather than
+rely on emergent behavior. When an agent (caller or peer) lacks
+information required to answer a question or complete a step:
+
+1. **Do not invent.** No plausible-sounding fabrication, no "most
+   likely" guesses presented as fact, no hallucinated function
+   signatures / CLI flags / model IDs / file contents / commit SHAs.
+2. **Exhaustively search first.** Re-read artifacts, re-query tools,
+   consult primary sources (official docs, CLI `--help`, live
+   probes), and emit `NEEDS_EVIDENCE` with specific `caller_requests`
+   when a peer exchange can resolve it.
+3. **Escalate to operator last.** If after exhaustive search the gap
+   remains, invoke `escalate_to_operator` and mark
+   `status='NEEDS_EVIDENCE'` with a `caller_requests` item
+   explicitly requesting operator clarification.
+
+**Tail-directive additions (composed into every `ask_peer` /
+`ask_peers` prompt via `attachPromptTailDirective`):** the peer is
+told explicitly that fabrication violates protocol and that
+`NEEDS_EVIDENCE` is the canonical response when verified information
+is unavailable.
+
+**Structured status block — two new optional fields.**
+
+- `confidence: 'verified' | 'inferred' | 'unknown'` — the peer
+  self-declares the epistemic state of its response. `verified` =
+  sourced from primary evidence (files read, tools invoked, CLI
+  output, URLs fetched). `inferred` = derived from related evidence
+  via reasoning; not directly sourced. `unknown` = cannot answer
+  with confidence; MUST pair with `status='NEEDS_EVIDENCE'`.
+- `evidence_sources: [string]` — concrete sources consulted, same
+  validation shape as `caller_requests` (array of strings, max 20
+  entries, max 500 chars each). Recommended prefixes: `file:`,
+  `tool:`, `cli:`, `url:`, `memory:`.
+
+**Cross-field rules (parser-enforced):**
+
+- `confidence='unknown' AND status !== 'NEEDS_EVIDENCE'` → parser
+  warning. The pairing is hard; violating it is a protocol-discipline
+  signal the caller should address next round.
+- `confidence='verified' AND evidence_sources is empty or absent` →
+  advisory parser warning. Verified claims without concrete source
+  citations are a hallucination-risk signal.
+
+**New MCP tool `escalate_to_operator(session_id, question, context)`.**
+Persists an escalation record under `meta.escalations[]` with
+`escalation_id` (UUIDv4), `from_agent`, `question`, `context`,
+`round_index`, `timestamp`. The tool does NOT auto-dispatch to the
+operator — the caller orchestrator (Claude Code in current deployments)
+is responsible for surfacing the question via chat. Empty/whitespace
+question strings are rejected with a validation error.
+
+**Invariants.**
+
+- `confidence` and `evidence_sources` are OPTIONAL. Peers predating
+  v4.10 that omit both fields remain fully compliant; the pre-v4.10
+  structured block shape is preserved.
+- Parser warnings (hard-pair, advisory) DO NOT block convergence —
+  they surface discipline signals for the caller. Convergence still
+  tracks `peer_status` per §6.12.
+- `escalate_to_operator` is optional. A session that never escalates
+  has an empty `meta.escalations[]` array (added on first call).
+
+### 6.11 amendment: CLI banner as authoritative attestation (NEW in v4.10)
+
+STATUS: implementation-ratified (Item E of session c9508617's
+approved v4.9 deferred-to-v4.10 scope, 2026-04-24).
+
+**Problem.** v4.9 captures the Codex CLI stderr banner
+`model: <id>` as forensic-only (`cli_attested_model_raw`) without
+using it to gate protocol compliance. Empirical evidence from session
+c9508617: the banner reflects the model the CLI actually negotiated
+— if Codex CLI were to silently reject an invalid `-m` and switch
+to a fallback model, the banner would show the real one. The banner
+is therefore a STRONGER attestation than the model's own text
+self-report (which is known-unreliable across all three CLI peers).
+
+**Rule.** For transports with `auth === 'cli-subscription'` when
+`parsePeerOutputs` is called with a non-null `cliAttestedModel`
+argument (sourced from `spawnPeer`'s `cli_attested_model_raw`):
+
+- Banner MATCHES pinned `peer_model` → elevate the audit record.
+  `cli_banner_attested: true` on the per-peer round entry;
+  `model_check_skipped.cli_banner_attested: true`. The text-level
+  self-report check remains SKIPPED per §6.11 (the CLI banner is
+  what attests; text self-report is a separate, unreliable signal).
+- Banner MISMATCHES pinned `peer_model` → hard gate.
+  `model_check_applicable: true`, `model_match: false`,
+  `model_failure_class: 'cli_banner_attestation_mismatch'`,
+  `protocol_violation: true`. Not retried (same discipline as
+  `silent_model_downgrade` under §6.11 api-key path).
+- Banner ABSENT/UNPARSEABLE → fall through to §6.11 unchanged
+  `model_check_skipped` path.
+
+**Scope.**
+
+- v0.7.0-alpha implements banner parsing for Codex CLI only. Claude
+  CLI has no documented stderr banner format in the public CLI
+  surface; parsing is DEFERRED to v0.8+ pending an empirical format
+  survey across Claude CLI releases.
+- oauth-personal transports (Gemini via v1internal) have no banner
+  equivalent and remain on §6.11 skip discipline regardless of what
+  `cliAttestedModel` arg is passed.
+
+**Invariant.** Item E STRENGTHENS the v4.9 defense without replacing
+it. A cli-subscription peer with an unparseable banner is no worse
+off than under v4.9; a peer with a parseable and matching banner is
+AUDITED more precisely; a peer with a parseable but mismatching
+banner is caught by a hard gate that v4.9 could not catch (because
+v4.9 skipped the check entirely for cli-subscription).
+
+---
+
+## 7. Summary of conventions for immediate use (UPDATED through v4.10)
 
 | Convention | Caller action |
 |------------|---------------|
@@ -1755,10 +1915,12 @@ only manifests on api-key transports.
 | Transport-aware model-check | `spawnPeer` / `probeAgent` return `transport_descriptor: { agent, auth, endpoint_class }` (6.11); `parsePeerOutputs` gate on `auth === 'api-key'` runs `classifyModelMatch`; otherwise SKIP with audit record `model_check_skipped: { reason: 'unreliable_text_self_report_on_cli', auth, endpoint_class }` (eliminates v0.5.0-alpha false-positive `silent_model_downgrade` on CLI-subscription / oauth-personal peers); forensic-only `cli_attested_model_raw` captures Codex stderr banner unparsed |
 | Strict-only convergence + snapshot | `converged iff caller READY AND every responded peer READY` (6.12); `status_missing` counts AGAINST; no loose toggle; `appendRound` persists `round.convergence_snapshot` with `spec_version: 'v4.9'`; `checkConvergence` reads the persisted snapshot (audit immutability under future predicate evolution) |
 | Rate-limit class | New `rate_limit_induced_response` orthogonal to `silent_model_downgrade` (6.13); provider-shaped lexeme set excludes generic `{rate, quota, limit}`; spawn-level via non-zero exit + stderr match -> `saveFailedAttempt` + `retry_after_seconds`; response-level requires ALL THREE (status block absent + body < 200 chars + lexeme match); `retry_after_seconds` parsed from `Retry-After: N` when present, `null` otherwise (NEVER fabricated); `ask_peers` + `ask_peer` surface `rate_limited_peers[]` |
+| Anti-hallucination | Tail directive extended with NEEDS_EVIDENCE-first + exhaustive-search language (6.14); optional `confidence: 'verified' \| 'inferred' \| 'unknown'` and `evidence_sources: [string]` on structured status block; hard-pair rule `confidence='unknown'` MUST pair with `status='NEEDS_EVIDENCE'` (parser warning on violation); advisory warning when `confidence='verified'` has empty `evidence_sources`; new MCP tool `escalate_to_operator(session_id, question, context)` persists under `meta.escalations[]`; caller orchestrator surfaces to operator via chat |
+| CLI banner as authoritative attestation | Codex CLI stderr banner `model: <id>` promoted from v4.9 forensic-only to AUTHORITATIVE for cli-subscription transports when parseable (6.11 amendment); banner MATCH -> `cli_banner_attested: true` audit elevation; banner MISMATCH -> `model_failure_class: 'cli_banner_attestation_mismatch'` + `protocol_violation: true` hard gate (NOT retried); absent/unparseable banner -> v4.9 `model_check_skipped` path unchanged; Claude CLI banner parsing deferred to v0.8+; oauth-personal has no banner equivalent, stays on §6.11 skip |
 
 ---
 
-## 8. Criterios de aceitacao (atualizados em v4.9)
+## 8. Criterios de aceitacao (atualizados em v4.10)
 
 **Regra editorial normativa (NOVO em v4.5):** Entradas nesta secao que usem
 linguagem de aprovacao bilateral, incluindo "Spec vX.Y foi aprovada
@@ -1874,6 +2036,27 @@ inconsistencia.
   stack (ultrathink + code-reasoning + spawnPeer) operated end-to-end
   without any silent fallback under the billing-veto constraint of
   CLI-only peer transport (`feedback_subscription_over_api_billing`).
+- Spec v4.10 is an **implementation-ratified** revision of v4.9,
+  executing the two deferred scope items already approved in session
+  c9508617's v4.9 design convergence: Item D (anti-hallucination /
+  epistemic discipline, new section 6.14) and Item E (CLI banner as
+  authoritative attestation, amendment to section 6.11). v4.10 ships
+  integrated with code release v0.7.0-alpha in a single commit on
+  2026-04-24. No new trilateral design session was opened — the
+  scope was pre-ratified in c9508617, and the operator directive
+  2026-04-24 explicitly requested landing the deferred items without
+  delay ("implemente logo tudo o que esta faltando e que ja foi
+  planejado"). This entry uses the "implementation-ratified" status
+  label rather than "bilaterally/trilaterally approved" to preserve
+  the v4.5 preamble rule's spec-session integrity: v4.10 has no new
+  design session on disk, but its scope is contained entirely within
+  the approved v4.9 deferral set. Future revisions that introduce
+  NEW design decisions (not pre-ratified) MUST open a new trilateral
+  or bilateral session per the v4.5 preamble. Open-source readiness
+  (LICENSE, SECURITY) was also in the deferred set and is confirmed
+  already-in-place at v0.7.0-alpha (AGPLv3 per workspace default,
+  SECURITY.md present); no v4.10 code change needed. Authored in
+  en-US per section 6.10.
 
 Once accepted and published:
 - Replaces the prior revision in-place.
