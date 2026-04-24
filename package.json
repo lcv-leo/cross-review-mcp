@@ -1,6 +1,6 @@
 {
   "name": "cross-review-mcp",
-  "version": "0.3.0-alpha",
+  "version": "0.4.0-alpha",
   "private": true,
   "description": "MCP server orchestrating cross-review between Claude Code and ChatGPT Codex",
   "type": "commonjs",
