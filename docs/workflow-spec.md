@@ -1,203 +1,285 @@
-# Cross-Review MCP Workflow Specification v4.2
+# Cross-Review MCP Workflow Specification v4.6
 
-**Status**: v4.2 eh revisao spec-only de v4.1 via sessao f1fdbee4 (2026-04-24,
-aprovada bilateral). v4.2 altera APENAS politica de processo -- NAO toca em
-schema, parser, server, session-store, peer-spawn ou qualquer codigo. Logo,
-v4.2 NAO requer bump do `cross-review-mcp` (permanece em v0.4.0-alpha).
-Precursores: v2 (sessao 7d745f38); v3 (sessao 806a1c4f); v4 normativa
-absorvendo v0.4.0-alpha (sessao 08cd61e6); v4.1 spec-only absorvendo
-§6.6 normativa (sessao a847f897).
+**Status**: v4.6 is a spec-only revision of v4.5 via session b1700438
+(2026-04-24, bilateral-approved). v4.6 adds section 6.10 "Language policy
+for peer exchange and internal artifacts" and authorizes bulk translation
+of existing pt-BR non-user-facing content to en-US. v4.6 touches NO
+schema, parser, server, session-store, peer-spawn or any code. Therefore
+v4.6 does NOT require a bump of `cross-review-mcp` (stays at
+v0.4.0-alpha). Predecessors: v2 (session 7d745f38); v3 (session
+806a1c4f); v4 normative absorbing v0.4.0-alpha (session 08cd61e6); v4.1
+spec-only absorbing normative section 6.6 (session a847f897); v4.2
+spec-only promoting section 6.7 (session f1fdbee4); v4.3 adding
+section 6.9.2.1 + advisory tooling (session 9c56005b); v4.4 suspending
+schema v5 per YAGNI (session bd8c3cfb); v4.5 formalizing the
+em-revalidacao to aprovada pattern (session 843d57eb).
 
-Encoding: ASCII-only com transliteracao de acentos do portugues. Motivo
-operacional em secao 6.4.
-
----
-
-## 0c. Delta v4.1 -> v4.2 (sumario executivo)
-
-- **Secao 6.7 PROMOVIDA DE FOLLOW-UP PARA NORMATIVA**: matriz minima de
-  evidencia por classe de artefato em formato tabular, cobrindo classes
-  empiricamente observadas em sessoes historicas (JS, TS, JSON, Markdown,
-  cross-review-mcp proprio). Link normativo com §3: peers usam a matriz
-  como baseline para decisao NEEDS_EVIDENCE. Regra "classe nao listada"
-  como fallback documentado. `wrangler deploy --dry-run` removido (ver
-  `feedback_no_wrangler_deploy`: deploy verification eh responsabilidade
-  de CI/GHA, nao pre-ask_peer gate).
-- **Secao 8 AJUSTADA**: registra aprovacao bilateral da sessao f1fdbee4.
-
-Toda mudanca em v4.2 eh policy/documentacao. Nenhum contrato programatico
-foi alterado.
+Encoding: ASCII-only with transliteration of Portuguese accents where
+they appear (see section 6.4). From v4.6 forward, peer exchange and
+non-user-facing artifacts are authored in en-US (see section 6.10),
+trivially satisfying ASCII-only without transliteration.
 
 ---
 
-## 0b. Delta v4 -> v4.1 (sumario executivo)
+## 0f. Delta v4.5 -> v4.6 (executive summary)
 
-- **Secao 6.5 SUAVIZADA**: linguagem de ledger passa de obrigatoria ("mantem")
-  para opcional ("pode manter"; "Quando adotado...") para coerencia com
-  evidencia empirica de nao-adocao (auditoria 2026-04-24: nenhum `ledger.md`
-  em `~/.cross-review/`).
-- **Secao 6.6 PROMOVIDA DE FOLLOW-UP PARA NORMATIVA**: contrato normativo com
-  thresholds concretos e ordem de compressao mandatoria, dividido em 4
-  subsecoes: 6.6.1 Transcript, 6.6.2 Ledger, 6.6.3 meta.json, 6.6.4
-  Non-destructive compression.
-- **Secao 7 AJUSTADA**: linha de ledger suavizada para coerencia com §6.5;
-  nova linha "Overflow" com ponteiros para §6.6.
-- **Secao 8 AJUSTADA**: criterios de aceitacao registram aprovacao bilateral
-  da sessao a847f897.
+- **Section 6.10 NEW**: language policy for peer exchange and internal
+  artifacts. All cross-review peer exchange and non-user-facing project
+  artifacts MUST be en-US from v4.6 onward; user-facing content
+  (assistant chat to user + historically sealed section 8 entries
+  v4-v4.5) MAY remain pt-BR. Clause authorizes bulk translation of
+  existing pt-BR non-user-facing content without per-artifact
+  cross-review.
+- **Section 7 row "Encoding" updated**: references section 6.10.
+- **Section 8 entry added**: v4.6 sealed bilaterally in session b1700438
+  (5 rounds).
 
-Toda mudanca em v4.1 eh policy/documentacao. Nenhum contrato programatico
-(tools MCP, formato do bloco, schema de payload, session-store on-disk layout)
-foi alterado. Qualquer leitor que infira necessidade de bump do server por
-conta de v4.1 esta equivocado.
+All v4.6 changes are policy/documentation. No programmatic contract was
+altered.
 
 ---
 
-## 0a. Delta v3 -> v4 (sumario executivo)
+## 0e. Delta v4.4 -> v4.5 (executive summary)
 
-- **Secao 2.3.1 NOVA**: schema JSON expandido do bloco estruturado.
-  Campos opcionais `uncertainty`, `caller_requests`, `follow_ups` validados
-  per-field; invalidos sao DESCARTADOS com warning sem derrubar o bloco;
-  campos fora da whitelist sao descartados com warning. Regra normativa
-  `omit-unless-signal`. Limites: <=20 items por array, <=500 chars por item.
-- **Secao 5 ATUALIZADA**: conjunto consumido pelo caller expandido com
-  `parser_warnings` e `peer_model`.
-- **Secao 6.8 REESCRITA**: antes FOLLOW-UP, agora IMPLEMENTADO em
-  v0.4.0-alpha (secao 2.3.1).
-- **Secao 6.9 NOVA (operacional normativa)**: 6.9.1 Tri-tool obrigatorio
-  (cross-review + ultrathink + code-reasoning) e 6.9.2 Modelo top-level
-  (peer invocado com IDs especificos em cada release; auditado via
+- **Section 8 preamble added (editorial normative rule)**: formalizes
+  the "em revalidacao bilateral during session; aprovada bilateral
+  only post-READY bilateral" pattern previously applied de facto in
+  v4.1, v4.2, v4.3 but skipped in v4.4. Non-retroactive rule.
+- **Section 8 entry for v4.5 written self-demonstratively**: initially
+  "em revalidacao bilateral" during the session, promoted to "aprovada
+  bilateralmente" in a separate post-sealing edit; both edits composed
+  in the commit that introduces the rule.
+
+All v4.5 changes are policy/documentation.
+
+---
+
+## 0d. Delta v4.3 -> v4.4 (executive summary)
+
+- **Section 8 follow-up rewritten**: the original follow-up "Section
+  2.3.1: reconsideration of caller_requests/follow_ups as arrays of
+  objects" is replaced with explicit YAGNI suspension + objective
+  reopening criterion (a v4-era peer must name ONE concrete
+  caller_request that FAILED due to string limitation). Test coverage
+  for current drop behavior already exists via
+  STRUCTURED_V4_NON_STRING_ITEM smoke case.
+
+All v4.4 changes are policy/documentation.
+
+---
+
+## 0c. Delta v4.2 -> v4.3 (executive summary)
+
+- **Section 6.9.2.1 NEW (normative)**: model drift audit as an
+  advisory-only mechanism. Companion tooling (docs/top-models.json +
+  scripts/audit-model-drift.js + npm script `check-models`) added as a
+  fourth layer of auditability on top of the three existing layers
+  (pinned IDs in peer-spawn.js + peer_model persisted per round +
+  section 6.9.2 bump-forced change process). Clause does NOT authorize
+  silent fallback, config/env override, automatic selection, or
+  bump-less ID change.
+- **Section 7 row "Model" updated**: references the drift-audit script.
+
+Runtime unchanged: `peer-spawn.js` immutable. v4.3 introduces tooling
+without modifying the MCP server itself.
+
+---
+
+## 0b. Delta v4.1 -> v4.2 (executive summary)
+
+- **Section 6.7 PROMOTED FROM FOLLOW-UP TO NORMATIVE**: minimal
+  evidence matrix per artifact class in tabular form, covering classes
+  empirically observed in historical sessions (JS, TS, JSON, Markdown,
+  cross-review-mcp itself). Normative link with section 3: peers use
+  the matrix as a baseline when deciding NEEDS_EVIDENCE. "Class not
+  listed" rule as documented fallback. `wrangler deploy --dry-run`
+  removed (see `feedback_no_wrangler_deploy`: deploy verification is a
+  CI/GHA responsibility, not a pre-ask_peer gate).
+- **Section 8 adjusted**: records bilateral approval of session
+  f1fdbee4.
+
+All v4.2 changes are policy/documentation. No programmatic contract was
+altered.
+
+---
+
+## 0a. Delta v4 -> v4.1 (executive summary)
+
+- **Section 6.5 SOFTENED**: ledger wording moves from mandatory
+  ("maintain") to optional ("may maintain"; "When adopted...") to match
+  empirical non-adoption (audit 2026-04-24: no `ledger.md` in
+  `~/.cross-review/`).
+- **Section 6.6 PROMOTED FROM FOLLOW-UP TO NORMATIVE**: normative
+  contract with concrete thresholds and mandatory compression order,
+  split into 4 subsections: 6.6.1 Transcript, 6.6.2 Ledger,
+  6.6.3 meta.json, 6.6.4 Non-destructive compression.
+- **Section 7 adjusted**: ledger line softened for coherence with
+  section 6.5; new "Overflow" line with pointers to section 6.6.
+- **Section 8 adjusted**: acceptance criteria record bilateral approval
+  of session a847f897.
+
+All v4.1 changes are policy/documentation. No programmatic contract
+(MCP tools, block format, payload schema, on-disk session-store layout)
+was altered. Any reader inferring a need to bump the server due to v4.1
+is mistaken.
+
+---
+
+## 0. Delta v3 -> v4 (executive summary)
+
+- **Section 2.3.1 NEW**: expanded JSON schema for the structured block.
+  Optional fields `uncertainty`, `caller_requests`, `follow_ups`
+  per-field validated; invalid fields are DROPPED with a warning
+  without failing the block; fields outside the whitelist are dropped
+  with a warning. Normative rule `omit-unless-signal`. Limits: <=20
+  items per array, <=500 chars per item.
+- **Section 5 UPDATED**: the set consumed by the caller expanded with
+  `parser_warnings` and `peer_model`.
+- **Section 6.8 REWRITTEN**: previously a FOLLOW-UP, now IMPLEMENTED in
+  v0.4.0-alpha (section 2.3.1).
+- **Section 6.9 NEW (operational normative)**: 6.9.1 Mandatory tri-tool
+  (cross-review + ultrathink + code-reasoning) and 6.9.2 Top-level
+  model (peer invoked with specific IDs at each release; audited via
   `peer_model`).
 
 ---
 
-## 0. Delta v2 -> v3 (sumario executivo, preservado para rastreabilidade)
+## 0-legacy. Delta v2 -> v3 (executive summary, preserved for traceability)
 
-- **Secao 2.1 reescrita**: contrato de STATUS ancorado exclusivamente no tail
-  da resposta / ultima linha nao-vazia. Removido scan global do regex.
-  Adicionado `NEEDS_EVIDENCE` ao enum.
-- **Secao 2.2 NOVA**: anchor posicional ("o que estiver no final vence");
-  substitui a regra implicita "structured wins over regex" de v2.
-- **Secao 2.3 PROMOVIDA de FOLLOW-UP para IMPLEMENTADA**: STATUS em campo
-  estruturado `<cross_review_status>{...}</cross_review_status>` como forma
-  preferida. Implementada em v0.3.0-alpha.
-- **Secao 2.4 NOVA**: contrato de falha do bloco estruturado -- JSON
-  malformado ou status fora do enum retorna `null` sem cair no regex fallback.
-- **Secao 2.6 NOVA**: interacao com orquestrador em versao mista durante
-  janela de upgrade.
-- **Secao 3.3 AJUSTADA**: CALLER_REQUEST deve acompanhar status
-  `NEEDS_EVIDENCE` (e nao `NOT_READY`).
-- **Secao 3.5 NOVA**: reconhecimento operacional de sandbox do peer com
-  exec de hash/node bloqueado (validacao por leitura direta).
-- **Secao 5 ATUALIZADA**: conjunto consumido pelo caller expandido para
-  incluir `peer_structured` e `status_source` alem de `content` e
-  `peer_status`.
-- **Secao 6.3 reescrita**: `NEEDS_EVIDENCE` promovido de FOLLOW-UP para
-  estado peer-only canonico. Caller continua restrito a `READY|NOT_READY`.
-- **Secao 6.4 AJUSTADA**: explicitado que a regra ASCII-only se aplica
-  tambem a arquivos pre-existentes promovidos a artifact de review.
-- **Secao 6.6 (overflow) sem mudanca** (FOLLOW-UP nao-bloqueante).
-- **Secao 6.7 ATUALIZADA**: matriz minima de evidencia agora cita
-  `vitest/test script` generico (em vez de `vitest` especifico) e adiciona
-  entrada para `cross-review-mcp` proprio (= `npm test`).
-- **Secao 6.8 NOVA**: FOLLOW-UP para esquema JSON expandido do bloco
-  estruturado (v0.4.0+).
-
----
-
-## 1. Contratos de abertura de sessao
-
-### 1.1 Artifacts obrigatorios no session_init
-- Arquivos sob revisao: caminhos absolutos.
-- Transcript (quando houver contexto caller-user relevante): arquivo unico em
-  path temporario, ASCII-only.
-
-### 1.2 Transcript - formato hibrido acordado
-O transcript NAO deve ser verbatim puro nem sintese pura. Formato hibrido:
-
-- Abertura estruturada (curta): objetivo desta sessao, escopo, pergunta desta
-  rodada, status atual do caller.
-- Diretivas do user que mudam comportamento: verbatim, apenas as normativas
-  (feedback de coaching, mudanca de prioridades, restricoes operacionais).
-  Transliterar acentos se houver; preservar sentido.
-- Timeline resumida por rodada das sessoes anteriores: 1-3 linhas por rodada
-  com achado, resposta, motivo do estado.
-- Tabela de artefatos: caminho, fingerprint (SHA-256), se mudou desde a
-  rodada anterior.
-- Bloco de evidencias: comandos rodados pelo caller, outputs relevantes, flag
-  de validade (se o artefato mudou desde o comando, output esta stale).
-- Bloco "open questions / pedido ao peer" com respostas esperadas.
-- Apendice verbatim: apenas para trechos litigiosos ou semanticamente
-  sensiveis, sempre ASCII-only.
-
-Tamanho otimo: corpo principal denso em 1-3 mil palavras, apendice verbatim
-opcional. Full verbatim so no primeiro handoff de sessao complexa ou quando
-houver disputa semantica.
-
-### 1.3 Clausula de escopo obrigatoria
-Primeiro prompt deve conter secao "Contrato de escopo" enumerando:
-- Alvo da sessao (o que esta sendo revisado/decidido).
-- O que esta DENTRO do escopo.
-- O que fica FORA do escopo (migra para FOLLOW-UP sem bloquear READY).
+- **Section 2.1 rewritten**: STATUS contract anchored exclusively on
+  the response tail / last non-empty line. Removed global regex scan.
+  Added `NEEDS_EVIDENCE` to the enum.
+- **Section 2.2 NEW**: positional anchor ("whatever is at the end
+  wins"); replaces the implicit "structured wins over regex" rule from
+  v2.
+- **Section 2.3 PROMOTED from FOLLOW-UP to IMPLEMENTED**: STATUS in
+  structured field `<cross_review_status>{...}</cross_review_status>`
+  as the preferred form. Implemented in v0.3.0-alpha.
+- **Section 2.4 NEW**: failure contract for the structured block --
+  malformed JSON or status outside the enum returns `null` without
+  falling through to the regex fallback.
+- **Section 2.6 NEW**: interaction with an orchestrator in mixed
+  version during the upgrade window.
+- **Section 3.3 ADJUSTED**: CALLER_REQUEST must accompany status
+  `NEEDS_EVIDENCE` (not `NOT_READY`).
+- **Section 3.5 NEW**: operational acknowledgement of peer sandbox with
+  blocked hash/node exec (validation via direct reading).
+- **Section 5 UPDATED**: the set consumed by the caller expanded to
+  include `peer_structured` and `status_source` in addition to
+  `content` and `peer_status`.
+- **Section 6.3 rewritten**: `NEEDS_EVIDENCE` promoted from FOLLOW-UP
+  to canonical peer-only state. Caller remains restricted to
+  `READY|NOT_READY`.
+- **Section 6.4 ADJUSTED**: made explicit that the ASCII-only rule
+  also applies to pre-existing files promoted to review artifact.
+- **Section 6.6 (overflow) no change** (non-blocking FOLLOW-UP).
+- **Section 6.7 UPDATED**: minimal evidence matrix now cites
+  `vitest/test script` generic (instead of `vitest` specific) and adds
+  an entry for `cross-review-mcp` itself (= `npm test`).
+- **Section 6.8 NEW**: FOLLOW-UP for the expanded JSON schema of the
+  structured block (v0.4.0+).
 
 ---
 
-## 2. Protocolo STATUS
+## 1. Session-opening contracts
 
-### 2.1 Contrato de formato do peer (REESCRITO em v3)
+### 1.1 Mandatory artifacts in session_init
+- Files under review: absolute paths.
+- Transcript (when there is relevant caller-user context): single file at
+  a temp path, ASCII-only.
 
-O parser inspeciona APENAS o tail da resposta. Mencoes de `STATUS: X` ou de
-`</cross_review_status>` dentro da prosa anterior NAO disparam deteccao.
+### 1.2 Transcript - agreed hybrid format
+The transcript should NOT be pure verbatim nor pure synthesis. Hybrid
+format:
 
-Em ordem de tentativa:
+- Structured opening (short): goal of this session, scope, question of
+  this round, caller's current status.
+- User directives that change behavior: verbatim, only the normative
+  ones (coaching feedback, priority shifts, operational constraints).
+  Transliterate accents if any; preserve meaning.
+- Per-round summarized timeline from prior sessions: 1-3 lines per
+  round with finding, response, state reason.
+- Artifact table: path, fingerprint (SHA-256), whether it changed
+  since the prior round.
+- Evidence block: commands run by the caller, relevant outputs,
+  validity flag (if the artifact changed since the command, the output
+  is stale).
+- "Open questions / request to peer" block with expected answers.
+- Verbatim appendix: only for contentious or semantically sensitive
+  excerpts, always ASCII-only.
 
-1. **Bloco estruturado (preferido)**: se o tail (ignorando whitespace
-   trailing) termina com a sequencia literal `</cross_review_status>`, o
-   parser localiza o `<cross_review_status>` imediatamente a esquerda,
-   extrai o conteudo intermediario, aplica `trim()` e `JSON.parse()`. O
-   payload DEVE ser um objeto JSON com campo `status` cujo valor esta em
-   `{READY, NOT_READY, NEEDS_EVIDENCE}`. O payload aceita multi-linha e
-   pretty-printing desde que o closing tag seja a ultima sequencia
-   nao-branca do texto.
+Optimal size: dense main body of 1-3 thousand words, optional verbatim
+appendix. Full verbatim only on the first handoff of a complex session
+or when there is a semantic dispute.
 
-2. **Fallback legacy (backwards-compat)**: apenas quando o caminho (1) nao
-   dispara, o parser isola a ULTIMA LINHA NAO-VAZIA do texto, aplica
-   `trim()`, e exige regex EXATA case-sensitive
+### 1.3 Mandatory scope clause
+The first prompt must contain a "Scope contract" section enumerating:
+- Session target (what is being reviewed/decided).
+- What is INSIDE scope.
+- What stays OUTSIDE scope (migrates to FOLLOW-UP without blocking
+  READY).
+
+---
+
+## 2. STATUS protocol
+
+### 2.1 Peer format contract (REWRITTEN in v3)
+
+The parser inspects ONLY the response tail. Mentions of `STATUS: X` or
+`</cross_review_status>` inside prior prose do NOT trigger detection.
+
+In order of attempt:
+
+1. **Structured block (preferred)**: if the tail (ignoring trailing
+   whitespace) ends with the literal sequence
+   `</cross_review_status>`, the parser locates the
+   `<cross_review_status>` immediately to the left, extracts the
+   intermediate content, applies `trim()` and `JSON.parse()`. The
+   payload MUST be a JSON object with field `status` whose value is in
+   `{READY, NOT_READY, NEEDS_EVIDENCE}`. The payload accepts multi-line
+   and pretty-printing as long as the closing tag is the last non-blank
+   sequence of the text.
+
+2. **Legacy fallback (backwards-compat)**: only when path (1) does not
+   fire, the parser isolates the LAST NON-EMPTY LINE of the text,
+   applies `trim()`, and requires the EXACT case-sensitive regex
    `^STATUS: (READY|NOT_READY|NEEDS_EVIDENCE)$`.
 
-3. **Sem match**: retorna `{status: null, structured: null, source: null}`.
-   Caller trata como `protocol_violation` e pode invocar rodada
-   "APENAS-FORMATO" pedindo re-emissao.
+3. **No match**: returns `{status: null, structured: null, source: null}`.
+   Caller treats as `protocol_violation` and may invoke a
+   "FORMAT-ONLY" round requesting re-emission.
 
-Output expose ao caller: `status` (string | null), `structured` (objeto JSON
-parseado quando caminho 1 venceu, else null), `source` (`'structured'` |
+Output exposed to caller: `status` (string | null), `structured` (parsed
+JSON object when path 1 won, else null), `source` (`'structured'` |
 `'regex'` | `null`).
 
-### 2.2 Anchor posicional (NOVO em v3)
+### 2.2 Positional anchor (NEW in v3)
 
-A precedencia entre os dois formatos e **por posicao, nao por formato**. Se o
-peer emitir um bloco estruturado no meio do corpo mas terminar com linha
-legacy `STATUS: X`, o caminho (2) vence porque a linha legacy e a ultima
-linha nao-vazia. Inversamente, se o peer emitir `STATUS: X` no meio do corpo
-mas terminar com bloco estruturado valido, o caminho (1) vence porque o tail
-termina com o closing tag.
+Precedence between the two formats is **by position, not by format**. If
+the peer emits a structured block mid-body but ends with a legacy
+`STATUS: X` line, path (2) wins because the legacy line is the last
+non-empty line. Conversely, if the peer emits `STATUS: X` mid-body but
+ends with a valid structured block, path (1) wins because the tail ends
+with the closing tag.
 
-Motivacao: elimina a regra anterior "structured wins over regex" que era
-ambigua em textos mistos. Ambos os caminhos sao ancorados em posicao; o
-contrato e "o que estiver no FINAL vence".
+Motivation: removes the previous "structured wins over regex" rule that
+was ambiguous in mixed texts. Both paths are position-anchored; the
+contract is "whatever is at the END wins".
 
-### 2.3 STATUS estruturado -- IMPLEMENTADO em v0.3.0-alpha
+### 2.3 Structured STATUS -- IMPLEMENTED in v0.3.0-alpha
 
-Esta secao deixou de ser FOLLOW-UP. O MCP agora aceita o bloco estruturado
-como forma preferida, conforme secao 2.1 caminho (1). Referencia de
-implementacao: `src/lib/status-parser.js`.
+This section is no longer a FOLLOW-UP. The MCP now accepts the
+structured block as the preferred form, per section 2.1 path (1).
+Implementation reference: `src/lib/status-parser.js`.
 
-Desde v0.3.0-alpha, o payload JSON aceitava apenas `status`. Em v0.4.0-alpha
-(secao 2.3.1), o payload foi expandido com campos opcionais validados.
+Since v0.3.0-alpha, the JSON payload accepted only `status`. In
+v0.4.0-alpha (section 2.3.1), the payload was expanded with validated
+optional fields.
 
-### 2.3.1 Schema expandido do payload (NOVO em v4, implementado em v0.4.0-alpha)
+### 2.3.1 Expanded payload schema (NEW in v4, implemented in v0.4.0-alpha)
 
-O payload JSON do bloco estruturado passa a aceitar tres campos OPCIONAIS
-alem de `status`:
+The JSON payload of the structured block now accepts three OPTIONAL
+fields in addition to `status`:
 
 ```
 {
@@ -208,613 +290,635 @@ alem de `status`:
 }
 ```
 
-Limites de tamanho (invariantes do parser):
-- `caller_requests` e `follow_ups`: ARRAYS de strings, maximo 20 items,
-  cada item com no maximo 500 chars.
-- `uncertainty`: string no enum `{low, medium, high}`.
+Size limits (parser invariants):
+- `caller_requests` and `follow_ups`: ARRAYS of strings, maximum 20
+  items, each item at most 500 chars.
+- `uncertainty`: string in enum `{low, medium, high}`.
 
-Validacao deterministica per-field (ordem de verificacao):
-1. shape (array vs nao-array; string vs nao-string).
-2. quantidade (items do array).
-3. tipo dos itens (string vs nao-string).
-4. tamanho dos itens (chars por string).
+Deterministic per-field validation (check order):
+1. shape (array vs non-array; string vs non-string).
+2. count (array items).
+3. item type (string vs non-string).
+4. item length (chars per string).
 
-Se qualquer regra falhar, o campo inteiro eh DESCARTADO do `peer_structured`
-e UM warning por campo rejeitado eh adicionado a `parser_warnings` (string
-humano-legivel que identifica o campo e a regra violada, com indice/size
-quando aplicavel). Campo opcional invalido NAO invalida o bloco inteiro --
-`peer_status` preserva o valor do `status` quando este eh valido.
+If any rule fails, the entire field is DROPPED from `peer_structured`
+and ONE warning per rejected field is added to `parser_warnings` (a
+human-readable string identifying the field and the violated rule, with
+index/size when applicable). An invalid optional field does NOT
+invalidate the entire block -- `peer_status` preserves the `status`
+value when it is valid.
 
-Empty array (`[]`) eh normalizado para AUSENCIA do campo em
-`peer_structured`, sem warning. Equivalencia semantica explicita: campo
-ausente === array vazio.
+An empty array (`[]`) is normalized to ABSENCE of the field in
+`peer_structured`, without a warning. Explicit semantic equivalence:
+absent field === empty array.
 
-Campos fora da whitelist (`status`, `uncertainty`, `caller_requests`,
-`follow_ups`) sao DESCARTADOS de `peer_structured` e cada ocorrencia gera um
-warning `unknown field 'X' ignored`. Extensao futura do schema requer bump
-explicito de release + spec (adicao silenciosa de campo eh violacao do
-contrato).
+Fields outside the whitelist (`status`, `uncertainty`, `caller_requests`,
+`follow_ups`) are DROPPED from `peer_structured` and each occurrence
+generates a warning `unknown field 'X' ignored`. Future schema extension
+requires an explicit release + spec bump (silent field addition is a
+contract violation).
 
-Regra normativa `omit-unless-signal`: peers DEVEM omitir os campos
-opcionais por padrao; emissao apenas quando o valor efetivamente altera a
-leitura do parecer. Default-padding (ex: `uncertainty: "medium"` sem
-significado real) eh violacao do contrato operacional. Valida-se pela
-coerencia textual do corpo da resposta, nao automaticamente pelo parser.
+Normative rule `omit-unless-signal`: peers MUST omit optional fields by
+default; emit only when the value actually changes the reading of the
+parecer. Default-padding (e.g. `uncertainty: "medium"` without real
+meaning) is an operational contract violation. Validated by textual
+coherence of the response body, not automatically by the parser.
 
-Semantica por pairing `status x campo opcional`:
-- `caller_requests` com `NEEDS_EVIDENCE`: uso primario esperado. Lista
-  estruturada de pedidos ao caller.
-- `caller_requests` com `READY` ou `NOT_READY`: permitido mas interpretado
-  como nice-to-have nao-bloqueante. Caller pode atender ou ignorar.
-- `follow_ups` com `READY`: uso primario esperado. Itens acordados para
-  sessao futura; sinal explicito de "fechamos com debito acordado".
-- `follow_ups` com `NOT_READY` ou `NEEDS_EVIDENCE`: permitido, nao bloqueia
-  fluxo desta sessao.
-- `uncertainty` com qualquer status: informativa; NAO afeta convergencia
-  nem influencia `peer_status`.
+Semantics by `status x optional field` pairing:
+- `caller_requests` with `NEEDS_EVIDENCE`: primary expected use.
+  Structured list of requests to the caller.
+- `caller_requests` with `READY` or `NOT_READY`: allowed but
+  interpreted as non-blocking nice-to-have. Caller may act or ignore.
+- `follow_ups` with `READY`: primary expected use. Items agreed for a
+  future session; explicit "closed with agreed debt" signal.
+- `follow_ups` with `NOT_READY` or `NEEDS_EVIDENCE`: allowed, does not
+  block this session's flow.
+- `uncertainty` with any status: informative; does NOT affect
+  convergence nor `peer_status`.
 
-Compatibilidade retroativa: bloco v3 puro `{"status":"X"}` permanece valido
-em v4. Passa pelo mesmo codepath com `parser_warnings: []` e
+Backwards compatibility: pure v3 block `{"status":"X"}` remains valid in
+v4. Passes through the same codepath with `parser_warnings: []` and
 `peer_structured = {status: "X"}`.
 
-### 2.4 Falha silenciosa do bloco estruturado (NOVO em v3)
+### 2.4 Silent failure of the structured block (NEW in v3)
 
-Se o tail termina com `</cross_review_status>` mas:
-- o opening tag `<cross_review_status>` esta ausente, OU
-- o payload nao e um JSON valido, OU
-- o JSON parseia mas nao e um object, OU
-- o campo `status` nao existe / nao e string / esta fora do enum,
+If the tail ends with `</cross_review_status>` but:
+- the opening tag `<cross_review_status>` is absent, OR
+- the payload is not valid JSON, OR
+- the JSON parses but is not an object, OR
+- the `status` field does not exist / is not a string / is outside the
+  enum,
 
-entao o parser retorna `{status: null, structured: null, source: null}`.
-**NAO ha fallback para regex** nesse caso, porque a ultima linha nao-vazia
-e o closing tag, que nao casa com `^STATUS: X$`. Isto e intencional:
-bloco estruturado emitido pelo peer e declaracao explicita de uso do
-contrato novo; falha-lo silenciosamente cairia em regex e mascararia erro
-de protocolo. Fallback nesse caminho reabriria a ambiguidade que motivou a
-reescrita da secao 2.1.
+then the parser returns `{status: null, structured: null, source: null}`.
+**There is NO fallback to the regex** in this case, because the last
+non-empty line is the closing tag, which does not match `^STATUS: X$`.
+This is intentional: a structured block emitted by the peer is an
+explicit declaration of use of the new contract; silently failing it
+would fall through to the regex and mask a protocol error. A fallback
+on that path would reopen the ambiguity that motivated the rewrite of
+section 2.1.
 
-### 2.5 Fallback em violacao de formato
+### 2.5 Fallback on format violation
 
-Se `status: null` (qualquer um dos caminhos 1 ou 2 falhou):
-- Caller envia rodada minimalista "APENAS-FORMATO" pedindo re-emissao do
-  status.
-- Mantem o conteudo tecnico da rodada anterior valido -- nao repete analise.
+If `status: null` (either path 1 or 2 failed):
+- Caller sends a minimalist "FORMAT-ONLY" round requesting re-emission
+  of the status.
+- Keeps the previous round's technical content valid -- does not repeat
+  the analysis.
 
-### 2.6 Interacao com orquestrador versao mista
+### 2.6 Interaction with mixed-version orchestrator
 
-Se o orquestrador em execucao nao foi reiniciado apos upgrade do server e
-roda versao antiga do parser (v0.2.0-alpha: apenas regex `STATUS: X`), o
-peer que emitir APENAS o bloco estruturado tera `peer_status: null` +
-`protocol_violation: true` registrado em meta.json, mesmo respondendo
-corretamente no conteudo. Mitigacao durante janelas de transicao: peer emite
-**ambos** os formatos (bloco estruturado em posicao anterior + linha legacy
-`STATUS: X` como TAIL). Isso satisfaz parser antigo (via caminho 2) e
-parser novo (via caminho 2 tambem -- porque TAIL e a linha legacy). Apos
-reload do orquestrador, peer pode voltar a emitir apenas o bloco
-estruturado.
+If the running orchestrator has not been restarted after a server
+upgrade and runs the old parser version (v0.2.0-alpha: only the
+`STATUS: X` regex), a peer that emits ONLY the structured block will
+have `peer_status: null` + `protocol_violation: true` recorded in
+meta.json, even though the content is correct. Mitigation during
+transition windows: the peer emits **both** formats (structured block
+in an earlier position + legacy `STATUS: X` line as TAIL). This
+satisfies the old parser (via path 2) and the new parser (via path 2
+too -- because the TAIL is the legacy line). After the orchestrator
+reload, the peer may return to emitting only the structured block.
 
 ---
 
-## 3. Paridade de tooling -- protocolo hibrido (MANTIDO de v2)
+## 3. Tooling parity -- hybrid protocol (KEPT from v2)
 
-### 3.1 Regra dura
-Qualquer assercao factual sobre COMPORTAMENTO DINAMICO (sintaxe parseavel,
-testes passando, build compilando, tipo-checando, lint limpo, runtime
-produzindo output X) SEM EVIDENCIA ANEXADA deve ser tratada pelo peer como
-NAO VERIFICADA.
+### 3.1 Hard rule
+Any factual assertion about DYNAMIC BEHAVIOR (parseable syntax, tests
+passing, build compiling, type-checking, lint clean, runtime producing
+output X) WITHOUT ATTACHED EVIDENCE must be treated by the peer as
+UNVERIFIED.
 
-### 3.2 Comportamento padrao do caller
-Antes de cada ask_peer, caller executa a matriz relevante de validacoes e
-anexa resultados no prompt.
+### 3.2 Default caller behavior
+Before each ask_peer, the caller runs the relevant validation matrix
+and attaches the results to the prompt.
 
-### 3.3 Valvula operacional CALLER_REQUEST
+### 3.3 CALLER_REQUEST operational valve
 
-Se peer identifica que precisa de evidencia dinamica nao anexada, responde
-com bloco explicito:
+If the peer identifies that it needs dynamic evidence not attached, it
+responds with an explicit block:
 
 ```
 CALLER_REQUEST:
-- comando: <cmd exato>
-- proposito: <por que preciso>
-- criterio de aceite: <que output/exit_code/pattern eu espero ver>
+- command: <exact cmd>
+- purpose: <why I need it>
+- acceptance criterion: <which output/exit_code/pattern I expect>
 ```
 
-Caller, na proxima rodada, executa como PRIMEIRA ACAO e anexa output bruto +
-veredicto contra criterio de aceite.
+The caller, on the next round, executes as FIRST ACTION and attaches
+raw output + verdict against the acceptance criterion.
 
-**Em v3**, o peer que emite `CALLER_REQUEST` DEVE acompanhar o bloco com
-status `NEEDS_EVIDENCE` (nao `NOT_READY`), per secao 6.3. A semantica
-sinaliza ao caller que o bloqueio e de evidencia pendente, nao de
-discordancia tecnica.
+**In v3**, the peer that emits `CALLER_REQUEST` MUST accompany the block
+with status `NEEDS_EVIDENCE` (not `NOT_READY`), per section 6.3. The
+semantics signal to the caller that the blockage is pending evidence,
+not a technical disagreement.
 
-### 3.4 Evidencia vencida
+### 3.4 Stale evidence
 
-Toda evidencia anexada inclui FINGERPRINT DO ARTEFATO no momento do comando.
-Se o artefato mudou desde entao (edit, overwrite), evidencia e marcada como
-STALE e nao conta como verificada -- caller deve rerodar.
+Every attached evidence includes the ARTIFACT FINGERPRINT at the command
+moment. If the artifact changed since then (edit, overwrite), the
+evidence is marked STALE and does not count as verified -- the caller
+must rerun.
 
-### 3.5 Limitacao de sandbox de peer (OBSERVACAO OPERACIONAL, NOVO em v3)
+### 3.5 Peer sandbox limitation (OPERATIONAL OBSERVATION, NEW in v3)
 
-Em sessao 0e427278 round 4 o peer Codex reportou:
+In session 0e427278 round 4 the peer Codex reported:
 
-> "Limitacao operacional: o sandbox bloqueou recomputacao local de SHA-256
->  (Get-FileHash, sha256sum, certutil e Node crypto), entao validei por
->  leitura direta do conteudo e do smoke output salvo."
+> "Operational limitation: the sandbox blocked local recomputation of
+>  SHA-256 (Get-FileHash, sha256sum, certutil and Node crypto), so I
+>  validated via direct reading of the content and of the saved smoke
+>  output."
 
-E normal o peer nao conseguir rodar hashes / node / git no proprio sandbox
-(sandbox read-only cobre read mas bloqueia exec de alguns binarios). Nesse
-caso, a validacao do peer e por LEITURA DIRETA do conteudo dos artefatos.
-Caller deve: (a) anexar evidencia dinamica pre-computada (output + hash);
-(b) incluir no prompt paths absolutos fora do cwd do peer se o codigo vive
-fora do workspace; (c) aceitar READY baseado em leitura de conteudo quando o
-peer explicita a limitacao de hash, em vez de exigir recomputacao
-impossivel.
+It is normal for the peer to be unable to run hashes / node / git in
+its own sandbox (read-only sandbox covers read but blocks exec of some
+binaries). In that case, peer validation is via DIRECT READING of
+artifact content. The caller must: (a) attach pre-computed dynamic
+evidence (output + hash); (b) include absolute paths outside the peer's
+cwd in the prompt if the code lives outside the workspace; (c) accept
+READY based on content reading when the peer explicitly declares the
+hash limitation, rather than requiring impossible recomputation.
 
 ---
 
-## 4. FOLLOW-UP vs. bloqueio (MANTIDO de v2)
+## 4. FOLLOW-UP vs. blocker (KEPT from v2)
 
-### 4.1 Regra geral
-Achado fora de escopo vira FOLLOW-UP: na resposta. NAO bloqueia READY.
+### 4.1 General rule
+Out-of-scope finding becomes a FOLLOW-UP: in the response. Does NOT
+block READY.
 
-### 4.2 Excecoes (achado fora de escopo que SIM bloqueia)
-- Invalida conclusao central do escopo atual.
-- Mostra que a evidencia usada esta obsoleta ou incorreta.
-- Toca em hard gate de seguranca/compliance definido pelo user.
+### 4.2 Exceptions (out-of-scope finding that DOES block)
+- Invalidates the central conclusion of the current scope.
+- Shows that the evidence used is obsolete or incorrect.
+- Touches a security/compliance hard gate defined by the user.
 
-### 4.3 Forma do FOLLOW-UP
+### 4.3 FOLLOW-UP form
 
 ```
-FOLLOW-UP: <descricao curta>
-- por que: <motivo>
-- escopo apropriado: <proxima sessao / patch isolado / documentacao>
-- urgencia: <bloqueante em prazo | desejavel | nice-to-have>
+FOLLOW-UP: <short description>
+- why: <reason>
+- appropriate scope: <next session / isolated patch / documentation>
+- urgency: <blocking by deadline | desirable | nice-to-have>
 ```
 
-### 4.4 Sinalizacao de nao-convergencia honesta
+### 4.4 Honest non-convergence signaling
 
-Se peer insiste em NOT_READY sobre residual que caller considera fora de
-escopo e incompativel:
-- Caller abre rodada de negociacao explicita de escopo.
-- Se nao houver acordo, session_finalize(outcome='aborted') -- sinaliza
-  nao-convergencia em vez de falso READY.
+If the peer insists on NOT_READY over a residual that the caller
+considers out-of-scope and incompatible:
+- Caller opens an explicit scope-negotiation round.
+- If no agreement is reached, session_finalize(outcome='aborted') --
+  signals non-convergence instead of a false READY.
 
 ---
 
-## 5. Ruido (ATUALIZADO em v4)
+## 5. Noise (UPDATED in v4)
 
-Caller consome apenas `content`, `peer_status`, `peer_structured`,
-`status_source`, `parser_warnings`, e `peer_model`. Em v2, o conjunto era
-apenas `content` + `peer_status`; `peer_structured` e `status_source`
-entraram em v0.3.0-alpha; `parser_warnings` e `peer_model` entraram em
+Caller consumes only `content`, `peer_status`, `peer_structured`,
+`status_source`, `parser_warnings`, and `peer_model`. In v2, the set was
+only `content` + `peer_status`; `peer_structured` and `status_source`
+entered in v0.3.0-alpha; `parser_warnings` and `peer_model` entered in
 v0.4.0-alpha.
 
-Semantica de cada campo:
-- `status_source === 'structured'` confirma que o peer respeitou o
-  contrato preferido (bloco estruturado tail-anchored).
-- `peer_structured` eh o payload JSON validado (v4: `status` + campos
-  opcionais na whitelist que passaram validacao); acesso direto sem
-  parsing prosa.
-- `parser_warnings` lista rejeicoes per-field do parser. Caller DEVE
-  inspecionar: warnings sinalizam peer drift ou violacao de schema --
-  ignorar eh transformar `parser_warnings` em telemetria morta.
-- `peer_model` audita qual modelo top-level foi efetivamente invocado no
-  round. Revisoes de sessao conferem aderencia a secao 6.9.2.
+Semantics of each field:
+- `status_source === 'structured'` confirms that the peer honored the
+  preferred contract (tail-anchored structured block).
+- `peer_structured` is the validated JSON payload (v4: `status` +
+  whitelist optional fields that passed validation); direct access
+  without prose parsing.
+- `parser_warnings` lists per-field parser rejections. The caller MUST
+  inspect: warnings signal peer drift or schema violation -- ignoring
+  turns `parser_warnings` into dead telemetry.
+- `peer_model` audits which top-level model was actually invoked in the
+  round. Session reviews check adherence to section 6.9.2.
 
-`stderr_tail` permanece telemetria de transporte, guardada apenas para
-diagnostico do proprio mecanismo. Nenhuma decisao tecnica ou formal eh
-baseada em stderr_tail.
+`stderr_tail` remains transport telemetry, kept only for diagnostics of
+the mechanism itself. No technical or formal decision is based on
+stderr_tail.
 
 ---
 
-## 6. Pontos fracos identificados
+## 6. Identified weak points
 
-### 6.1 Drift de artefato entre rodadas (MANTIDO de v2)
+### 6.1 Artifact drift between rounds (KEPT from v2)
 
-Problema: se arquivo muda entre rodadas e o peer nao e notificado, responde
-sobre versao obsoleta.
+Problem: if a file changes between rounds and the peer is not notified,
+it responds about an obsolete version.
 
-Solucao: caller inclui no prompt de cada rodada um bloco ARTIFACTS:
+Solution: the caller includes an ARTIFACTS block in each round's prompt:
 
 ```
 ARTIFACTS:
 - C:\Scripts\ai-sync.js | sha256:<hash> | changed_since_last_round: <yes|no>
 ```
 
-Peer deve re-ler artifact se `changed_since_last_round: yes`.
+The peer must re-read the artifact if `changed_since_last_round: yes`.
 
-### 6.2 Evidencia vencida (subitem de 3.4) (MANTIDO de v2)
+### 6.2 Stale evidence (subitem of 3.4) (KEPT from v2)
 
-Absorvido no protocolo P1 -- toda evidencia tem fingerprint + flag de stale.
+Absorbed in protocol P1 -- every evidence has a fingerprint + stale flag.
 
-### 6.3 Estado NEEDS_EVIDENCE -- IMPLEMENTADO em v0.3.0-alpha
+### 6.3 NEEDS_EVIDENCE state -- IMPLEMENTED in v0.3.0-alpha
 
-**Estado peer-only canonico.** Separa "nao concluo sem evidencia" de
-"discordo tecnicamente". Caller continua restrito a `READY|NOT_READY` (a
-assimetria e intencional: caller sem evidencia emite `NOT_READY` com
-`CALLER_REQUEST` para peer -- simetria seria redundante).
+**Canonical peer-only state.** Separates "I cannot conclude without
+evidence" from "I technically disagree". The caller remains restricted
+to `READY|NOT_READY` (the asymmetry is intentional: a caller without
+evidence emits `NOT_READY` with `CALLER_REQUEST` for the peer --
+symmetry would be redundant).
 
-Quando peer emite `NEEDS_EVIDENCE`:
-- `session_check_convergence.converged` retorna `false`.
-- `reason` orienta explicitamente: "attach the requested evidence next round
+When the peer emits `NEEDS_EVIDENCE`:
+- `session_check_convergence.converged` returns `false`.
+- `reason` explicitly guides: "attach the requested evidence next round
   instead of re-arguing merits".
-- Caller, na proxima rodada, roda os comandos do `CALLER_REQUEST` (secao 3.3)
-  e anexa output bruto + fingerprint.
+- The caller, in the next round, runs the commands from `CALLER_REQUEST`
+  (section 3.3) and attaches raw output + fingerprint.
 
-Implementacao: `src/lib/status-parser.js` aceita no enum; `src/lib/session-
-store.js` branch dedicada em `checkConvergence`.
+Implementation: `src/lib/status-parser.js` accepts in the enum;
+`src/lib/session-store.js` has a dedicated branch in `checkConvergence`.
 
-Convencao textual `UNCERTAINTY` da v2 6.3 continua valida como informacao
-suplementar (nao-normativa):
+Textual `UNCERTAINTY` convention from v2 6.3 remains valid as
+supplementary (non-normative) information:
 
 ```
 UNCERTAINTY:
-- nao posso concluir sem: <X>
-- provavel veredicto dado X: <previsao condicional>
+- cannot conclude without: <X>
+- likely verdict given X: <conditional prediction>
 ```
 
-### 6.4 Fidelidade de encoding do transcript -- REGRA OPERACIONAL CANONICA
-(MANTIDO de v2)
+### 6.4 Transcript encoding fidelity -- CANONICAL OPERATIONAL RULE
+(KEPT from v2)
 
-Todos os artifacts escritos para consumo do peer devem ser ASCII-only com
-transliteracao de acentos do portugues. Tabela de substituicoes padrao
-preservada de v2.
+All artifacts written for peer consumption must be ASCII-only with
+transliteration of Portuguese accents. Standard substitution table
+preserved from v2.
 
-Prompts do `ask_peer` podem ter acentos (transmitidos via API JSON-over-stdio,
-nao via leitura de arquivo). Somente arquivos em disco precisam de
-ASCII-only.
+`ask_peer` prompts may have accents (transmitted via JSON-over-stdio
+API, not via file read). Only files on disk need ASCII-only.
 
-**Novo em v3**: a regra se aplica tambem a arquivos PRE-EXISTENTES no repo
-que viram artifacts de sessao de review. Na sessao 0e427278 round 1 o peer
-flaggou `README.md` do proprio cross-review-mcp como nao-ASCII; a correcao
-foi reescrever o README inteiro com transliteracao antes do READY.
+**New in v3**: the rule also applies to PRE-EXISTING files in the repo
+that are promoted to review session artifact. In session 0e427278 round
+1 the peer flagged the `README.md` of cross-review-mcp itself as
+non-ASCII; the correction was to rewrite the entire README with
+transliteration before READY.
 
-### 6.5 Ledger de continuidade entre sessoes (SUAVIZADO em v4.1)
+### 6.5 Cross-session continuity ledger (SOFTENED in v4.1)
 
-Caller **pode** manter ledger em arquivo persistente (ex:
-`C:\Users\leona\.cross-review\ledger.md`). Quando adotado, o ledger contem:
-- Sessoes anteriores (id, data, outcome, escopo).
-- Achados fechados.
-- Achados residuais aceitos + fronteira arquitetural.
-- Follow-ups pendentes.
+The caller **may** maintain a ledger in a persistent file (e.g.
+`C:\Users\leona\.cross-review\ledger.md`). When adopted, the ledger
+contains:
+- Prior sessions (id, date, outcome, scope).
+- Closed findings.
+- Accepted residual findings + architectural boundary.
+- Pending follow-ups.
 
-Ledger em ASCII-only. Quando o ledger for adotado, novo session_init anexa-o
-como artifact sempre que o alvo relaciona-se a sessoes previas.
+Ledger in ASCII-only. When the ledger is adopted, new session_init
+attaches it as artifact whenever the target relates to prior sessions.
 
-Nota empirica (auditoria 2026-04-24): ate a data de v4.1 nenhum
-`~/.cross-review/ledger.md` foi produzido em uso real. §6.5 permanece como
-convencao opcional; politica de compactacao do ledger entra em vigor se/quando
-ele for adotado (§6.6.2).
+Empirical note (audit 2026-04-24): up to the v4.1 date no
+`~/.cross-review/ledger.md` was produced in real use. Section 6.5
+remains an optional convention; the ledger-compaction policy takes
+effect if/when it is adopted (section 6.6.2).
 
-### 6.6 Overflow / truncamento (NORMATIVA em v4.1)
+### 6.6 Overflow / truncation (NORMATIVE in v4.1)
 
-Promovido de FOLLOW-UP para contrato normativo via sessao a847f897
-(2026-04-24, aprovada bilateral). Politica policy-only -- nenhum code change
-em cross-review-mcp foi feito, e nenhum eh justificado pelos dados empiricos
-coletados ate aqui.
+Promoted from FOLLOW-UP to normative contract via session a847f897
+(2026-04-24, bilateral-approved). Policy-only -- no code change in
+cross-review-mcp was made, and none is justified by the empirical data
+collected so far.
 
-#### 6.6.1 Transcript (artefato montado pelo caller)
+#### 6.6.1 Transcript (artifact assembled by the caller)
 
-O transcript (artefato temp produzido pelo caller e entregue como artifact em
-`session_init`) tem limites de tamanho operacional:
+The transcript (temp artifact produced by the caller and delivered as
+an artifact in `session_init`) has operational size limits:
 
-- **Yellow line**: 50000 chars (~12-15k tokens em ASCII). Acima, caller DEVE
-  aplicar a ordem de compressao abaixo.
-- **Red line**: 100000 chars (~25k tokens). Acima, caller DEVE remontar
-  transcript por inteiro ou abortar a sessao. Red line eh hard stop porque o
-  transcript comeca a dominar o orcamento de contexto do peer.
+- **Yellow line**: 50000 chars (~12-15k tokens in ASCII). Above this,
+  the caller MUST apply the compression order below.
+- **Red line**: 100000 chars (~25k tokens). Above this, the caller
+  MUST rebuild the transcript entirely or abort the session. Red line
+  is a hard stop because the transcript starts dominating the peer's
+  context budget.
 
-Os thresholds sao de **higiene operacional**, nao limites tecnicos do modelo
-(janelas modernas sao muito maiores). O objetivo eh preservar atencao do peer
-em evidencia viva, nao acomodar o maximo possivel.
+The thresholds are **operational hygiene**, not model technical limits
+(modern windows are much larger). The goal is to preserve peer
+attention on live evidence, not accommodate as much as possible.
 
-Ordem de preservacao (MANDATORIA; comprimir/remover de BAIXO PRA CIMA ao
-atingir yellow line):
+Preservation order (MANDATORY; compress/remove from BOTTOM UP upon
+reaching the yellow line):
 
-1. Diretivas verbatim do usuario (normativas, feedback de coaching, mudancas
-   de prioridade) -- NUNCA comprimir nem remover.
-2. Achados residuais abertos + follow-ups com urgencia bloqueante em prazo --
-   preservar integrais.
-3. Evidencias validas (fingerprint match, nao stale) -- preservar.
-4. Timeline das rodadas desta sessao: ultimas 2 rodadas integrais; rodadas
-   anteriores compactadas para sumario de 3-5 linhas por rodada (achado,
-   resposta, motivo do estado).
-5. Evidencias stale -- remover ao atingir yellow line (stale ja nao conta
-   para validacao por §3.4).
-6. Apendices verbatim -- remover ao atingir yellow line.
-7. Cross-session timeline (sessoes anteriores): apenas 1 linha por sessao
-   (id, data, outcome, 1 achado significativo). Detalhamento adicional so
-   se explicitamente exigido pelo escopo.
+1. User verbatim directives (normative, coaching feedback, priority
+   shifts) -- NEVER compress nor remove.
+2. Open residual findings + follow-ups with deadline-blocking urgency
+   -- preserve in full.
+3. Valid evidence (fingerprint match, not stale) -- preserve.
+4. Timeline of this session's rounds: last 2 rounds in full; prior
+   rounds compressed to a 3-5 line summary per round (finding,
+   response, state reason).
+5. Stale evidence -- remove upon reaching yellow line (stale no longer
+   counts for validation per section 3.4).
+6. Verbatim appendices -- remove upon reaching yellow line.
+7. Cross-session timeline (prior sessions): only 1 line per session
+   (id, date, outcome, 1 significant finding). Additional detail only
+   if explicitly required by the scope.
 
-#### 6.6.2 Ledger (condicional ao uso; §6.5)
+#### 6.6.2 Ledger (conditional on use; section 6.5)
 
-Ledger como artefato eh opcional (ver §6.5). Politica abaixo aplica-se
-quando e se o ledger for adotado:
+Ledger as artifact is optional (see section 6.5). The policy below
+applies when and if the ledger is adopted:
 
-- Compactacao eh **manual** (trigger explicito pelo caller), nao automatica.
-  Nenhum mecanismo de compactacao automatica ao abrir sessao eh permitido --
-  automatizar aqui arrisca mudanca silenciosa de contrato entre sessoes.
-- Sessoes com outcome=converged e idade superior a 90 dias podem ser
-  reduzidas a sumario de 1 linha (id, data, outcome, 1 achado significativo).
-- Sessoes com outcome=aborted ou outcome=max-rounds preservam-se integrais
-  como debris operacional para aprendizado. Nao compactar.
-- Threshold de 90 dias eh recomendacao prudencial; caller pode ajustar na
-  ferramenta manual que eventualmente construir.
+- Compaction is **manual** (explicit caller trigger), not automatic.
+  No automatic compaction mechanism on session open is allowed --
+  automating here risks a silent contract change between sessions.
+- Sessions with outcome=converged and age over 90 days may be reduced
+  to a 1-line summary (id, date, outcome, 1 significant finding).
+- Sessions with outcome=aborted or outcome=max-rounds are preserved
+  in full as operational debris for learning. Do not compact.
+- The 90-day threshold is a prudential recommendation; the caller may
+  adjust it in the manual tool that may eventually be built.
 
-Ate 2026-04-24 nenhum ledger foi produzido em uso real; esta subsecao eh
-contrato condicional, nao tarefa pendente.
+As of 2026-04-24 no ledger was produced in real use; this subsection
+is a conditional contract, not a pending task.
 
-#### 6.6.3 meta.json (artefato do MCP server)
+#### 6.6.3 meta.json (MCP server artifact)
 
-Observacao empirica (auditoria 2026-04-24): nas 9 sessoes presentes em
-`~/.cross-review/`, tamanhos de `meta.json` variaram de ~1KB a ~3KB; maior
-sessao histrorica teve 6 rodadas. Sem pressao de overflow real.
+Empirical observation (audit 2026-04-24): across the 9 sessions present
+in `~/.cross-review/`, `meta.json` sizes varied from ~1KB to ~3KB; the
+largest historical session had 6 rounds. No real overflow pressure.
 
-Regra de contrato atual:
-- `session_read` retorna `meta.json` integral.
-- Nenhuma mudanca de API (ex: parametro `rounds_limit`, endpoint
-  `session_digest`) eh justificada pelos dados empiricos disponiveis.
-- Se no futuro uma sessao com 20+ rounds + peer_structured carregado produzir
-  `meta.json` > 500KB e isso gerar pressao mensuravel em consumidores, spec
-  futura (v4.2+) pode adicionar parametro opcional ao `session_read`. Ate la,
-  YAGNI -- construir preventivamente leva a pick a shape errada.
+Current contract rule:
+- `session_read` returns `meta.json` in full.
+- No API change (e.g. `rounds_limit` parameter, `session_digest`
+  endpoint) is justified by the available empirical data.
+- If in the future a session with 20+ rounds + loaded peer_structured
+  produces `meta.json` > 500KB and that generates measurable pressure
+  on consumers, a future spec (v4.2+) may add an optional parameter to
+  `session_read`. Until then, YAGNI -- building preemptively leads to
+  picking the wrong shape.
 
-Motivacao explicita: respeitar o principio "nao desenhar para requisitos
-hipoteticos". Evidencia de pressao real eh condicao necessaria para mudanca
-de API.
+Explicit motivation: respect the "do not design for hypothetical
+requirements" principle. Evidence of real pressure is a necessary
+condition for API change.
 
-#### 6.6.4 Non-destructive compression (invariante normativa)
+#### 6.6.4 Non-destructive compression (normative invariant)
 
-Quando o caller, humano ou ferramenta, montar transcript ou ledger
-compactado para envio ao peer, o artefato compactado DEVE declarar
-explicitamente quais trechos foram resumidos, removidos ou substituidos por
-referencia, incluindo o caminho dos artefatos imutaveis que preservam o
-detalhe original.
+When the caller, human or tool, assembles a compacted transcript or
+ledger for delivery to the peer, the compacted artifact MUST explicitly
+declare which excerpts were summarized, removed, or replaced by
+reference, including the path of the immutable artifacts that preserve
+the original detail.
 
-Exemplo de declaracao aceitavel dentro do transcript compactado:
+Example of acceptable declaration inside the compacted transcript:
 
 ```
-[SUMMARY round 1-3 da sessao X: 1 achado cada; detalhe integral em
- C:/Users/leona/.cross-review/<sid>/round-01-peer-codex.md (e 02, 03)]
-[REMOVED apendice verbatim Y: 2300 chars; reconstruivel a partir do commit
- Z do repo W]
+[SUMMARY rounds 1-3 of session X: 1 finding each; full detail at
+ C:/Users/leona/.cross-review/<sid>/round-01-peer-codex.md (and 02, 03)]
+[REMOVED verbatim appendix Y: 2300 chars; reconstructible from commit
+ Z of repo W]
 ```
 
-Historico runtime do MCP eh **imutavel**. Os arquivos
+MCP runtime history is **immutable**. The files
 `~/.cross-review/<sid>/meta.json`,
-`~/.cross-review/<sid>/round-NN-prompt.md` e
-`~/.cross-review/<sid>/round-NN-peer-<agent>.md` NAO podem ser mutados apos
-escrita pelo server -- nem pelo caller, nem por ferramenta auxiliar,
-nem como efeito colateral de compactacao do transcript. Mutar historico eh
-violacao estrutural do contrato (perde auditabilidade, invalida fingerprints,
-quebra continuidade entre sessoes).
+`~/.cross-review/<sid>/round-NN-prompt.md` and
+`~/.cross-review/<sid>/round-NN-peer-<agent>.md` CANNOT be mutated
+after being written by the server -- not by the caller, not by
+auxiliary tooling, not as a side effect of transcript compaction.
+Mutating history is a structural contract violation (loses
+auditability, invalidates fingerprints, breaks cross-session
+continuity).
 
-Exclusao explicita: `~/.cross-review/<sid>/.lock/info.json` eh mecanismo
-interno de controle de concorrencia do session-store (ver §6.5 do
-peer-spawn/session-store em codigo). Lock diretorio eh criado e removido
-pelo server dentro do ciclo de `ask_peer`; seu conteudo nao eh parte do
-registro auditavel da sessao e nao esta coberto pela invariante de
-imutabilidade acima. Caller/ferramentas externas continuam proibidas de
-mutar o lock (invadir controle de concorrencia eh outro tipo de violacao
-estrutural), mas a razao eh diferente da invariante de historico.
+Explicit exclusion: `~/.cross-review/<sid>/.lock/info.json` is the
+internal concurrency-control mechanism of the session-store (see
+section 6.5 of peer-spawn/session-store in code). The lock directory
+is created and removed by the server within the `ask_peer` cycle; its
+content is not part of the session's auditable record and is not
+covered by the immutability invariant above. Callers/external tools
+remain forbidden from mutating the lock (tampering with concurrency
+control is another kind of structural violation), but the reason is
+different from the history invariant.
 
-Compactacao/compressao ocorre EXCLUSIVAMENTE em:
-- Transcript montado pelo caller em path temp, proprio da sessao atual.
-- Ledger opcional, que pertence ao caller (§6.5).
+Compaction/compression occurs EXCLUSIVELY in:
+- Transcript assembled by the caller in a temp path, owned by the
+  current session.
+- Optional ledger, owned by the caller (section 6.5).
 
-Ambos artefatos montados pelo caller, ambos fora da arvore
-`~/.cross-review/<sid>/` gerenciada pelo server.
+Both artifacts assembled by the caller, both outside the server-managed
+`~/.cross-review/<sid>/` tree.
 
-### 6.7 Matriz minima de evidencia por classe de artefato (NORMATIVA em v4.2)
+### 6.7 Minimal evidence matrix per artifact class (NORMATIVE in v4.2)
 
-Promovido de FOLLOW-UP para contrato normativo via sessao f1fdbee4
-(2026-04-24, aprovada bilateral). Policy-only -- nenhum code change
-em cross-review-mcp foi feito, e nenhum eh justificado pelos dados
-empiricos coletados ate aqui.
+Promoted from FOLLOW-UP to normative contract via session f1fdbee4
+(2026-04-24, bilateral-approved). Policy-only -- no code change in
+cross-review-mcp was made, and none is justified by the empirical data
+collected so far.
 
-Esta matriz define o que o caller DEVE executar como evidencia dinamica
-(referencia cruzada: §3.1, §3.2) antes de cada ask_peer. Peers usam esta
-matriz como **baseline normativa** ao decidir NEEDS_EVIDENCE: ausencia de
-evidencia mandatoria para classe listada, sem declaracao de limitacao
-operacional cobrivel por §3.5, eh bloqueio automatico.
+This matrix defines what the caller MUST execute as dynamic evidence
+(cross-reference: section 3.1, section 3.2) before each ask_peer. Peers
+use this matrix as a **normative baseline** when deciding
+NEEDS_EVIDENCE: the absence of mandatory evidence for a listed class,
+without declaration of operational limitation covered by section 3.5, is
+an automatic block.
 
-Empirismo: as classes listadas abaixo correspondem a arquivos efetivamente
-revisados em sessoes historicas ate 2026-04-24 (sessao fa283f6c contem
-`.tsx`; sessoes gerais contem `.md`, `.js`, `.json`). Classes nao
-observadas (YAML, Python, Rust, Go, shell, validacao semantica Cloudflare
-de `_headers`/`_routes.json`/`.dev.vars`) NAO entram na matriz ate
-emergirem em uso real -- mesma disciplina que §6.5 (ledger) e §6.6.3
-(meta.json).
+Empiricism: the classes listed below correspond to files actually
+reviewed in historical sessions up to 2026-04-24 (session fa283f6c
+contains `.tsx`; general sessions contain `.md`, `.js`, `.json`). Not
+observed classes (YAML, Python, Rust, Go, shell, Cloudflare semantic
+validation of `_headers`/`_routes.json`/`.dev.vars`) do NOT enter the
+matrix until they emerge in real use -- same discipline as section 6.5
+(ledger) and section 6.6.3 (meta.json).
 
-#### Matriz
+#### Matrix
 
-| Classe | Evidencia MANDATORIA | Comando canonico | Evidencia opcional (ativa quando aplicavel) |
-|--------|----------------------|------------------|---------------------------------------------|
-| JavaScript (.js, .cjs, .mjs) | parse-sanity | `node --check <path>` | linter se `biome.json`/`.eslintrc*` presente; test script se `package.json:scripts.test` definido |
-| TypeScript (.ts, .tsx) | type-check | `tsc --noEmit` (usando o `tsconfig.json` mais proximo) | linter; test script |
-| JSON (.json) | parse-sanity | `node -e "JSON.parse(require('fs').readFileSync('<path>','utf8'))"` | schema validation se schema local disponivel |
-| Markdown (.md) | revisao semantica | N/A (leitura direta) | N/A |
-| cross-review-mcp proprio (esta spec + src/ + scripts/) | full smoke | `npm test` (alias de `node scripts/functional-smoke.js`) | inspecao direta do parser/server. Contagem de steps eh dinamica por release (v0.4.0: 60 steps); peer deve confirmar `all GREEN` independente do count exato |
+| Class | MANDATORY evidence | Canonical command | Optional evidence (active when applicable) |
+|-------|--------------------|-------------------|--------------------------------------------|
+| JavaScript (.js, .cjs, .mjs) | parse-sanity | `node --check <path>` | linter if `biome.json`/`.eslintrc*` present; test script if `package.json:scripts.test` defined |
+| TypeScript (.ts, .tsx) | type-check | `tsc --noEmit` (using the nearest `tsconfig.json`) | linter; test script |
+| JSON (.json) | parse-sanity | `node -e "JSON.parse(require('fs').readFileSync('<path>','utf8'))"` | schema validation if local schema available |
+| Markdown (.md) | semantic review | N/A (direct reading) | N/A |
+| cross-review-mcp itself (this spec + src/ + scripts/) | full smoke | `npm test` (alias of `node scripts/functional-smoke.js`) | direct inspection of parser/server. Step count is dynamic per release (v0.4.0: 60 steps); peer must confirm `all GREEN` independently of the exact count |
 
-#### Notas
+#### Notes
 
-**wrangler.json e configs Cloudflare**: `wrangler.json` e arquivos como
-`_routes.json` sao JSON e validam pela regra JSON acima (parse-sanity via
-`node -e`). Validacao semantica Cloudflare (schema proprietario, impacto
-em bindings, dry-run de deploy) **NAO** entra nesta matriz: eh
-responsabilidade de CI/GitHub Actions conforme diretiva operacional do
-workspace `feedback_no_wrangler_deploy` (NUNCA usar `wrangler deploy`
-direto, mesmo `--dry-run`; deploy so via GHA). Peer NAO deve exigir
-`wrangler deploy --dry-run` ou equivalente como evidencia mandatoria.
+**wrangler.json and Cloudflare configs**: `wrangler.json` and files like
+`_routes.json` are JSON and validate by the JSON rule above (parse-sanity
+via `node -e`). Cloudflare semantic validation (proprietary schema,
+binding impact, deploy dry-run) does **NOT** enter this matrix: it is a
+CI/GitHub Actions responsibility per the workspace operational directive
+`feedback_no_wrangler_deploy` (NEVER use `wrangler deploy` directly,
+even `--dry-run`; deploy only via GHA). The peer must NOT require
+`wrangler deploy --dry-run` or equivalent as mandatory evidence.
 
-**Evidencia opcional ativa-se condicionalmente**: a regra geral eh "o
-comando opcional entra quando a classe do artefato o exige OU quando a
-conclusao do peer depender dele". Exemplo: `tsc --noEmit` eh opcional
-para JS puro mesmo que um `tsconfig.json` exista no repo; so vira
-mandatoria quando o artefato sob revisao eh TS/TSX, ou quando o peer
-declara que precisa do type graph para concluir (nesse caso emite
-NEEDS_EVIDENCE).
+**Optional evidence activates conditionally**: the general rule is "the
+optional command enters when the artifact class demands it OR when the
+peer's conclusion depends on it". Example: `tsc --noEmit` is optional
+for pure JS even if a `tsconfig.json` exists in the repo; it only
+becomes mandatory when the artifact under review is TS/TSX, or when the
+peer declares it needs the type graph to conclude (in which case it
+emits NEEDS_EVIDENCE).
 
-**Fingerprint**: toda evidencia anexada inclui SHA-256 do artefato no
-momento do comando (§3.4). Fingerprint do artefato diferente do momento
-da evidencia = stale = rerodar.
+**Fingerprint**: every attached evidence includes SHA-256 of the
+artifact at the command moment (section 3.4). Different artifact
+fingerprint from the evidence moment = stale = rerun.
 
-**Classe nao listada** (regra operacional, nao eh entry da matriz):
-- Caller DEVE declarar a classe no prompt e justificar a evidencia
-  escolhida (ou ausencia de evidencia dinamica com rationale).
-- Peer pode rejeitar via NEEDS_EVIDENCE se a justificativa for
-  insuficiente.
-- Classe nao declarada + evidencia nao-justificada = violacao de §3.1
-  (assercao factual sem evidencia anexada).
+**Class not listed** (operational rule, not an entry in the matrix):
+- The caller MUST declare the class in the prompt and justify the
+  chosen evidence (or the absence of dynamic evidence with rationale).
+- The peer may reject via NEEDS_EVIDENCE if the justification is
+  insufficient.
+- Undeclared class + unjustified evidence = section 3.1 violation
+  (factual assertion without attached evidence).
 
-**Matriz eh empirica, nao exaustiva**: novas classes sao promovidas para
-a tabela normativa quando aparecerem em sessoes reais de review. Nao
-adicionar classes especulativas por antecipacao.
+**Matrix is empirical, not exhaustive**: new classes are promoted to
+the normative table when they appear in real review sessions. Do not
+add speculative classes by anticipation.
 
-### 6.8 Schema expandido do bloco estruturado -- IMPLEMENTADO em v0.4.0-alpha
+### 6.8 Expanded structured-block schema -- IMPLEMENTED in v0.4.0-alpha
 
-Implementacao aprovada bilateral na sessao 08cd61e6 (2026-04-24). Consenso
-em esquema JSON estavel alcancado em 2 rodadas. Contrato normativo agora em
-secao 2.3.1. Campos canonicos na release v0.4.0: `uncertainty`,
-`caller_requests`, `follow_ups`. Strings em arrays (nao objetos). Extensao
-para objetos reservada a v5 caso strings se mostrem insuficientes (FOLLOW-UP
-registrado na sessao, fora do escopo v0.4.0).
+Implementation bilaterally approved in session 08cd61e6 (2026-04-24).
+Consensus on a stable JSON schema reached in 2 rounds. Normative
+contract now in section 2.3.1. Canonical fields in release v0.4.0:
+`uncertainty`, `caller_requests`, `follow_ups`. Strings in arrays (not
+objects). Extension to objects reserved for v5 if strings prove
+insufficient (FOLLOW-UP registered in the session, out of scope for
+v0.4.0).
 
-Acessos derivados desta implementacao:
-- `parser_warnings` agora compoe o contrato de retorno do parser (secao 5).
-- Regra `omit-unless-signal` (secao 2.3.1) eh clausula operacional
-  normativa: peers que emitem campos opcionais sem conteudo util cometem
-  violacao operacional, ainda que o parser aceite.
+Downstream of this implementation:
+- `parser_warnings` now composes the parser's return contract
+  (section 5).
+- The `omit-unless-signal` rule (section 2.3.1) is a normative
+  operational clause: peers that emit optional fields without useful
+  content commit an operational violation, even though the parser
+  accepts.
 
-### 6.9 Ferramentas complementares obrigatorias (NOVO em v4)
+### 6.9 Mandatory companion tooling (NEW in v4)
 
-Duas clausulas operacionais normativas cuja violacao constitui falha de
-processo (diferente de "bloco malformado", que e falha de protocolo).
+Two normative operational clauses whose violation constitutes a
+process failure (distinct from "malformed block", which is a protocol
+failure).
 
 #### 6.9.1 Tri-tool
 
-Caller e peer MUST usar os tres MCP servers em conjunto em decisoes
-nao-triviais durante qualquer sessao cross-review:
+Caller and peer MUST use the three MCP servers together in non-trivial
+decisions during any cross-review session:
 
-- **cross-review**: orquestrador bilateral (este MCP).
-- **ultrathink**: raciocinio estruturado com quality validation.
-- **code-reasoning**: analise tecnica iterativa com revisao.
+- **cross-review**: bilateral orchestrator (this MCP).
+- **ultrathink**: structured reasoning with quality validation.
+- **code-reasoning**: iterative technical analysis with revision.
 
-Aplicacoes especificas:
-- ANTES de `session_init`: caller DEVE ter trace de thinking visivel em
-  ultrathink/code-reasoning justificando escopo, plano, criterios de
-  sucesso. Sessoes abertas "frias" (sem pre-trace) sao violacao
-  operacional.
-- DURANTE `ask_peer`: prompts do caller DEVEM explicitamente pedir ao peer
-  o mesmo rigor. Prompts cross-review densos pressupoem raciocinio
-  estruturado do peer, nao inspecao superficial.
-- ENTRE rodadas: caller DEVE rodar ultrathink/code-reasoning sobre a
-  resposta do peer antes de formular proximo prompt. Reacao instantanea
-  sem analise eh violacao.
-- Indisponibilidade de ferramenta: quando um dos tres MCP nao responde, a
-  sessao DEVE ser declarada bloqueada/suspensa explicitamente. NAO prosseguir
-  como se nada tivesse mudado.
+Specific applications:
+- BEFORE `session_init`: the caller MUST have a visible thinking trace
+  in ultrathink/code-reasoning justifying scope, plan, success
+  criteria. Sessions opened "cold" (without pre-trace) are an
+  operational violation.
+- DURING `ask_peer`: the caller's prompts MUST explicitly ask the peer
+  for the same rigor. Dense cross-review prompts presuppose structured
+  peer reasoning, not superficial inspection.
+- BETWEEN rounds: the caller MUST run ultrathink/code-reasoning on the
+  peer's response before formulating the next prompt. Instantaneous
+  reaction without analysis is a violation.
+- Tool unavailability: when one of the three MCPs does not respond,
+  the session MUST be declared explicitly blocked/suspended. Do NOT
+  proceed as if nothing changed.
 
-Motivacao registrada (diretiva do usuario em 2026-04-24): "os tres
-trabalhando em conjunto eh a arma mais letal contra os constantes erros
-cometidos pelos agentes de AI que gastam um tempo imenso e tem um custo de
-tokens gigantescos para efetuar correcoes posteriores." Custo/latencia NAO
-sao alvos de otimizacao (ver tambem 6.9.2).
+Motivation recorded (user directive 2026-04-24): "the three working
+together are the most lethal weapon against the constant errors AI
+agents commit, burning immense time and token cost to perform later
+corrections." Cost/latency are NOT optimization targets (see also
+6.9.2).
 
-#### 6.9.2 Modelo top-level
+#### 6.9.2 Top-level model
 
-Ambos caller e peer MUST operar sob o modelo mais capaz disponivel na
-assinatura do usuario. IDs canonicos normativos para v0.4.0:
+Both caller and peer MUST operate under the most capable model available
+in the user's subscription. Canonical normative IDs for v0.4.0:
 
-- **Codex (peer quando caller=claude)**: `gpt-5.5` com
-  `model_reasoning_effort=xhigh`. Flag de modelo explicita em
+- **Codex (peer when caller=claude)**: `gpt-5.5` with
+  `model_reasoning_effort=xhigh`. Explicit model flag in
   `src/lib/peer-spawn.js:buildCodexArgs`.
-- **Claude (peer quando caller=codex)**: `claude-opus-4-7` (ID completo,
-  nao alias). Flag explicita em `src/lib/peer-spawn.js:buildClaudeArgs`.
+- **Claude (peer when caller=codex)**: `claude-opus-4-7` (full ID, not
+  alias). Explicit flag in `src/lib/peer-spawn.js:buildClaudeArgs`.
 
-Clausulas operacionais:
-- SEM fallback silencioso: se o modelo top-level falhar (rate limit,
-  erro 401/429/5xx, indisponibilidade), a sessao DEVE ser abortada com
-  erro explicito. Degradacao para variante menor eh violacao.
-- Troca de modelo exige bump de release (v0.4.x -> v0.5.0+) + edicao
-  explicita desta secao. Atualizacao silenciosa do ID em `peer-spawn.js`
-  sem bump da spec eh violacao.
-- Auditabilidade: cada round persistido em `meta.json.rounds[i]` contem
-  `peer_model` refletindo o ID efetivamente passado. Revisao periodica
-  (em cada release) DEVE confirmar que os IDs continuam top-level -- se
-  um ID listado foi superado por um novo top-level, sessao de cross-review
-  dedicada decide a promocao.
-- Stubs de teste registram `peer_model: 'stub'`, distinguindo execucao
-  sintetica de real.
+Operational clauses:
+- NO silent fallback: if the top-level model fails (rate limit, 401/
+  429/5xx error, unavailability), the session MUST be aborted with an
+  explicit error. Downgrading to a smaller variant is a violation.
+- Model change requires a release bump (v0.4.x -> v0.5.0+) + explicit
+  edit of this section. Silent ID update in `peer-spawn.js` without a
+  spec bump is a violation.
+- Auditability: each round persisted in `meta.json.rounds[i]` contains
+  `peer_model` reflecting the ID actually passed. Periodic review
+  (at every release) MUST confirm that the IDs remain top-level -- if
+  a listed ID was superseded by a new top-level, a dedicated
+  cross-review session decides the promotion.
+- Test stubs record `peer_model: 'stub'`, distinguishing synthetic
+  execution from real.
 
-Motivacao registrada (diretiva do usuario em 2026-04-24): "sempre sempre
-sempre deve chamar o modelo mais atual, mais capaz, mais poderoso, mais
-top level disponivel na assinatura". Usuario eh assinante do tier mais
-caro de OpenAI e Anthropic; nao ha gating de plano para modelos top.
+Motivation recorded (user directive 2026-04-24): "always always always
+must call the most current, most capable, most powerful, most top-level
+model available in the subscription". The user is subscribed to the
+most expensive tier of OpenAI and Anthropic; there is no plan gating
+for top models.
 
-#### 6.9.2.1 Auditoria de drift de modelo (NOVO em v4.3)
+#### 6.9.2.1 Model drift audit (NEW in v4.3)
 
-STATUS: aprovada bilateral (sessao 9c56005b, 2026-04-24, 4 rodadas,
+STATUS: bilateral-approved (session 9c56005b, 2026-04-24, 4 rounds,
 outcome=converged).
 
-Complementa secao 6.9.2 com um mecanismo ADVISORY-ONLY de deteccao de
-drift, sem alterar comportamento de runtime nem o processo de troca de
-modelo (que continua exigindo bump + spec edit conforme secao 6.9.2).
+Complements section 6.9.2 with an ADVISORY-ONLY drift-detection
+mechanism, without altering runtime behavior or the model change
+process (which still requires bump + spec edit per section 6.9.2).
 
-Fonte documental curada: `docs/top-models.json` contem entries por
-provider com `id`, `reasoning_effort` (opcional), `validated_at` (ISO
-YYYY-MM-DD), `ref_url`, `notes`, alem de `staleness_threshold_days`
-global (default 30). O usuario eh a fonte de verdade; o JSON apenas
-materializa a curadoria humana para inspecao mecanica.
+Curated documentary source: `docs/top-models.json` contains per-provider
+entries with `id`, `reasoning_effort` (optional), `validated_at` (ISO
+YYYY-MM-DD), `ref_url`, `notes`, plus a global
+`staleness_threshold_days` (default 30). The user is the source of
+truth; the JSON merely materializes the human curation for mechanical
+inspection.
 
-Ferramenta advisory: `scripts/audit-model-drift.js`, invocada via
-`npm run check-models`. Compara as constantes cravadas em
-`src/lib/peer-spawn.js` (via leitura textual + regex) contra as entries
-de `top-models.json` e emite:
-- Exit 0: IDs batem e validated_at dentro do prazo.
-- Exit 1: drift de ID (ERROR). Mensagem explicita que o fix exige
-  (a) bump + spec edit per secao 6.9.2 em `peer-spawn.js`, E (b)
-  atualizacao de `top-models.json`. O script NAO autofix.
-- Exit 2: staleness (WARN). `validated_at` vencido forca re-verificacao
-  manual; se modelo continua top-tier, atualizar `validated_at`; se foi
-  superado, abrir sessao cross-review dedicada para a promocao (secao
-  6.9.2).
-- Exit 3: erro estrutural (regex nao casou, JSON invalido, file
-  faltando). Indica refator que quebrou o canal advisory; acao e revisar
-  tanto `peer-spawn.js` quanto o script deliberadamente.
+Advisory tool: `scripts/audit-model-drift.js`, invoked via
+`npm run check-models`. Compares the constants pinned in
+`src/lib/peer-spawn.js` (via textual read + regex) against the entries
+of `top-models.json` and emits:
+- Exit 0: IDs match and validated_at within window.
+- Exit 1: ID drift (ERROR). Message states that the fix requires
+  (a) bump + spec edit per section 6.9.2 in `peer-spawn.js`, AND (b)
+  update of `top-models.json`. The script does NOT autofix.
+- Exit 2: staleness (WARN). Expired `validated_at` forces manual
+  re-verification; if the model is still top-tier, update
+  `validated_at`; if superseded, open a dedicated cross-review session
+  for the promotion (section 6.9.2).
+- Exit 3: structural error (regex did not match, invalid JSON, missing
+  file). Indicates a refactor that broke the advisory channel; action
+  is to review both `peer-spawn.js` and the script deliberately.
 
-Vedacoes explicitas (o que este mecanismo NAO autoriza):
-- NAO autoriza fallback silencioso (mantem secao 6.9.2 clausula "SEM
-  fallback silencioso").
-- NAO autoriza override por config/env em tempo de execucao -- o advisor
-  nao injeta nada no `spawnPeer`.
-- NAO autoriza selecao automatica de modelo -- a escolha permanece
-  cravada em `peer-spawn.js`.
-- NAO autoriza troca de ID sem bump + edicao explicita de secao 6.9.2 --
-  o exit 1 do script deixa isso literal na mensagem de erro.
+Explicit prohibitions (what this mechanism does NOT authorize):
+- Does NOT authorize silent fallback (keeps section 6.9.2 clause
+  "NO silent fallback").
+- Does NOT authorize runtime config/env override -- the advisor does
+  not inject anything into `spawnPeer`.
+- Does NOT authorize automatic model selection -- the choice remains
+  pinned in `peer-spawn.js`.
+- Does NOT authorize ID change without bump + explicit edit of section
+  6.9.2 -- the script's exit 1 states this literally in the error
+  message.
 
-Cadencia operacional: `npm run check-models` DEVE ser executado pelo
-menos uma vez por release e quando o usuario percebe saida de um novo
-modelo top-tier de qualquer provider. Nao eh gate de CI obrigatorio
-nesta release; pode ser promovido a gate em release futura se
-necessario.
+Operational cadence: `npm run check-models` MUST be run at least once
+per release and whenever the user notices the release of a new
+top-tier model from any provider. It is not a mandatory CI gate in
+this release; it may be promoted to a gate in a future release if
+needed.
 
-Interacao com tri-tool (secao 6.9.1): o advisory NAO substitui
-ultrathink + code-reasoning pre-session_init para troca real de modelo.
-Drift detectado ainda exige abrir sessao cross-review dedicada aplicando
-tri-tool completa antes de bumpar release.
+Interaction with tri-tool (section 6.9.1): the advisory does NOT
+replace ultrathink + code-reasoning pre-session_init for a real model
+change. Detected drift still requires opening a dedicated cross-review
+session applying the full tri-tool before bumping the release.
 
-Motivacao: o usuario registrou em 2026-04-24 (sessao 08cd61e6) follow-up
-"auto-discovery controlado de modelo top-level com auditabilidade
-preservada". A pesquisa empirica em 2026-04-24 demonstrou que nenhum dos
-dois CLIs (codex, claude) expoe listagem de modelos em runtime,
-eliminando auto-discovery dinamico via CLI. Interpretando "auto-discovery
-controlado" como "deteccao auditavel de drift", o follow-up e satisfeito
-por secao 6.9.2.1 sem tocar em comportamento de runtime.
+Motivation: the user recorded on 2026-04-24 (session 08cd61e6) the
+follow-up "controlled auto-discovery of top-level model with preserved
+auditability". Empirical research on 2026-04-24 demonstrated that
+neither CLI (codex, claude) exposes model listing at runtime,
+eliminating dynamic CLI auto-discovery. Interpreting "controlled
+auto-discovery" as "auditable drift detection", the follow-up is
+satisfied by section 6.9.2.1 without touching runtime behavior.
 
 ### 6.10 Language policy for peer exchange and internal artifacts (NEW in v4.6)
 
-STATUS: aprovada bilateral (sessao b1700438, 2026-04-24, 5 rodadas,
+STATUS: bilateral-approved (session b1700438, 2026-04-24, 5 rounds,
 outcome=converged).
 
 Rule. All cross-review peer exchange (prompts sent via `ask_peer`, peer
@@ -869,22 +973,22 @@ now, no deferral).
 
 ---
 
-## 7. Resumo das convencoes para uso imediato (ATUALIZADO ate v4.6)
+## 7. Summary of conventions for immediate use (UPDATED through v4.6)
 
-| Convencao | Acao do caller |
-|-----------|---------------|
-| Abertura de sessao | Transcript ASCII-only + clausula de escopo + artifacts com fingerprint; trace ultrathink/code-reasoning pre-session_init obrigatorio (secao 6.9.1) |
-| Contrato STATUS | Reiterar template em cada prompt; bloco estruturado preferido com schema expandido v4 opcional (2.3.1), fallback legacy aceito; ambos ancorados em tail |
-| Campos opcionais | Omit-unless-signal: `uncertainty`/`caller_requests`/`follow_ups` apenas quando valor altera leitura do parecer |
-| Validacao dinamica | Matriz pro-ativa; atender CALLER_REQUEST do peer com NEEDS_EVIDENCE |
-| Escopo | FOLLOW-UP para fora-escopo; aborted para nao-convergencia honesta |
-| Ruido | Consumir content + peer_status + peer_structured + status_source + parser_warnings + peer_model |
-| Warnings | `parser_warnings` nao eh telemetria morta: inspecionar e agir (peer drift ou schema violation) |
-| Modelo | Peer sempre invocado com top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); sem fallback silencioso; drift audit advisory via `npm run check-models` (secao 6.9.2.1) |
-| Encoding | ASCII-only em arquivos em disco; peer exchange e artefatos internos em en-US (secao 6.10 v4.6); apenas chat assistant-user e entradas historicas seladas permanecem pt-BR |
-| Continuidade | Ledger opcional (§6.5); quando adotado, manter ASCII-only e anexar em sessoes subsequentes |
-| Overflow | Yellow 50k / Red 100k chars no transcript (§6.6.1); compressao non-destructive (§6.6.4) com referencia aos imutaveis; meta.json sem mudanca de API (§6.6.3 YAGNI) |
-| Janela de transicao | Durante upgrade do server, peer emite ambos formatos ate reload confirmado |
+| Convention | Caller action |
+|------------|---------------|
+| Session opening | ASCII-only transcript + scope clause + artifacts with fingerprint; mandatory ultrathink/code-reasoning trace pre-session_init (section 6.9.1) |
+| STATUS contract | Reiterate template in every prompt; structured block preferred with optional v4 expanded schema (2.3.1), legacy fallback accepted; both tail-anchored |
+| Optional fields | Omit-unless-signal: `uncertainty`/`caller_requests`/`follow_ups` only when the value changes the reading of the parecer |
+| Dynamic validation | Proactive matrix; answer peer CALLER_REQUEST with NEEDS_EVIDENCE |
+| Scope | FOLLOW-UP for out-of-scope; aborted for honest non-convergence |
+| Noise | Consume content + peer_status + peer_structured + status_source + parser_warnings + peer_model |
+| Warnings | `parser_warnings` is not dead telemetry: inspect and act (peer drift or schema violation) |
+| Model | Peer always invoked with top-level (codex=gpt-5.5 xhigh, claude=claude-opus-4-7); no silent fallback; advisory drift audit via `npm run check-models` (section 6.9.2.1) |
+| Encoding | ASCII-only on disk; peer exchange and internal artifacts in en-US (section 6.10 v4.6); only assistant-to-user chat and historically-sealed entries remain pt-BR |
+| Continuity | Optional ledger (section 6.5); when adopted, keep ASCII-only and attach on subsequent sessions |
+| Overflow | Yellow 50k / Red 100k chars in the transcript (section 6.6.1); non-destructive compression (section 6.6.4) with reference to the immutables; meta.json with no API change (section 6.6.3 YAGNI) |
+| Transition window | During server upgrade, peer emits both formats until reload is confirmed |
 
 ---
 
@@ -946,48 +1050,36 @@ inconsistencia.
   (v4-v4.5); from v4.7 onward, new section 8 entries MAY be authored
   in en-US per section 6.10.
 
-Uma vez aceita e publicada:
-- Substitui revisao anterior in-place.
-- Referenciada como a spec ativa em novas sessoes.
-- Fica congelada ate nova sessao de spec ser aberta (sem amend silencioso).
+Once accepted and published:
+- Replaces the prior revision in-place.
+- Referenced as the active spec in new sessions.
+- Frozen until a new spec session is opened (no silent amend).
 
-Follow-ups pos-v4.6 (registrados mas fora do escopo desta release):
-- Pre-spawn existence check defensivo (abort-only se modelo descontinuado
-  pelo provider): registrado como follow_up separado nesta sessao
-  9c56005b; fora de escopo de secao 6.9.2.1 que eh exclusivamente
-  advisory.
-- Normalizar drift historico de non-ASCII (U+00A7) em
-  docs/workflow-spec.md (20 ocorrencias em v4.2 e anteriores):
-  registrado como follow_up na sessao 9c56005b. Mantido fora do escopo
-  de v4.3 por decisao bilateral; v4.3 transliterou apenas as suas
-  proprias novas ocorrencias. Tratamento sugerido: sessao dedicada ou
-  housekeeping pass antes de v4.4.
-- Schema v5 com objetos para `caller_requests`/`follow_ups` em vez de
-  arrays de strings -- SUSPENSO por YAGNI na sessao bd8c3cfb
-  (2026-04-24, outcome=converged em 2 rodadas). Evidencia empirica: v4
-  parser em uso desde reload do VS Code em 2026-04-24; zero instancias
-  de string-inadequacy emitidas pelo peer v4-era na sessao 9c56005b
-  (8 caller_requests/follow_ups, todos strings acionaveis); peer Codex
-  nao conseguiu nomear UM caller_request v4-era que tenha falhado por
-  limitacao de string. A precondicao literal do follow-up original
-  registrado em 08cd61e6 ("se strings se mostrarem insuficientes em uso
-  real" + "Nao priorizado ate emergir use case concreto") permanece
-  nao-satisfeita. Criterio de reabertura: peer v4-era nomeando um
-  caller_request concreto que tenha FALHADO por limitacao de string
-  (substancia nao transmitida, ambiguidade causadora de round extra,
-  guidance nao-acionavel). "Poderia ser melhor como objeto" NAO conta.
-  Cobertura de teste ja existente: `STRUCTURED_V4_NON_STRING_ITEM` em
-  functional-smoke documenta o drop + indexed warning para itens
-  nao-string, confirmando que o comportamento atual eh intencional.
-- Drift de versao entre `package.json` (0.3.0-alpha), `package-lock.json`
-  (0.2.0-alpha) e `src/server.js` (0.4.0-alpha) -- saneamento de higiene de
-  versionamento em sessao separada (registrado como follow_up do Codex na
-  sessao a847f897).
-- Gatilho opcional para `rounds_limit`/`session_digest` em `session_read` --
-  somente se/quando meta.json real atingir pressao de overflow mensuravel
-  (§6.6.3).
-- Considerar promover o padrao "em revalidacao durante sessao; aprovada
-  apenas pos-READY bilateral" como clausula operacional normativa em
-  revisao futura de Secao 8 ou Secao 6.9 (registrado como follow_up do
-  Codex na sessao f1fdbee4; padrao aplicado de facto em v4.2 mas nao
-  normativado).
+Follow-ups post-v4.6 (registered but out of scope for this release):
+- Defensive pre-spawn existence check (abort-only if the pinned model
+  is deprecated by the provider): registered as a separate follow-up
+  in session 9c56005b; out of scope for section 6.9.2.1 which is
+  exclusively advisory.
+- Normalize historical non-ASCII drift (U+00A7) in
+  docs/workflow-spec.md (20 occurrences in v4.2 and earlier):
+  registered as a follow-up in session 9c56005b. Kept out of scope
+  for v4.3 by bilateral decision; v4.3 transliterated only its own
+  new occurrences. Suggested handling: a dedicated session or
+  housekeeping pass before v4.7.
+- Schema v5 with objects for `caller_requests`/`follow_ups` instead of
+  arrays of strings -- SUSPENDED by YAGNI in session bd8c3cfb
+  (2026-04-24, outcome=converged in 2 rounds). Empirical evidence: v4
+  parser in use since the VS Code reload on 2026-04-24; zero
+  string-inadequacy signals emitted by the v4-era peer in session
+  9c56005b (8 caller_requests/follow_ups, all actionable strings);
+  peer Codex could not name ONE v4-era caller_request that failed due
+  to string limitation. The literal precondition from the original
+  follow-up registered in 08cd61e6 ("if strings prove insufficient in
+  real use" + "not prioritized until a concrete use case emerges")
+  remains unsatisfied. Reopening criterion: a v4-era peer naming one
+  concrete caller_request that has FAILED due to string limitation
+  (substance not transmitted, ambiguity causing an extra round,
+  non-actionable guidance). "Could be better as an object" does NOT
+  count. Existing test coverage: `STRUCTURED_V4_NON_STRING_ITEM` in
+  functional-smoke documents drop + indexed warning for non-string
+  items, confirming the current behavior is intentional.
