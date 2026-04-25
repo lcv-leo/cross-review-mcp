@@ -74,3 +74,8 @@ tmp/
 
 # Session artifacts (defensive -- real path is ~/.cross-review/ outside repo)
 .cross-review/
+
+# Phase 1 audit additions: SQL schema dumps + AI files leaked from workspace memory
+**/schema.sql
+schema.sql
+.github/copilot-instructions.md
