@@ -2,12 +2,13 @@
 
 > MCP server orchestrating cross-review between Claude Code, ChatGPT Codex, and Gemini CLI.
 
-[![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](#status)
+[![version: 1.0.0](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](./CHANGELOG.md)
 [![spec: v4.11](https://img.shields.io/badge/spec-v4.11-informational.svg)](./docs/workflow-spec.md)
 [![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io/)
 [![license: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
-**Status.** Pre-v1.0 alpha. Current release: **v0.9.0-alpha.1** runtime paired with **spec v4.11**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. **Breaking changes are possible between alpha releases.** A v1.0 stable release with frozen protocol contract is planned once the field-use validation threshold (10 trilateral sessions under the patched runtime) is met per operator directive 2026-04-24.
+**Status.** Stable. Current release: **v1.0.0** runtime paired with **spec v4.11**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
 
 The version history at a glance:
 
@@ -20,6 +21,7 @@ The version history at a glance:
 | (spec-only) | v4.11 | Claude CLI banner parsing follow-up CLOSED as negative empirical result |
 | `v0.9.0-alpha` | v4.11 | Public-GitHub pre-cut: en-US README + CONTRIBUTING + CODE_OF_CONDUCT + NOTICE + Apache-2.0 LICENSE + full-history secrets scan |
 | `v0.9.0-alpha.1` | v4.11 | Fix: Gemini auth detection precedence (settings.json → env → oauth_creds → default); eliminates false-positive `silent_model_downgrade` when `GEMINI_API_KEY` env is present in MCP host with oauth-personal CLI |
+| **`v1.0.0`** | v4.11 | **Stable cut.** Frozen public surface: 7 MCP tools, structured peer-block contracts, `meta.json` semantics, strict-only convergence predicate, transport descriptor + audit fields/enums. v1.x follows the semver policy in CONTRIBUTING.md. Cut ratified by 10-session field-use validation gate (PRAGMATIC counting rule, 2026-04-24/25) + trilateral final approval session `fca13b80` (2026-04-25). |
 
 ---
 
@@ -234,7 +236,7 @@ cross-review-mcp/
 |       |-- status-parser.js         STATUS + v4/v4.10 structured block parser
 |       |-- model-parser.js          Sibling peer-model block parser (silent-downgrade defense)
 |-- scripts/
-|   |-- functional-smoke.js          JSON-RPC stdio smoke (125 steps at v0.9.0-alpha.1)
+|   |-- functional-smoke.js          JSON-RPC stdio smoke (125 steps at v1.0.0; count grows with each release)
 |   |-- audit-model-drift.js         Advisory drift audit (check-models)
 |   |-- probe-reviewer-isolation.js  Legacy Commit-1 hard gate; retained for regression
 |-- docs/

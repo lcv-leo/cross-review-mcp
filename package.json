@@ -1,11 +1,13 @@
 {
   "name": "cross-review-mcp",
-  "version": "0.9.0-alpha.1",
+  "version": "1.0.0",
   "private": true,
-  "description": "MCP server orchestrating cross-review between Claude Code and ChatGPT Codex",
+  "description": "MCP server orchestrating trilateral cross-review between Claude Code, ChatGPT Codex, and Gemini CLI",
   "type": "commonjs",
   "main": "src/server.js",
-  "bin": { "cross-review-mcp": "src/server.js" },
+  "bin": {
+    "cross-review-mcp": "src/server.js"
+  },
   "scripts": {
     "start": "node src/server.js",
     "test": "node scripts/functional-smoke.js",

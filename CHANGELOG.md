@@ -11,7 +11,59 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — próximos follow-ups após v0.9.0-alpha.1: v1.0 stable cut pendente de 9 sessões trilaterais adicionais (field-use validation #2/10 … #10/10) + eventual novo round trilateral de review para o freeze proposal apresentado em session 6cf09af3. Registered issues rastreadas via `docs/workflow-spec.md` §8 e GitHub issues.)
+- (em aberto — próximos follow-ups pós-v1.0 listados em `docs/workflow-spec.md` §8 e nas memórias do workspace; nenhum bloqueio para v1.x patch/minor.)
+
+---
+
+## [1.0.0] — 2026-04-25
+
+**Stable release.** Cut ratified by 10-session field-use validation gate + trilateral final approval session `fca13b80-14c7-456d-bedf-4ede16646e24` (2026-04-25, 2 rounds, 3/3 READY: caller=claude + peers=codex+gemini). Implementation-ratified per `docs/workflow-spec.md` §8 v4.5 preamble — design scope was approved trilaterally in sessions `c9508617` (v0.6.0-alpha / spec v4.9) and `6cf09af3` (v1.0 frozen surface declaration + v1.x semver policy); v1.0.0 ships those decisions without introducing new normative scope.
+
+### Frozen public surface (v1.x major-bump-required to change)
+
+- **Seven MCP tools** by name + input/output schema: `session_init`, `session_read`, `session_check_convergence`, `session_finalize`, `ask_peer`, `ask_peers`, `escalate_to_operator`.
+- **Structured peer-block contracts**: `<cross_review_peer_model>` + `<cross_review_status>` (status enum READY/NOT_READY/NEEDS_EVIDENCE; optional fields `confidence`, `evidence_sources`, `caller_requests`, `follow_ups`, `uncertainty`).
+- **`meta.json` semantics** surfaced via `session_read`: rounds[], peers[], capability_snapshot, failed_attempts[], escalations[], convergence_snapshot.
+- **Convergence predicate** (strict-only per spec §6.12): `caller_status === 'READY' AND every responded peer.peer_status === 'READY' AND round.peers.length >= 1 (legacy bilateral) or >= 2 (N-ary)`. `status_missing` counts AGAINST.
+- **Transport descriptor** `{ agent, auth, endpoint_class }` (spec §6.11). Auth ∈ `{cli-subscription, oauth-personal, api-key}`; endpoint_class per agent.
+- **Audit-trail fields**: `model_check_skipped`, `protocol_violation`, `cli_banner_attested`, `cli_attested_model`, `rate_limit`, `rate_limited_peers`, `convergence_snapshot`, `model_failure_class` enum.
+
+### v1.x semver policy
+
+- **Patch (1.0.x)**: bug fixes preserving frozen surfaces.
+- **Minor (1.x.0)**: additive only — new optional structured fields (backward-compat must hold), new tools, new informational spec sections.
+- **Major (2.0.0)**: any change to a frozen surface; REQUIRES new trilateral cross-review session.
+- **Deprecation**: 1-minor warning before removal in next major.
+- **Security exception**: vulnerability fixes may patch a frozen surface with same-release spec amendment + post-hoc trilateral review.
+- **Spec versioning** increments independently (v1.0 ships with spec v4.11 frozen).
+
+### Field-use validation summary
+
+10 trilateral sessions across 6 distinct domains (cross-review-mcp meta-development, public docs, workspace tooling audits, product feature review, security audit→remediation arc, external orchestrator script analysis). 29 total rounds, all converged, zero stranded. 4 mid-session patches shipped under field evidence. 3 platform-layer failure classes recovered via round-level resilience (OpenAI moderation rejection, Gemini libuv crash, claude-spawn-miss). 7 claude-caller + 3 codex-caller sessions = caller-rotation symmetry validated. Sessions: `b5a328b8`, `c9508617`, `c2c6060d`, `6cf09af3`, `5db2617c`, `19a3c66f`, `41121627`, `74c77006`, `566f2709`, `aa49c29a`. Final approval: `fca13b80`.
+
+### Alterado — Version
+
+- `src/server.js` VERSION bumpado `0.9.0-alpha.1` → `1.0.0`.
+- `package.json` version bumpado `0.9.0-alpha.1` → `1.0.0` (via `npm version 1.0.0 --no-git-tag-version` per Codex caller_request in fca13b80 R2: avoid auto-tag before all release files coherent).
+- `package-lock.json` version reconciled to `1.0.0` simultaneously (was drifting at `0.5.0-alpha.1` since v0.5.0-alpha; Codex flagged in fca13b80 R2; fixed atomically with package.json bump).
+- `README.md` status line updated to "Stable. Current release: v1.0.0" + version-history table extended with v1.0.0 row citing the cut ratification.
+
+### Spec absorbed
+
+- Spec v4.11 (commit `21a416b`) — unchanged in v1.0.0 release. v1.0.0 is implementation-ratified, not a spec revision.
+
+### Confirmed in-place at v1.0.0
+
+- License: Apache-2.0 (`LICENSE`) + `NOTICE` attribution.
+- Public-facing docs: `README.md` (en-US), `README.pt-BR.md` (historical preservation), `CONTRIBUTING.md` (cross-review-discipline-based contribution model with v1.x semver policy), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md` (responsible disclosure).
+- Smoke gate: 125 steps GREEN (Node 22 LTS / ubuntu-latest in CI).
+- Drift audit: `npm run check-models` GREEN (no drift, fallback_chain invariant holds, no staleness).
+- Repo: public on GitHub at `github.com/lcv-leo/cross-review-mcp`.
+
+### Out of scope for v1.0.0 (deferred to v1.1+ as polish)
+
+- v1.1 candidate: rename `GeminiOnly.UnknownFields` → `ExtraFields` or split into `ControlFields`+`UnknownFields` (Codex Q2 from session `566f2709`, non-blocking).
+- v1.1 candidate: probe-level Item E banner elevation (currently only `parsePeerOutputs` round-level applies banner attestation; probe captures `cli_attested_model_raw` but doesn't elevate `cli_banner_attested` — non-blocking audit-trail symmetry gap).
 
 ---
 
