@@ -1,13 +1,22 @@
 {
-  "name": "cross-review-mcp",
-  "version": "1.0.1",
-  "private": true,
+  "name": "@lcv-leo/cross-review-mcp",
+  "version": "1.0.2",
   "description": "MCP server orchestrating trilateral cross-review between Claude Code, ChatGPT Codex, and Gemini CLI",
   "type": "commonjs",
   "main": "src/server.js",
   "bin": {
     "cross-review-mcp": "src/server.js"
   },
+  "files": [
+    "src/",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "README.pt-BR.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md"
+  ],
   "scripts": {
     "start": "node src/server.js",
     "test": "node scripts/functional-smoke.js",
@@ -17,5 +26,36 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lcv-leo/cross-review-mcp.git"
+  },
+  "homepage": "https://github.com/lcv-leo/cross-review-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/lcv-leo/cross-review-mcp/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "lcv-leo",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cross-review",
+    "code-review",
+    "claude",
+    "claude-code",
+    "codex",
+    "gpt",
+    "gemini",
+    "ai-agents",
+    "trilateral",
+    "peer-review",
+    "convergence"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -15,6 +15,42 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.0.2] — 2026-04-25
+
+**First npm publish.** Package renomeado para scope `@lcv-leo/cross-review-mcp` e publicado em ambos os registries (npmjs.com primário + GitHub Packages mirror) com provenance attestation. Zero behavioral change; runtime e schemas idênticos a v1.0.1. v1.x semver patch policy preservado (frozen surfaces inalterados).
+
+### Adicionado
+- **`.github/workflows/publish.yml`**: pipeline de publish disparado por `push` em tags `v*` + `workflow_dispatch`. Pre-publish gate executa `smoke + check-models` antes de cada publish. Dois jobs paralelos publicam para `https://registry.npmjs.org` (auth via `NPM_TOKEN` secret) e `https://npm.pkg.github.com` (auth via `GITHUB_TOKEN`); ambos com `--access public --provenance` (`id-token: write` permission para SLSA build attestation).
+- **`package.json` metadata**: `repository`, `homepage`, `bugs`, `license: "Apache-2.0"`, `author: "lcv-leo"`, `keywords[]`, `engines.node: ">=20"`.
+- **`package.json` `"files"` whitelist**: `["src/", "LICENSE", "NOTICE", "README.md", "README.pt-BR.md", "CHANGELOG.md", "SECURITY.md", "CODE_OF_CONDUCT.md"]`. Removeu do tarball: `docs/` (workflow-spec interno + reports), `scripts/` (dev-only: smoke harness, drift audit, isolation probe), `reviewer-configs/` (test fixtures), `AGENTS.md`, `CONTRIBUTING.md` (developer-facing GitHub-side). Tarball reduzido de 574 KB / 27 files (v1.0.1) → 239 KB / 13 files (v1.0.2).
+- **README.md**: badge npm version dinâmico (shields.io/npm/v) substituiu badge estático; instruções de instalação para ambos os registries; rows v1.0.1 + v1.0.2 na version-history table.
+
+### Alterado — Package
+- `package.json` `name`: `cross-review-mcp` → `@lcv-leo/cross-review-mcp`. Scope `@lcv-leo` alinhado ao GitHub owner (requisito de GitHub Packages); npmjs scope precisa ser claimed pelo owner se ainda não foi.
+- `package.json` `private`: removido (era `true`, bloqueava `npm publish`).
+- `package.json` `publishConfig`: adicionado `{ "access": "public" }` para publish público de scoped package no npmjs (default seria `restricted`).
+- `package-lock.json`: regenerado via `npm install --package-lock-only` para refletir o novo package name; `lockfileVersion` preservado.
+
+### Alterado — Version
+- `src/server.js` VERSION bumpado `1.0.1` → `1.0.2`.
+- `package.json` version bumpado `1.0.1` → `1.0.2` (regenerado junto com lockfile).
+
+### Notas operacionais
+- **bin nome preservado**: `"bin": { "cross-review-mcp": "src/server.js" }` mantém o comando CLI invocável como `cross-review-mcp` mesmo com package scoped — convenção npm padrão. Install global: `npm install -g @lcv-leo/cross-review-mcp`.
+- **Provenance**: ambos os publishes geram SLSA build provenance attestation visível na página do package no npmjs.com (badge "Provenance"). Requer `id-token: write` permission no workflow (configurado).
+- **First-publish manual fallback**: se `NPM_TOKEN` ainda não está configurado como repo secret, o job `publish-npmjs` falha com `ENEEDAUTH`; primeira publicação pode ser feita localmente via `npm login` + `npm publish --access public --provenance` (provenance via local exige `NPM_CONFIG_PROVENANCE=true` + repo público).
+
+### Validação
+- Smoke gate: 125 steps GREEN.
+- check-models: no drift, fallback_chain invariant holds, no staleness.
+- `npm pack --dry-run`: 13 files / 70.1 KB compressed / 239 KB unpacked — confere com whitelist.
+- Zero behavioral change; frozen surfaces v1.x intactos.
+
+### Não validado por trilateral
+v1.0.2 é release-engineering / publishing infrastructure patch sob v1.x semver patch policy (frozen surfaces preservados). Sem nova superfície de protocolo, sem novo schema field, sem behavioral change. Não exige sessão trilateral.
+
+---
+
 ## [1.0.1] — 2026-04-25
 
 **Patch release: doc-only refresh of user-visible MCP tool descriptions.** v1.0.0 cut left stale alpha labels and stale spec references in the `description` strings emitted via `ListToolsRequestSchema`. MCP clients reading those descriptions saw "v0.5.0-alpha" / "spec v4.7" / "spec v4.8" / "v0.7.0-alpha / spec v4.10" even though the running server was tagged v1.0.0 and the head spec is v4.11. Operator caught the contradiction post-cut. Zero behavioral change; frozen surfaces (tool names + input schemas) unchanged per v1.x semver patch policy.
