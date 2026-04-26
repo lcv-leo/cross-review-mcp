@@ -148,6 +148,7 @@ function initSession({ task, artifacts, callerAgent, peerAgent, peers, capabilit
 
     const meta = {
         session_id: id,
+        spec_version: SESSION_SPEC_VERSION,
         task: String(task || ''),
         artifacts: Array.isArray(artifacts) ? artifacts.map(String) : [],
         caller: callerAgent,
@@ -156,6 +157,7 @@ function initSession({ task, artifacts, callerAgent, peerAgent, peers, capabilit
         rounds: [],
         failed_attempts: [],
         outcome: null,
+        outcome_reason: null,
     };
 
     // Backwards-compat: when exactly one peer is registered, also
@@ -199,6 +201,14 @@ function writeMeta(sessionId, meta) {
 // the persisted snapshot; no recomputation for v4.9+ rounds. Rounds from
 // pre-v4.9 sessions fall through to derive-on-read legacy path.
 const CONVERGENCE_SPEC_VERSION = 'v4.9';
+
+// Spec version active at session creation. Persisted into meta.spec_version so
+// post-hoc audits can reconstruct which spec rules were in force when a given
+// session ran. Independent from CONVERGENCE_SPEC_VERSION (which marks the
+// convergence-snapshot semantic) so they can evolve at different cadences.
+// Bumped per spec evolution: v4.13 adds §6.17 spec_version field, §6.18
+// session_sweep + outcome_reason, §6.19 convergence_health.
+const SESSION_SPEC_VERSION = 'v4.13';
 
 function computeConvergenceSnapshot(roundIndex, round, context = {}) {
     const excludedProbe = Array.isArray(context.excluded_probe)
@@ -457,11 +467,176 @@ function buildConvergenceReason(snapshot, round) {
     return `peer(s) not READY: ${parts.join(', ')}`;
 }
 
-function finalize(sessionId, outcome) {
+// v1.1.0 / spec v4.13 §6.18: optional `reason` enables structured "why" for
+// the outcome (e.g., 'stale' for sweeper-finalized sessions, 'peer_scope_creep'
+// for intentional rollback aborts, 'moderation_flag_unresolved' for the
+// 5-attempt cap from §6.16). Stored as meta.outcome_reason. null means
+// unset/legacy.
+function finalize(sessionId, outcome, reason = null) {
     const meta = readMeta(sessionId);
     meta.outcome = outcome;
+    meta.outcome_reason = reason == null ? null : String(reason);
     meta.finalized_at = new Date().toISOString();
     writeMeta(sessionId, meta);
+}
+
+// v1.1.0 / spec v4.13 §6.18 long-idle session reconciliation.
+
+// 24h hard floor: sessions younger than this are NEVER candidates regardless
+// of staleDays argument. Footgun guard — prevents accidentally finalizing a
+// session the operator just opened.
+const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+const SWEEP_DEFAULT_STALE_DAYS = 7;
+
+// Compute last-activity timestamp from meta. Last activity = max of
+// started_at, all rounds[].started_at, all rounds[].completed_at. A 30-round
+// session whose last round finished an hour ago is NOT long-idle even if
+// started_at is months in the past. Returns ISO string OR null when all
+// candidate timestamps are unparseable.
+function lastActivityAt(meta) {
+    const candidates = [];
+    if (meta?.started_at) candidates.push(meta.started_at);
+    for (const r of (meta?.rounds || [])) {
+        if (r?.started_at) candidates.push(r.started_at);
+        if (r?.completed_at) candidates.push(r.completed_at);
+    }
+    let bestTs = null;
+    let bestMs = -Infinity;
+    for (const c of candidates) {
+        const ms = Date.parse(c);
+        if (Number.isFinite(ms) && ms > bestMs) {
+            bestMs = ms;
+            bestTs = c;
+        }
+    }
+    return bestTs;
+}
+
+// listStaleSessions({ staleDays = 7, now = Date.now() }):
+// Walks ~/.cross-review/<id>/meta.json. Returns rows describing every session
+// that COULD be a sweep target — including ones that ultimately would not be
+// finalized (locked, malformed_timestamp). Sessions younger than the 24h hard
+// floor are excluded entirely (do not even appear as skipped). Already
+// finalized sessions are excluded entirely.
+//
+// Row shape: { session_id, last_activity_at, age_days, has_rounds, locked,
+//              would_finalize, skip_reason? }
+//
+// `now` is parameterizable for deterministic tests.
+function listStaleSessions({ staleDays = SWEEP_DEFAULT_STALE_DAYS, now = Date.now() } = {}) {
+    ensureStateDir();
+    const staleMs = staleDays * 24 * 60 * 60 * 1000;
+    const out = [];
+    let entries;
+    try {
+        entries = fs.readdirSync(STATE_DIR);
+    } catch {
+        return out;
+    }
+    for (const id of entries) {
+        // session UUIDs are 36 chars (8-4-4-4-12 + 4 dashes); skip anything else.
+        if (typeof id !== 'string' || id.length !== 36) continue;
+        const metaPath = path.join(sessionDir(id), 'meta.json');
+        let meta;
+        try {
+            meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        } catch {
+            // Corrupt or missing meta.json — never auto-finalize.
+            out.push({
+                session_id: id,
+                last_activity_at: null,
+                age_days: null,
+                has_rounds: null,
+                locked: false,
+                would_finalize: false,
+                skip_reason: 'malformed_meta',
+            });
+            continue;
+        }
+        // Already finalized: never a candidate.
+        if (meta.outcome != null) continue;
+
+        const lastTs = lastActivityAt(meta);
+        if (!lastTs) {
+            out.push({
+                session_id: id,
+                last_activity_at: null,
+                age_days: null,
+                has_rounds: Array.isArray(meta.rounds) && meta.rounds.length > 0,
+                locked: fs.existsSync(path.join(sessionDir(id), '.lock')),
+                would_finalize: false,
+                skip_reason: 'malformed_timestamp',
+            });
+            continue;
+        }
+        const ageMs = now - Date.parse(lastTs);
+        // 24h hard floor — silently exclude. Operator should not see these
+        // even as skipped rows.
+        if (ageMs < SWEEP_MIN_AGE_MS) continue;
+        if (ageMs < staleMs) continue;
+
+        const locked = fs.existsSync(path.join(sessionDir(id), '.lock'));
+        const ageDays = ageMs / (24 * 60 * 60 * 1000);
+        const row = {
+            session_id: id,
+            last_activity_at: lastTs,
+            age_days: Number(ageDays.toFixed(2)),
+            has_rounds: Array.isArray(meta.rounds) && meta.rounds.length > 0,
+            locked,
+            would_finalize: !locked,
+        };
+        if (locked) row.skip_reason = 'locked';
+        out.push(row);
+    }
+    return out;
+}
+
+// finalizeIfUnset(sessionId, outcome, reason):
+// Re-reads meta and only writes if meta.outcome is still null. Prevents
+// clobbering a session that got finalized concurrently (e.g., by another
+// terminal between candidate enumeration and the finalize loop).
+// Returns true if the write happened, false if outcome was already set.
+function finalizeIfUnset(sessionId, outcome, reason = null) {
+    let meta;
+    try {
+        meta = readMeta(sessionId);
+    } catch {
+        return false;
+    }
+    if (meta.outcome != null) return false;
+    meta.outcome = outcome;
+    meta.outcome_reason = reason == null ? null : String(reason);
+    meta.finalized_at = new Date().toISOString();
+    writeMeta(sessionId, meta);
+    return true;
+}
+
+// sweepStaleSessions({ staleDays, dryRun, reason, now }):
+// Wraps listStaleSessions + finalize. Returns { candidates, finalized }.
+// finalized is empty when dryRun=true. would_finalize=false rows are never
+// finalized. Uses finalizeIfUnset to guarantee re-read-before-write semantics.
+function sweepStaleSessions({
+    staleDays = SWEEP_DEFAULT_STALE_DAYS,
+    dryRun = true,
+    reason = 'stale',
+    now = Date.now(),
+} = {}) {
+    const candidates = listStaleSessions({ staleDays, now });
+    const finalized = [];
+    if (!dryRun) {
+        for (const row of candidates) {
+            if (!row.would_finalize) continue;
+            const wrote = finalizeIfUnset(row.session_id, 'aborted', reason);
+            if (wrote) {
+                finalized.push({
+                    session_id: row.session_id,
+                    outcome: 'aborted',
+                    outcome_reason: reason,
+                });
+            }
+        }
+    }
+    return { candidates, finalized };
 }
 
 // v0.7.0-alpha / spec v4.10 Item D: operator escalation record.
@@ -513,4 +688,12 @@ module.exports = {
     computeConvergenceSnapshot,
     collectSessionExclusions,
     CONVERGENCE_SPEC_VERSION,
+    // v1.1.0 / spec v4.13 additions.
+    SESSION_SPEC_VERSION,
+    SWEEP_MIN_AGE_MS,
+    SWEEP_DEFAULT_STALE_DAYS,
+    lastActivityAt,
+    listStaleSessions,
+    sweepStaleSessions,
+    finalizeIfUnset,
 };

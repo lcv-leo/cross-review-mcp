@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.0.5';
+const VERSION = '1.1.0';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -178,6 +178,27 @@ Optional structured fields (spec v4.11 §6.14):
 // format yet, Gemini oauth-personal has no banner), §6.11 skip applies
 // unchanged. Claude banner parsing is DEFERRED to v0.8+ pending empirical
 // format survey.
+// v1.1.0 / spec v4.13 §6.19 convergence-health hint.
+//
+// Spec defines the CONTRACT (the field value); thresholds here are
+// implementation choice, tunable without spec bump. v1.1.0 thresholds derive
+// from the 60-session audit corpus distribution: 5+ rounds is uncommon (5/60
+// sessions), 8+ rounds is past the 90th percentile.
+//
+// Purely advisory: callers SHOULD consider whether continued iteration is
+// productive when health is 'concerning'; nothing in the runtime auto-changes
+// status, outcome, or peer behavior based on this signal.
+const CONVERGENCE_HEALTH_EXTENDED_AT = 6;
+const CONVERGENCE_HEALTH_CONCERNING_AT = 8;
+
+function computeConvergenceHealth(roundCount) {
+    const n = Number(roundCount);
+    if (!Number.isFinite(n) || n < 1) return 'normal';
+    if (n >= CONVERGENCE_HEALTH_CONCERNING_AT) return 'concerning';
+    if (n >= CONVERGENCE_HEALTH_EXTENDED_AT) return 'extended';
+    return 'normal';
+}
+
 function parsePeerOutputs(stdout, peerModel, transportDescriptor, cliAttestedModel = null) {
     const statusParsed = parsePeerResponse(stdout);
     const isStub = peerModel === 'stub';
@@ -328,7 +349,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'session_finalize',
             description:
-                'Mark the session as concluded with an outcome: converged | aborted | max-rounds.',
+                'Mark the session as concluded with an outcome: converged | aborted | max-rounds. Optional `reason` (spec v4.13 §6.18) records the structured "why" — e.g., "stale" for sweeper-finalized sessions, "peer_scope_creep" for intentional rollback aborts, "moderation_flag_unresolved" for the 5-attempt cap from §6.16. Stored as meta.outcome_reason. Omit for legacy/unknown.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -337,8 +358,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                         type: 'string',
                         enum: ['converged', 'aborted', 'max-rounds'],
                     },
+                    reason: {
+                        type: 'string',
+                        description:
+                            'Optional structured reason for the outcome. Free-form short string; conventions: "stale", "peer_scope_creep", "moderation_flag_unresolved", "operator_abort". Omit when no specific reason.',
+                    },
                 },
                 required: ['session_id', 'outcome'],
+            },
+        },
+        {
+            name: 'session_sweep',
+            description:
+                'Long-idle session reconciliation (spec v4.13 §6.18). Walks ~/.cross-review/<id>/meta.json and lists sessions whose last activity (max of started_at, rounds[].started_at, rounds[].completed_at) is older than `stale_days`, EXCLUDING (a) sessions younger than 24h from last activity (hard non-overridable footgun guard) and (b) already finalized sessions. Returns { candidates, finalized }. With `dry_run: true` (default), the call is read-only — `finalized` is empty and no meta.json is touched. With `dry_run: false`, every candidate row with `would_finalize: true` is finalized via re-read-before-write semantics: if `meta.outcome` was set by a concurrent process between enumeration and write, the session is left untouched. Finalize sets `outcome: "aborted"` + `outcome_reason: <reason>` (default "stale"). Locked sessions (.lock present) appear in candidates with `would_finalize: false, skip_reason: "locked"` so the operator audits them. Sessions with malformed timestamps appear with `skip_reason: "malformed_timestamp"` and are never auto-finalized.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    stale_days: {
+                        type: 'number',
+                        description:
+                            'Minimum age in days from last activity before a session becomes a candidate. Default 7. The 24h hard floor below this argument is non-overridable: stale_days=0 still excludes sessions younger than 24h.',
+                    },
+                    dry_run: {
+                        type: 'boolean',
+                        description:
+                            'When true (default), the call is read-only and `finalized` is empty. Set false to finalize candidates with would_finalize=true.',
+                    },
+                    reason: {
+                        type: 'string',
+                        description:
+                            'outcome_reason value to record on finalized sessions. Default "stale". Free-form short string; conventions documented in spec §6.18.',
+                    },
+                },
             },
         },
         {
@@ -500,12 +551,49 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 };
             }
             case 'session_finalize': {
-                store.finalize(args.session_id, args.outcome);
+                store.finalize(args.session_id, args.outcome, args.reason ?? null);
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify({ ok: true, outcome: args.outcome }, null, 2),
+                            text: JSON.stringify({
+                                ok: true,
+                                outcome: args.outcome,
+                                outcome_reason: args.reason ?? null,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            case 'session_sweep': {
+                // v1.1.0 / spec v4.13 §6.18 long-idle session reconciliation.
+                const staleDays = typeof args.stale_days === 'number' && args.stale_days >= 0
+                    ? args.stale_days
+                    : store.SWEEP_DEFAULT_STALE_DAYS;
+                const dryRun = args.dry_run !== false;  // default true — read-only by default
+                const reason = (typeof args.reason === 'string' && args.reason.trim().length > 0)
+                    ? args.reason.trim()
+                    : 'stale';
+                const result = store.sweepStaleSessions({ staleDays, dryRun, reason });
+                log('session_sweep', {
+                    stale_days: staleDays,
+                    dry_run: dryRun,
+                    reason,
+                    candidates: result.candidates.length,
+                    finalized: result.finalized.length,
+                    locked: result.candidates.filter((c) => c.locked).length,
+                });
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                ok: true,
+                                stale_days: staleDays,
+                                dry_run: dryRun,
+                                reason,
+                                ...result,
+                            }, null, 2),
                         },
                     ],
                 };
@@ -652,6 +740,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                             lexeme_matched: parsed.rate_limit.lexeme_matched,
                         });
                     }
+                    const convergenceHealth = computeConvergenceHealth(roundNum);
                     store.appendRound(sessionId, {
                         round: roundNum,
                         caller: CALLER,
@@ -676,6 +765,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         protocol_violation: parsed.protocol_violation,
                         duration_ms: durationMs,
                         completed_at: new Date().toISOString(),
+                        convergence_health: convergenceHealth,
                     });
                     log('ask_peer: done', {
                         round: roundNum,
@@ -713,6 +803,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         cli_attested_model_raw: cliAttestedModelRaw,
                                         rate_limited_peers: rateLimitedPeers,
                                         protocol_violation: parsed.protocol_violation,
+                                        convergence_health: convergenceHealth,
                                         duration_ms: durationMs,
                                         content: stdout,
                                         stderr_tail: (stderr || '').slice(-600),
@@ -907,6 +998,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         });
                     }
 
+                    const convergenceHealth = computeConvergenceHealth(roundNum);
                     store.appendRound(sessionId, {
                         round: roundNum,
                         caller: CALLER,
@@ -921,6 +1013,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         protocol_violation: anyProtocolViolation,
                         duration_ms: durationMs,
                         completed_at: new Date().toISOString(),
+                        convergence_health: convergenceHealth,
                     });
 
                     const allPeersReady =
@@ -952,6 +1045,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         },
                                         rate_limited_peers: rateLimitedPeers,
                                         protocol_violation: anyProtocolViolation,
+                                        convergence_health: convergenceHealth,
                                         duration_ms: durationMs,
                                     },
                                     null,
@@ -1009,4 +1103,8 @@ module.exports = {
     LEGACY_PEER,
     attachPromptTailDirective,
     parsePeerOutputs,
+    // v1.1.0 / spec v4.13 §6.19 exports for smoke / audit.
+    computeConvergenceHealth,
+    CONVERGENCE_HEALTH_EXTENDED_AT,
+    CONVERGENCE_HEALTH_CONCERNING_AT,
 };

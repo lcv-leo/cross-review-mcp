@@ -21,6 +21,9 @@ Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando
 - **Strict-only convergence (§6.12 v4.9)**. `status_missing` counts AGAINST. Persisted `round.convergence_snapshot` with `spec_version`. No loose-mode toggle.
 - **No fabrication (§6.14 v4.10)**. Lack of verified info → `NEEDS_EVIDENCE` with concrete `caller_requests`. Optional `confidence`/`evidence_sources` fields. `escalate_to_operator(session_id, question, context)` tool for terminal gaps.
 - **Prompt-flag recovery (§6.16 v4.12)**. When a peer rejection carries `failure_class='prompt_flagged_by_moderation'` + `recovery_hint='reformulate_and_retry'`, the caller MUST reformulate the prompt per the embedded `reformulation_advice` (avoid charged words like "adversarial"/"jailbreak"/"exploit"/"bypass"; replace model-introspection prose with neutral technical descriptions) and call `ask_peers`/`ask_peer` again in a NEW round — repeat up to 5 attempts. **Do NOT abort the session** — only the flagged peer's contribution for that round is missing, and reformulation recovers it. Aborting on a moderation flag is non-conforming behavior.
+- **Spec-version persistence (§6.17 v4.13)**. Every `session_init` records `meta.spec_version = SESSION_SPEC_VERSION` (currently `'v4.13'`). Audit consumers MUST tolerate the field's absence on pre-v4.13 sessions.
+- **Long-idle reconciliation + outcome_reason (§6.18 v4.13)**. New `session_sweep` tool finalizes long-idle sessions with `outcome: 'aborted'` + `outcome_reason: 'stale'`. 24h hard floor is non-overridable. Locked sessions are reported, never finalized. Dry-run is read-only. `session_finalize` accepts optional `reason` argument; conventions: `'stale'`, `'peer_scope_creep'`, `'moderation_flag_unresolved'`, `'operator_abort'`. Free-form string — open list.
+- **Convergence-health hint (§6.19 v4.13)**. Every `ask_peer`/`ask_peers` response carries `convergence_health: 'normal' | 'extended' | 'concerning'` (also persisted in `round.convergence_health`). PURELY ADVISORY: caller SHOULD consider stepping back at `concerning`, but no automatic action is triggered. v1.1.0 thresholds: extended at rounds≥6, concerning at rounds≥8 (round-count only; pattern detection deferred to future release).
 - **Em-revalidacao → aprovada**: entradas §8 com "aprovada bilateralmente/trilateralmente" só pós-`session_check_convergence`=true (spec §8 preâmbulo v4.5).
 - **Runtime immutable em bumps coordenados**: `src/server.js`, `src/lib/*.js`, `scripts/functional-smoke.js` mudam juntos.
 
@@ -40,7 +43,7 @@ Conventional Commits, em English. Exemplos: `feat(v0.9.0-alpha.1): ...`, `docs(v
 ## Versionamento
 
 - Código: SemVer em `package.json` alinhado com `src/server.js` `VERSION`. Integer triplet + pre-release tag (`-alpha`, `-alpha.N`).
-- Spec: ciclo próprio (v4.1, v4.2, ..., v4.12) documentado em §8. Releases spec-only NÃO bumpam código.
+- Spec: ciclo próprio (v4.1, v4.2, ..., v4.13) documentado em §8. Releases spec-only NÃO bumpam código.
 - CHANGELOG.md atualizado a cada release. `[Unreleased]` section só contém follow-ups abertos.
 - v1.x semver policy (aprovada por trilateral session 6cf09af3 2026-04-24): patch = bug fix preservando frozen surface; minor = additive; major = breaking change em frozen surface (requires new trilateral session per §8 v4.5 preamble).
 

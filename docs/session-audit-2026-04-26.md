@@ -208,9 +208,23 @@ Codex chatgpt-pro-backend violation is the §2.5 anomaly above.
 
 | Finding | Priority | Target release | Effort |
 |---------|---------|----------------|-------:|
-| §2.1 Prompt-flag recovery | P0 | **v1.0.5** (this release) | done |
-| §2.4 spec_version in meta.json | P1 | v1.1.0 | small |
-| §2.5 chatgpt-pro-backend smoke | P1 | v1.1.0 | small |
-| §2.2 Orphan session sweep | P2 | v1.1.0 | medium |
-| §2.3 Convergence-health hint | P2 | v1.2.0 | medium |
+| §2.1 Prompt-flag recovery | P0 | **v1.0.5** | **done** |
+| §2.4 spec_version in meta.json | P1 | **v1.1.0** | **done** (FU-1, spec §6.17) |
+| §2.5 chatgpt-pro-backend smoke | P1 | **v1.1.0** | **done** (FU-2, smoke step) |
+| §2.2 Orphan session sweep | P2 | **v1.1.0** | **done** (FU-3, spec §6.18 + `session_sweep` tool) |
+| §2.3 Convergence-health hint | P2 | **v1.1.0** | **done** (FU-4, spec §6.19) |
 | §3.1-3.4 observations | n/a | none | n/a |
+
+## Closure note (2026-04-26, v1.1.0)
+
+All four follow-ups (FU-1..FU-4) shipped in v1.1.0 alongside spec
+v4.13. Implementation contracts validated by trilateral cross-review
+session `483b2d1c-6e82-42a3-bbcc-1e9ea61289f7` (caller=claude,
+peers=codex+gemini, READY in round 2). Smoke coverage: 14 new
+invariants on top of the 127 existing steps (141 total). Both
+`v1.0.4` and `v1.0.5` GitHub Releases were also recovered in this
+release window — they had been missing because their commits were
+never tagged; tags were created retroactively, the publish workflow
+ran successfully, and `publish.yml` gained a `gh release create` step
+to prevent recurrence. The audit corpus is now closed; subsequent
+audits will run against the v1.1.0+ runtime baseline.

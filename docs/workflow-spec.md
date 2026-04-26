@@ -1,4 +1,4 @@
-# Cross-Review MCP Workflow Specification v4.12
+# Cross-Review MCP Workflow Specification v4.13
 
 **Status**: v4.11 is a SPEC-ONLY revision of v4.10 (no code change, no
 version bump). Shipped 2026-04-24 as a small amendment to §6.11 closing
@@ -24,6 +24,47 @@ Encoding: ASCII-only with transliteration of Portuguese accents where
 they appear (see section 6.4). Peer exchange and non-user-facing
 artifacts are authored in en-US (see section 6.10), trivially
 satisfying ASCII-only without transliteration.
+
+---
+
+## 0m. Delta v4.12 -> v4.13 (executive summary)
+
+**Three normative additions, all driven by the 60-session audit shipped
+in v1.0.5 (`docs/session-audit-2026-04-26.md`).** The audit catalogued
+four follow-ups (FU-1..FU-4); v1.1.0 ships all four together with this
+spec evolution.
+
+§6.17 (NEW): **Spec-version persistence in `meta.json`.** Every session
+now records the spec version active at `session_init` time
+(`meta.spec_version`), so post-hoc audits can determine which spec
+rules were in force when a given session ran. Resolves audit §2.4.
+
+§6.18 (NEW): **Long-idle session reconciliation + structured
+`outcome_reason`.** New `session_sweep` tool finalizes long-idle
+sessions with `outcome: 'aborted'` + `outcome_reason: 'stale'`. Adds
+optional `outcome_reason` field to `session_finalize` for structured
+"why" tracking (conventions: `'stale'`, `'peer_scope_creep'`,
+`'moderation_flag_unresolved'`, `'operator_abort'`). Resolves audit
+§2.2.
+
+§6.19 (NEW): **Convergence-health hint per round.** New advisory field
+`convergence_health` (`'normal' | 'extended' | 'concerning'`) on every
+`ask_peer` and `ask_peers` response. Persisted into
+`round.convergence_health`. Spec defines the contract; implementation
+chooses thresholds (v1.1.0 canonical: `extended` at rounds≥6,
+`concerning` at rounds≥8). Purely advisory: no automatic
+status/outcome change. Resolves audit §2.3.
+
+**FU-2 closure.** Audit §2.5 (chatgpt-pro-backend bypass invariant)
+landed as a smoke step in v1.1.0 (`v4.13 §2.5 closure: chatgpt-pro-backend
+bypass invariant across mismatch shapes`) — no spec section, since it
+is a test enforcing existing §6.11 behavior, not a new contract.
+
+The spec is otherwise unchanged. v4.12's §6.16 prompt-flag recovery
+contract remains canonical. v4.11's transport-aware bypass (§6.11),
+strict-only convergence (§6.12), rate-limit class (§6.13),
+anti-hallucination discipline (§6.14), and CLI banner amendment all
+remain canonical.
 
 ---
 
@@ -2066,6 +2107,175 @@ reformulated successfully is the conformant outcome.
   in `failed_attempts` AND records the successful round normally;
   reconciliation is by `(session_id, agent)` aggregation, not by
   expecting `failed_attempts` to be cleared.
+
+---
+
+### 6.17 Spec-version persistence in meta.json (NEW in v4.13)
+
+**Trigger.** The 2026-04-26 audit of all 60 sessions in `~/.cross-review/`
+(see `docs/session-audit-2026-04-26.md` §2.4) found that NO session
+carried `meta.spec_version`. Cross-version comparisons — for example,
+"did v4.11's transport bypass reduce silent_model_downgrade rate?" —
+required code archaeology of the git log instead of being a simple meta
+query.
+
+**Contract.** Implementations MUST persist the spec version active at
+`session_init` time into `meta.spec_version` (e.g., `'v4.13'`).
+The value is set once at session creation and is not mutated by
+subsequent rounds. The constant is exposed in code as
+`session-store.SESSION_SPEC_VERSION` for tests and audit consumers.
+
+**Backwards compatibility.** Sessions created before v4.13 will not
+carry the field. Audit consumers MUST tolerate the absence
+(`meta.spec_version === undefined`) and treat it as "pre-v4.13". No
+migration script is required.
+
+**Distinction from convergence-snapshot spec_version.**
+`round.convergence_snapshot.spec_version` (introduced in v4.9 §6.12)
+records the spec version of the convergence semantic at append time;
+`meta.spec_version` records the spec version of the session as a whole
+at init time. They MAY drift across long sessions if a runtime
+upgrades mid-flight, and that drift is itself audit-relevant.
+
+---
+
+### 6.18 Long-idle session reconciliation + structured outcome_reason (NEW in v4.13)
+
+**Trigger.** Audit §2.2: 7 of 60 sessions in `~/.cross-review/`
+remained without `outcome` set. Some were 0-round probes the operator
+opened then closed without invoking `ask_peer`/`ask_peers`; others were
+real sessions abandoned mid-flight. They accumulated, locks could
+become stale, and the audit trail was unclear about whether the work
+was abandoned or completed elsewhere.
+
+**Contract — new tool.**
+
+```
+session_sweep({ stale_days = 7, dry_run = true, reason = 'stale' })
+→ {
+  ok: true,
+  stale_days, dry_run, reason,
+  candidates: [
+    { session_id, last_activity_at, age_days, has_rounds, locked,
+      would_finalize, skip_reason? },
+    ...
+  ],
+  finalized: [
+    { session_id, outcome: 'aborted', outcome_reason: <reason> },
+    ...
+  ]
+}
+```
+
+**Normative requirements.**
+
+1. **Last-activity staleness.** A session is stale iff
+   `now - last_activity_at >= stale_days * 24h`, where
+   `last_activity_at = max(meta.started_at, max(meta.rounds[].started_at),
+   max(meta.rounds[].completed_at))`. Pure session age (`now - started_at`)
+   is INCORRECT — a 30-round session whose last round completed an hour
+   ago is not long-idle.
+
+2. **24h hard floor (non-overridable).** Sessions younger than 24h from
+   `last_activity_at` MUST never be candidates, regardless of
+   `stale_days` argument. This is a footgun guard. `stale_days=0` does
+   NOT bypass the floor.
+
+3. **Already-finalized exclusion.** Sessions with
+   `meta.outcome != null` MUST be excluded entirely from `candidates`
+   (not even reported as skipped).
+
+4. **Lock collision visibility.** If `~/.cross-review/<id>/.lock`
+   exists, the candidate row MUST carry `locked: true`,
+   `would_finalize: false`, and `skip_reason: 'locked'`. The session
+   MUST NOT be finalized even when `dry_run=false`. Operator audits
+   why a long-idle session is also locked.
+
+5. **Read-only dry-run.** With `dry_run=true` (default), the call MUST
+   NOT alter any `meta.json`, lock file, or filesystem mtime.
+   `finalized` is `[]`. Only the response payload changes.
+
+6. **Re-read-before-write.** When `dry_run=false`, finalize MUST
+   re-read `meta.json` immediately before writing and skip if
+   `meta.outcome != null` was set by a concurrent process between
+   enumeration and write. Implementations MAY expose this as a
+   `finalizeIfUnset(sessionId, outcome, reason)` helper.
+
+7. **Malformed timestamps.** If `last_activity_at` cannot be computed
+   (all timestamps unparseable), the row MUST appear with
+   `skip_reason: 'malformed_timestamp'` and `would_finalize: false`.
+   Auto-finalize MUST NOT proceed.
+
+8. **Outcome value.** Swept sessions are finalized with
+   `outcome: 'aborted'` (the v4 enum value); `'stale'` is NEVER an
+   outcome. The structured "why" lives in `outcome_reason`.
+
+**Contract — outcome_reason field.**
+
+`session_finalize` accepts an optional `reason: string` argument that
+is persisted to `meta.outcome_reason`. Free-form short string;
+conventions documented here:
+
+| reason value | meaning |
+|---|---|
+| `'stale'` | swept by `session_sweep` after long idle |
+| `'peer_scope_creep'` | intentional rollback after peer pivoted to unauthorized implementation |
+| `'moderation_flag_unresolved'` | §6.16 5-attempt cap exhausted; reformulation could not unblock |
+| `'operator_abort'` | explicit human abort (CLI Ctrl-C, UI close) |
+
+The list is open — implementations MAY introduce new conventions as
+field-evidence demands. Audit consumers SHOULD treat unknown
+`outcome_reason` values as opaque.
+
+**Backwards compatibility.** Pre-v4.13 sessions lack
+`meta.outcome_reason`. Audit consumers MUST tolerate the absence.
+
+---
+
+### 6.19 Convergence-health hint per round (NEW in v4.13)
+
+**Trigger.** Audit §2.3: 5 sessions exceeded 5 rounds (max: 10 in
+`94b2855b`). All eventually converged; `outcome: 'max-rounds'` was
+never hit (no hard cap exists). No telemetry differentiated "deep
+convergence on a hard topic" from "high round count without progress".
+
+**Contract.** Every `ask_peer` and `ask_peers` round response carries
+a `convergence_health` field with one of three string values:
+
+| value | semantics |
+|---|---|
+| `'normal'` | iteration is in the typical productive range |
+| `'extended'` | round count is unusually high; caller may consider whether continued iteration is productive |
+| `'concerning'` | round count is far past typical convergence; caller SHOULD reconsider approach |
+
+The same value MUST be persisted into `meta.rounds[i].convergence_health`
+so audit aggregators can compute distributions.
+
+**Spec defines contract, implementation chooses algorithm.**
+Implementations MAY use round-count thresholds, status-pattern
+detection, or both. The v1.1.0 canonical implementation is round-count
+only; thresholds are pinned in code (`server.js`):
+
+- rounds 1-5 → `normal`
+- rounds 6-7 → `extended`
+- rounds 8+ → `concerning`
+
+Tuning these thresholds or adding pattern detection (e.g.,
+READY↔NOT_READY oscillation) is implementation choice and does NOT
+require a spec bump. Out of scope for v1.1.0: pattern detection.
+
+**Caller obligation: PURELY ADVISORY.**
+
+The signal is informational. The caller SHOULD consider whether
+continued iteration is productive when `concerning`, but a hard topic
+legitimately needs many rounds (the field-evidence `94b2855b` did, and
+converged successfully at round 10). Spec wording: "SHOULD consider",
+NOT "MUST step back". No automatic status, outcome, or peer-behavior
+change is triggered by `convergence_health`.
+
+**Backwards compatibility.** Pre-v4.13 rounds lack
+`convergence_health` in persisted meta. Audit consumers MUST tolerate
+`undefined` for legacy rounds.
 
 ---
 

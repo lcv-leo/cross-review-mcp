@@ -11,7 +11,56 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — próximos follow-ups pós-v1.0.5 rastreados em `docs/session-audit-2026-04-26.md` §5: spec_version recording in meta.json, chatgpt-pro-backend smoke test, orphan session sweep, convergence-health hint.)
+- (em aberto — pattern-detection extension to convergence_health, content-aware session audits, time-to-converge wall-clock analysis. v1.1.0 closed all four follow-ups from `docs/session-audit-2026-04-26.md`.)
+
+---
+
+## [1.1.0] — 2026-04-26
+
+**Spec v4.13 + audit closure release.** All four follow-ups (FU-1..FU-4) from the v1.0.5 60-session audit (`docs/session-audit-2026-04-26.md`) shipped in one release alongside spec v4.13. Implementation contracts validated by trilateral cross-review session `483b2d1c-6e82-42a3-bbcc-1e9ea61289f7` (caller=claude, peers=codex+gemini, READY in round 2). Also recovers v1.0.4 + v1.0.5 GitHub Releases (commits had been pushed to main without tags so the publish workflow never fired) and adds a `gh release create` step to `publish.yml` to prevent recurrence.
+
+### Adicionado — runtime
+- **FU-1 / spec §6.17 — `meta.spec_version` persistence.** New `SESSION_SPEC_VERSION = 'v4.13'` constant in `src/lib/session-store.js`; `initSession` writes `meta.spec_version` and `meta.outcome_reason: null` at session creation. Audit consumers can now reconstruct which spec rules were active when a given session ran.
+- **FU-3 / spec §6.18 — long-idle session reconciliation.** New `session_sweep` tool with `{ stale_days = 7, dry_run = true, reason = 'stale' }` schema. Returns `{ candidates, finalized }`. Honors:
+  - **24h hard floor** (non-overridable; sessions younger than 24h from last activity NEVER appear, even with `stale_days=0`).
+  - **Last-activity staleness** (`max(started_at, rounds[].started_at, rounds[].completed_at)`); pure age is incorrect.
+  - **Already-finalized exclusion.**
+  - **Lock collision visibility** (`locked: true, would_finalize: false, skip_reason: 'locked'`).
+  - **Read-only dry-run** (default `true`; no meta.json or mtime mutation).
+  - **Re-read-before-write semantics** via new `finalizeIfUnset(sessionId, outcome, reason)` helper — prevents clobbering sessions that got finalized concurrently between enumeration and write.
+  - **Malformed timestamps** reported with `skip_reason: 'malformed_timestamp'`, never auto-finalized.
+  - **Outcome value:** always `'aborted'` (the v4 enum); structured "why" lives in `outcome_reason`.
+- **FU-3 / spec §6.18 — `outcome_reason` field on `session_finalize`.** Optional `reason` argument; persisted as `meta.outcome_reason`. Conventions documented in spec: `'stale'`, `'peer_scope_creep'`, `'moderation_flag_unresolved'`, `'operator_abort'` (free-form string, open list).
+- **FU-4 / spec §6.19 — convergence-health hint per round.** New `computeConvergenceHealth(roundCount)` in `src/server.js`; emitted as `convergence_health: 'normal' | 'extended' | 'concerning'` on every `ask_peer`/`ask_peers` response and persisted into `round.convergence_health` for audit aggregation. Thresholds (in code, not spec, tunable without spec bump): `extended` at rounds≥6, `concerning` at rounds≥8. **Purely advisory** — no automatic status/outcome change.
+
+### Adicionado — spec v4.13
+- **§0m (NEW)**: executive summary of v4.12 → v4.13 delta.
+- **§6.17 (NEW)**: spec-version persistence in meta.json normative contract.
+- **§6.18 (NEW)**: long-idle session reconciliation contract (8 normative requirements: last-activity, 24h floor, finalized exclusion, lock visibility, dry-run read-only, re-read-before-write, malformed timestamps, outcome value) + `outcome_reason` conventions.
+- **§6.19 (NEW)**: convergence-health hint contract (spec defines the contract, implementation chooses thresholds; advisory caller obligation).
+- **Spec banner** bumped from v4.12 to v4.13.
+
+### Adicionado — operator docs
+- **`AGENTS.md`** three new mandatory directives (§6.17/§6.18/§6.19) added to the directives section. Spec range bumped to v4.13.
+- **`docs/session-audit-2026-04-26.md`** §5 roadmap updated: all four follow-ups marked **done in v1.1.0**. Closure note added documenting the v1.0.4/v1.0.5 release recovery + cross-review session id.
+
+### Adicionado — CI
+- **`.github/workflows/publish.yml`** new `create-github-release` job, runs after both publish jobs succeed, extracts release notes from CHANGELOG.md section matching the tag, idempotent (skips if release already exists for the tag). Lands BEFORE the v1.1.0 tag per sequencing discipline so v1.1.0's publish run exercises the new logic.
+
+### Adicionado — tests (14 new smoke steps)
+- **FU-1 / §6.17:** 2 steps — `spec_version + outcome_reason persisted on session_init`, `finalize round-trips outcome_reason`.
+- **FU-2 / §2.5 closure:** 1 step — `chatgpt-pro-backend bypass invariant across mismatch shapes` (4 reported-model cases assert `protocol_violation === false`).
+- **FU-3 / §6.18:** 6 steps covering all 7 ratified invariants — `dry-run is read-only`, `24h hard floor non-overridable`, `lock collision report`, `already-finalized excluded`, `malformed timestamp never auto-finalized`, `wet path: happy finalized + locked untouched`, `finalizeIfUnset re-read-before-write`.
+- **FU-4 / §6.19:** 5 steps covering all 7 ratified invariants — `rounds 1-5 → normal`, `rounds 6-7 → extended`, `rounds 8+ → concerning`, `invalid input falls through to normal`, `thresholds exported`.
+
+### Recuperação operacional
+- **v1.0.4 retroactive tag.** Commit `8d1ffb6` was pushed to main on 2026-04-26 without a tag, so the publish workflow never fired. Tag created retroactively today; `Publish` workflow ran successfully (`24960616477` — 39s, success); npm package + GitHub Packages now live; release created via `gh release create` (one-time recovery — future tags use the new auto-create step).
+- **v1.0.5 retroactive tag.** Same situation as v1.0.4. Tag created today; `Publish` ran successfully (`24960616469` — 41s, success); npm + Packages live; release created manually.
+
+### Validação
+- `npm test` 141 GREEN (was 127 in v1.0.5; +14 for FU-1+FU-3+FU-4 invariants).
+- `npm run check-models` GREEN.
+- Cross-review session `483b2d1c-6e82-42a3-bbcc-1e9ea61289f7` finalized `outcome: converged` after R2 (caller READY + codex READY + gemini READY).
 
 ---
 

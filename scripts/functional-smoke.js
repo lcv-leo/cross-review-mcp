@@ -114,6 +114,7 @@ async function driveServer(extraEnv = {}) {
             'session_finalize',
             'session_init',
             'session_read',
+            'session_sweep',
         ];
         assert(
             JSON.stringify(names) === JSON.stringify(expected),
@@ -811,7 +812,222 @@ async function runAll() {
     all.push(...s42.results);
     const s43 = await driveV091GeminiAuthPrecedenceUnit();
     all.push(...s43.results);
+    // v1.1.0 / spec v4.13 §6.17–6.19 — FU-1, FU-3, FU-4 unit coverage.
+    const s44 = await driveV413SpecVersionUnit();
+    all.push(...s44.results);
+    const s45 = await driveV413SessionSweepUnit();
+    all.push(...s45.results);
+    const s46 = await driveV413ConvergenceHealthUnit();
+    all.push(...s46.results);
     return all;
+}
+
+// v1.1.0 / spec v4.13 §6.17 — spec_version persistence in meta.json (FU-1).
+async function driveV413SpecVersionUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const store = require('../src/lib/session-store.js');
+
+    // Create a real session and verify meta carries spec_version.
+    const sid = store.initSession({
+        task: 'v4.13 §6.17 unit',
+        artifacts: [],
+        callerAgent: 'claude',
+        peers: ['codex', 'gemini'],
+    });
+    try {
+        const meta = JSON.parse(
+            fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8')
+        );
+        assert(meta.spec_version === store.SESSION_SPEC_VERSION, 'v4.13 §6.17: meta.spec_version equals SESSION_SPEC_VERSION constant');
+        assert(meta.spec_version === 'v4.13', 'v4.13 §6.17: SESSION_SPEC_VERSION literal v4.13 in this release');
+        assert(Object.prototype.hasOwnProperty.call(meta, 'outcome_reason') && meta.outcome_reason === null, 'v4.13 §6.17: outcome_reason initialized to null');
+        results.push({ step: 'v4.13 §6.17: spec_version + outcome_reason persisted on session_init', ok: true });
+
+        // Round-trip: finalize with reason, verify meta.outcome_reason set.
+        store.finalize(sid, 'aborted', 'unit_test_reason');
+        const meta2 = JSON.parse(
+            fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8')
+        );
+        assert(meta2.outcome === 'aborted', 'v4.13 §6.17: finalize sets outcome');
+        assert(meta2.outcome_reason === 'unit_test_reason', 'v4.13 §6.17: finalize records reason');
+        results.push({ step: 'v4.13 §6.17: finalize(sessionId, outcome, reason) round-trips outcome_reason', ok: true });
+    } finally {
+        // Cleanup
+        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
+    }
+    return { results };
+}
+
+// v1.1.0 / spec v4.13 §6.18 — long-idle session reconciliation (FU-3).
+// Creates synthetic stale sessions, runs sweep with deterministic `now`, asserts
+// the 7 invariants ratified by cross-review session 483b2d1c R1.
+async function driveV413SessionSweepUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const store = require('../src/lib/session-store.js');
+
+    // Helper: create a session dir with a hand-crafted meta.json.
+    const crypto = require('node:crypto');
+    function mkTestSession({ startedAtIso, rounds = [], outcome = null, withLock = false, malformedTimestamp = false }) {
+        const id = crypto.randomUUID();
+        fs.mkdirSync(store.sessionDir(id), { recursive: true });
+        const meta = {
+            session_id: id,
+            spec_version: store.SESSION_SPEC_VERSION,
+            task: 'sweep test session',
+            artifacts: [],
+            caller: 'claude',
+            peers: ['codex'],
+            started_at: malformedTimestamp ? 'not-a-date' : startedAtIso,
+            rounds,
+            failed_attempts: [],
+            outcome,
+            outcome_reason: null,
+        };
+        fs.writeFileSync(path.join(store.sessionDir(id), 'meta.json'), JSON.stringify(meta, null, 2));
+        if (withLock) {
+            fs.mkdirSync(path.join(store.sessionDir(id), '.lock'), { recursive: true });
+        }
+        return id;
+    }
+
+    const cleanup = [];
+    const NOW = Date.parse('2026-04-26T12:00:00Z');
+    const day = 24 * 60 * 60 * 1000;
+
+    // (1) 0-round, 10d-old, no lock, outcome=null → would_finalize=true.
+    const sHappy = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString() });
+    cleanup.push(sHappy);
+
+    // (2) 12h-old, would be candidate by stale_days=0 but blocked by 24h floor.
+    const sYoung = mkTestSession({ startedAtIso: new Date(NOW - 12 * 60 * 60 * 1000).toISOString() });
+    cleanup.push(sYoung);
+
+    // (3) 10d-old + lock → reported with locked:true, would_finalize:false.
+    const sLocked = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString(), withLock: true });
+    cleanup.push(sLocked);
+
+    // (4) 10d-old but already finalized → never appears.
+    const sFinalized = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString(), outcome: 'converged' });
+    cleanup.push(sFinalized);
+
+    // (5) Last activity recent (2h ago) but started_at long ago → NOT stale.
+    const sActive = mkTestSession({
+        startedAtIso: new Date(NOW - 30 * day).toISOString(),
+        rounds: [{ round: 1, completed_at: new Date(NOW - 2 * 60 * 60 * 1000).toISOString() }],
+    });
+    cleanup.push(sActive);
+
+    // (6) Malformed timestamp → reported with skip_reason: malformed_timestamp.
+    const sMalformed = mkTestSession({ startedAtIso: 'not-a-date', malformedTimestamp: true });
+    cleanup.push(sMalformed);
+
+    try {
+        // Invariant set 1: dry-run is read-only.
+        const beforeMtimes = cleanup.map((id) => {
+            try { return fs.statSync(path.join(store.sessionDir(id), 'meta.json')).mtimeMs; } catch { return null; }
+        });
+        const dryRun = store.sweepStaleSessions({ staleDays: 7, dryRun: true, now: NOW });
+        const afterMtimes = cleanup.map((id) => {
+            try { return fs.statSync(path.join(store.sessionDir(id), 'meta.json')).mtimeMs; } catch { return null; }
+        });
+        for (let i = 0; i < beforeMtimes.length; i++) {
+            assert(beforeMtimes[i] === afterMtimes[i], `v4.13 §6.18 inv-1: dry-run leaves meta.mtime unchanged for session ${i}`);
+        }
+        assert(dryRun.finalized.length === 0, 'v4.13 §6.18 inv-1: dry-run finalized=[] always');
+        results.push({ step: 'v4.13 §6.18 inv-1: dry-run is read-only', ok: true });
+
+        // Invariant set 2: happy path.
+        assert(dryRun.candidates.some((c) => c.session_id === sHappy && c.would_finalize === true), 'v4.13 §6.18 inv-2: happy-path session in candidates with would_finalize=true');
+
+        // Invariant set 3: 24h hard floor.
+        assert(!dryRun.candidates.some((c) => c.session_id === sYoung), 'v4.13 §6.18 inv-3: 12h session never appears in candidates');
+        // Even with stale_days=0, the floor holds.
+        const dryRunZero = store.sweepStaleSessions({ staleDays: 0, dryRun: true, now: NOW });
+        assert(!dryRunZero.candidates.some((c) => c.session_id === sYoung), 'v4.13 §6.18 inv-3: stale_days=0 still excludes <24h sessions (non-overridable floor)');
+        results.push({ step: 'v4.13 §6.18 inv-3: 24h hard floor non-overridable', ok: true });
+
+        // Invariant set 4: lock collision.
+        const lockedRow = dryRun.candidates.find((c) => c.session_id === sLocked);
+        assert(lockedRow && lockedRow.locked === true && lockedRow.would_finalize === false && lockedRow.skip_reason === 'locked', 'v4.13 §6.18 inv-4: locked candidate row shape');
+        results.push({ step: 'v4.13 §6.18 inv-4: lock collision report (locked=true, would_finalize=false, skip_reason=locked)', ok: true });
+
+        // Invariant set 5: already-finalized never appears.
+        assert(!dryRun.candidates.some((c) => c.session_id === sFinalized), 'v4.13 §6.18 inv-5: already-finalized session absent from candidates');
+        results.push({ step: 'v4.13 §6.18 inv-5: already-finalized excluded from candidates', ok: true });
+
+        // Active session: not stale (last_activity recent).
+        assert(!dryRun.candidates.some((c) => c.session_id === sActive), 'v4.13 §6.18 last-activity: active session not classified as stale');
+
+        // Malformed timestamp: reported, never auto-finalized.
+        const malformedRow = dryRun.candidates.find((c) => c.session_id === sMalformed);
+        assert(malformedRow && malformedRow.skip_reason === 'malformed_timestamp' && malformedRow.would_finalize === false, 'v4.13 §6.18 inv-7: malformed_timestamp reported, would_finalize=false');
+        results.push({ step: 'v4.13 §6.18 inv-7: malformed timestamp never auto-finalized', ok: true });
+
+        // Now exercise the finalize path with dry_run=false.
+        const wet = store.sweepStaleSessions({ staleDays: 7, dryRun: false, reason: 'stale', now: NOW });
+        assert(wet.finalized.some((f) => f.session_id === sHappy && f.outcome === 'aborted' && f.outcome_reason === 'stale'), 'v4.13 §6.18 inv-2: wet-run finalizes happy candidate with outcome=aborted + reason=stale');
+        // Locked session was NOT finalized.
+        assert(!wet.finalized.some((f) => f.session_id === sLocked), 'v4.13 §6.18 inv-4: wet-run did NOT finalize locked candidate');
+        // Verify on disk.
+        const happyMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sHappy), 'meta.json'), 'utf8'));
+        assert(happyMeta.outcome === 'aborted' && happyMeta.outcome_reason === 'stale', 'v4.13 §6.18 inv-2: meta.json on disk shows outcome=aborted + reason=stale');
+        const lockedMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sLocked), 'meta.json'), 'utf8'));
+        assert(lockedMeta.outcome === null, 'v4.13 §6.18 inv-4: locked meta.outcome remained null');
+        results.push({ step: 'v4.13 §6.18 inv-2 + inv-4 wet path: happy finalized, locked untouched', ok: true });
+
+        // Invariant set 6: re-read before write — finalizeIfUnset returns false on second call.
+        const second = store.finalizeIfUnset(sHappy, 'converged', 'should_not_clobber');
+        assert(second === false, 'v4.13 §6.18 inv-6: finalizeIfUnset returns false when outcome already set');
+        const stillHappyMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sHappy), 'meta.json'), 'utf8'));
+        assert(stillHappyMeta.outcome === 'aborted' && stillHappyMeta.outcome_reason === 'stale', 'v4.13 §6.18 inv-6: meta unchanged after no-op finalizeIfUnset');
+        results.push({ step: 'v4.13 §6.18 inv-6: finalizeIfUnset re-read-before-write semantics', ok: true });
+    } finally {
+        for (const id of cleanup) {
+            try { fs.rmSync(store.sessionDir(id), { recursive: true, force: true }); } catch {}
+        }
+    }
+    return { results };
+}
+
+// v1.1.0 / spec v4.13 §6.19 — convergence_health hint per round (FU-4).
+async function driveV413ConvergenceHealthUnit() {
+    const results = [];
+    const server = require('../src/server.js');
+
+    // Invariant 1+2: rounds 1-5 → normal.
+    for (const n of [1, 2, 3, 4, 5]) {
+        assert(server.computeConvergenceHealth(n) === 'normal', `v4.13 §6.19 inv-1: round ${n} → normal`);
+    }
+    results.push({ step: 'v4.13 §6.19 inv-1: rounds 1-5 → normal', ok: true });
+
+    // Invariant 3: rounds 6+7 → extended.
+    assert(server.computeConvergenceHealth(6) === 'extended', 'v4.13 §6.19 inv-2: round 6 → extended');
+    assert(server.computeConvergenceHealth(7) === 'extended', 'v4.13 §6.19 inv-2: round 7 → extended');
+    results.push({ step: 'v4.13 §6.19 inv-2: rounds 6-7 → extended', ok: true });
+
+    // Invariant 4: rounds 8+ → concerning.
+    for (const n of [8, 9, 10, 50]) {
+        assert(server.computeConvergenceHealth(n) === 'concerning', `v4.13 §6.19 inv-3: round ${n} → concerning`);
+    }
+    results.push({ step: 'v4.13 §6.19 inv-3: rounds 8+ → concerning', ok: true });
+
+    // Edge: invalid input → normal (defensive default).
+    assert(server.computeConvergenceHealth(0) === 'normal', 'v4.13 §6.19 edge: round 0 falls through to normal');
+    assert(server.computeConvergenceHealth(-3) === 'normal', 'v4.13 §6.19 edge: negative round normal');
+    assert(server.computeConvergenceHealth('abc') === 'normal', 'v4.13 §6.19 edge: NaN input → normal');
+    assert(server.computeConvergenceHealth(null) === 'normal', 'v4.13 §6.19 edge: null input → normal');
+    results.push({ step: 'v4.13 §6.19 edge: invalid input falls through to normal (defensive)', ok: true });
+
+    // Invariant: thresholds exposed for documentation/tuning.
+    assert(server.CONVERGENCE_HEALTH_EXTENDED_AT === 6, 'v4.13 §6.19: EXTENDED threshold pinned at 6');
+    assert(server.CONVERGENCE_HEALTH_CONCERNING_AT === 8, 'v4.13 §6.19: CONCERNING threshold pinned at 8');
+    results.push({ step: 'v4.13 §6.19: thresholds exported for audit/tuning', ok: true });
+
+    return { results };
 }
 
 // v0.9.0-alpha.1 / spec v4.11 fix — Gemini transport-detection precedence.
@@ -1187,6 +1403,39 @@ async function driveV6TransportBypassUnit() {
     assert(parsedCheck.model_failure_class === 'silent_model_downgrade', 'v4.9 Item A: silent_model_downgrade preserved under api-key');
     assert(parsedCheck.model_check_skipped === null, 'v4.9 Item A: no skip record under api-key');
     results.push({ step: 'v4.9 Item A: parsePeerOutputs check-path under api-key', ok: true });
+
+    // v4.13 §2.5 closure (session-audit-2026-04-26.md follow-up):
+    // The audit found 1 historical protocol_violation with
+    // transport_descriptor.endpoint_class = 'chatgpt-pro-backend' — under
+    // §6.11 that transport class MUST always trigger the bypass, so a
+    // protocol_violation can never be raised for it on a current runtime.
+    // The historical case is therefore pre-bypass legacy data (pre-v4.9
+    // runtime). This step asserts the invariant explicitly across all
+    // four model-mismatch shapes so a future regression surfaces here.
+    const chatgptProDescriptor = {
+        agent: 'codex',
+        auth: 'cli-subscription',
+        endpoint_class: 'chatgpt-pro-backend',
+    };
+    const cases = [
+        { reported: 'gpt-5.5', label: 'exact match' },
+        { reported: 'gpt-5', label: 'family alias' },
+        { reported: 'gpt-4.5-deprecated', label: 'mismatch' },
+        { reported: '', label: 'empty/no report' },
+    ];
+    for (const c of cases) {
+        const stdoutForCase = `body\n\n<cross_review_peer_model>{"model_id":"${c.reported}"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n`;
+        const parsed = server.parsePeerOutputs(stdoutForCase, 'gpt-5.5', chatgptProDescriptor);
+        assert(
+            parsed.protocol_violation === false,
+            `v4.13 §2.5 closure: chatgpt-pro-backend never raises protocol_violation (${c.label})`
+        );
+        assert(
+            parsed.model_check_skipped !== null,
+            `v4.13 §2.5 closure: chatgpt-pro-backend always carries model_check_skipped audit (${c.label})`
+        );
+    }
+    results.push({ step: 'v4.13 §2.5 closure: chatgpt-pro-backend bypass invariant across mismatch shapes', ok: true });
 
     return { results };
 }
