@@ -11,7 +11,54 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — F2/F3/F5/F6 from `docs/external-audit-2026-04-26-gemini.md` deferred for v1.3+: success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+- (em aberto — F1/F3/F4/F6 from external audit deferred for v1.3+: caller capability tokens, success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification, shell:false migration. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+
+---
+
+## [1.2.3] — 2026-04-26
+
+**External-audit round-2 closure (F2 strict quorum + F5 lifecycle invariants).** A second Gemini-orchestrated audit on v1.2.2 found two real bugs missed by round 1. Trilateral cross-review session `aa4770fc-aad5-446b-a93a-4d01564b16aa` validated the fixes after 4 rounds of peer iteration (R1 codex flagged 4 design gaps, R2 codex flagged 2 residuals + gemini flagged null-normalization, R3 codex NEEDS_EVIDENCE on gates, R4 caller attached fresh transcripts → trilateral READY).
+
+### Corrigido — F2: convergence snapshot violated strict-quorum semantics
+- **`src/lib/session-store.js::computeConvergenceSnapshot`**: only counted `round.peers` (responded peers), ignoring `round.quorum.rejected` (spawn-rejected peers). Inconsistency vs in-handler `allPeersReady` check that required `roundPeers.length === metaPeers.length`. **Violated spec §6.12 strict-only convergence.** A 3-peer session with 1 spawn-rejected peer could be reported as converged when 2 responded peers said READY.
+- **Fix:** snapshot now reads `round.quorum.rejected`, exposes it as `rejected_count` field, and requires `rejectedCount === 0` for convergence. N-ary detection changed from `Array.isArray(peers) && peers.length > 0 && !('peer_status' in round)` to `Array.isArray(peers) && !('peer_status' in round)` — all-rejected rounds (peers=[] + quorum.rejected>0) now enter the N-ary path so rejected_count surfaces.
+- **`buildConvergenceReason`**: new branch for `blocking_peers.length === 0 && rejected_count > 0` — surfaces "${N} peer(s) failed at spawn (rejected_count=N); strict quorum requires all requested peers to respond and declare READY" instead of misleading "no responded peers".
+- **Docs alignment:** `session_check_convergence` and `ask_peers` tool descriptions updated to align with strict-quorum (had stale wording "excluded from the denominator" — flagged as drift by codex R1). Spec §6.12 amendment paragraph added with pre-v1.2.3 historical note.
+
+### Corrigido — F5: session lifecycle had race + clobber + zombie-state gaps (4 sub-bugs)
+- **F5a (`session_finalize` unguarded):** handler held no lock, racing with in-flight `ask_peers`. Fix: `store.acquireLock` at handler entry + `try/finally` releaseLock.
+- **F5b (`session_finalize` clobber):** second call with different outcome silently overwrote first. Fix: read `meta.outcome` inside the lock; if null → finalize; if same outcome AND same reason (after null-normalization that collapses empty/whitespace strings to null) → no-op success, returns `idempotent: true`, **does NOT call store.finalize so meta.finalized_at is preserved**; if conflict → throw with both states surfaced.
+- **F5c (`ask_peer`/`ask_peers` zombie state):** handlers happily appended new rounds to finalized sessions. Fix: after `readMeta`, `if (meta.outcome != null) throw` with message instructing the caller to open a new session via `session_init`.
+- **F5 (`escalate_to_operator` unguarded writer):** wrote `meta.escalations[]` without lock. Fix: acquire lock for write-ordering. **Deliberate design choice: post-finalization annotation IS allowed** (operator may legitimately escalate on concluded sessions during later review). Documented in spec §6.18.1.
+
+### Adicionado — spec
+- **`docs/workflow-spec.md` §6.12 amendment**: pre-v1.2.3 historical note + clarification that probe-time exclusions remain "NOT in denominator" (excluded before round dispatch) but spawn-rejection during the round DOES count against.
+- **§6.18.1 (NEW)**: lifecycle invariants — codifies session_finalize lock + safe-idempotency contract, ask_peer/ask_peers finalized-session refusal, escalate_to_operator post-finalize annotation policy. No spec version bump (v4.14 stays).
+
+### Adicionado — operator docs
+- **`docs/external-audit-2026-04-26-gemini.md`**: round-2 section with full validation matrix (F1-F6 from round 2), 4-round trilateral closure trail (R1 codex NOT_READY, R2 codex+gemini NOT_READY with concrete blockers, R3 codex NEEDS_EVIDENCE, R4 trilateral READY), v1.2.3 specific changes, auditor's misses, operator action item (Gemini CLI trust-directory issue persists in audit env).
+- **README.md** v1.2.3 row added to release table; topology section corrected to align with strict-quorum semantics.
+
+### Adicionado — tests (8 new smoke steps; 164 GREEN total)
+- **F2 (`driveV414StrictQuorumUnit`, 5 invariants)**:
+  - rejected_count > 0 with all responded peers READY → converged=false (canonical fix).
+  - snapshot exposes rejected_count for downstream reason building.
+  - legacy round shape (no quorum field) → rejected_count defaults to 0, converged preserved.
+  - all-rejected (3-of-3 spawn fail, peers=[]) → rejected_count=3, blocking_peers empty, denominator_mode=strict.
+  - all-rejected end-to-end via `checkConvergence` → reason text contains "failed at spawn".
+- **F5 (`driveV414SessionLifecycleGuardsUnit`, 3 invariants)**:
+  - `store.finalize` records outcome + reason + finalized_at.
+  - `finalizeIfUnset` never clobbers existing outcome.
+  - session dir has no stale lock after lifecycle ops.
+  - handlers carry finalized-session lifecycle contracts (anti-drift on canonical strings: `safe-idempotent`, `conflicting re-finalize rejected`, `Identical re-finalize is allowed as a no-op`, `cannot append a new round`, `Post-finalization escalation IS allowed`).
+
+### Atualizado — chore
+- **`AGENTS.md` removed from public tracking** (`89bac62`, separate commit before v1.2.3): operator directive — internal AI-agent guidance with pt-BR prose and session UUIDs is local-only; `git rm --cached` keeps file on disk but excludes from index. `.gitignore` now lists `AGENTS.md`, `.gemini/`, `GEMINI.md`.
+
+### Validação
+- `npm test` 164 GREEN (was 156 in v1.2.2; +8 for F2+F5 invariants).
+- `npm run check-models` GREEN.
+- Trilateral cross-review `aa4770fc-aad5-446b-a93a-4d01564b16aa` finalized as `converged` after R4 trilateral READY.
 
 ---
 

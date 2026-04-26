@@ -60,9 +60,9 @@ either run `gemini trust` in the workspace OR set
 
 | Finding | Priority | Target release | Effort |
 |---|---|---|---|
-| F1 / F4 partial — UUID validation | P1 | **v1.2.1** (this) | small (DONE) |
-| F7 — log prefix clarity | P1 | **v1.2.1** (this) | trivial (DONE) |
-| F8 — description drift smoke | P1 | **v1.2.1** (this) | small (DONE) |
+| F1 / F4 partial — UUID validation | P1 | **v1.2.1** | small (DONE) |
+| F7 — log prefix clarity | P1 | **v1.2.1** | trivial (DONE) |
+| F8 — description drift smoke | P1 | **v1.2.1** | small (DONE) |
 | F3 — success-path redaction | P2 | v1.3.0 | medium |
 | F4 — full Zod runtime validation | P2 | v1.3.0 | medium |
 | F5 — per-stream byte cap | P2 | v1.3.0 | medium |
@@ -71,3 +71,118 @@ either run `gemini trust` in the workspace OR set
 
 The v1.3+ items are tracked but not blocking. v1.2.1 closes the
 high-signal subset.
+
+---
+
+# Audit round 2 — Gemini-orchestrated (Codex-authored), 2026-04-26
+
+A second audit was commissioned the same day, after v1.2.1 + v1.2.2 had
+shipped. The Gemini caller could not run in this round (CLI
+trust-directory issue persisted), so Codex produced the findings via
+the cross-review-mcp session `2d4ae3e4-7388-4938-bfc6-b6ec859e506d`.
+This document records the validation matrix.
+
+## Findings
+
+| # | Finding | Verified against v1.2.2 source | Outcome |
+|---|---|---|---|
+| F1 | Caller bypass — no token binding to MCP client | Theoretical; threat model is single-user trusted host. MCP has no native auth primitives. | **Defer P3** — would only matter in multi-tenant deploy. |
+| **F2** | Convergence snapshot ignores spawn-rejected peers | **REAL bug**: `computeConvergenceSnapshot` only counted `round.peers` (responded), ignored `round.quorum.rejected`. Inconsistency vs in-handler `allPeersReady` check. Violates spec §6.12 strict-only. | **SHIPPED in v1.2.3.** |
+| F3 | Spawn `shell: true` injection risk | Same as round-1 F2. cmd built from constants only; no real attack surface. | **Defer P3** (already documented above). |
+| F4 | Success-path output redaction | Same as round-1 F3. | **Defer P2** (already documented above). |
+| **F5** | Session lifecycle: finalize without lock; idempotency clobber; ask_* on finalized; escalate_to_operator unguarded | **REAL** (4 sub-bugs). | **SHIPPED in v1.2.3.** |
+| F6 | DoS via unbounded buffers | Same as round-1 F5. | **Defer P2** (already documented above). |
+
+## Closure trail (v1.2.3)
+
+The v1.2.3 release closes F2 and the four F5 sub-bugs. Implementation
+contracts validated by trilateral cross-review session
+`aa4770fc-aad5-446b-a93a-4d01564b16aa` (caller=claude, peers=codex+
+gemini; **READY in R4** after R1 codex NOT_READY + R2 codex/gemini
+NOT_READY + R3 codex NEEDS_EVIDENCE). The 4-round cadence is recorded
+because each round caught a real residual:
+
+- **R1** — codex flagged 4 gaps in the initial design: F2 readout drift
+  (reason text), F2 docs drift (spec/tool descriptions still claiming
+  loose semantics), F5b safe-idempotency missing (raw rejection on
+  identical retry), F5c missing on `escalate_to_operator`.
+- **R2** — codex flagged 2 residuals after R1 fixes landed: F2
+  all-rejected path (peers=[] + quorum.rejected>0 fell into legacy
+  bilateral path, lost rejected_count); §6.18 amendment text claimed
+  but missing from spec doc. Gemini flagged 1: F5b empty-string
+  normalization gap (whitespace/empty-string vs null comparison would
+  falsely flag identical retry as conflict).
+- **R3** — caller addressed all R2 blockers, declared READY. Codex
+  NEEDS_EVIDENCE: static review saw no blocker but its CLI policy
+  blocked `npm run smoke` and `npm run check-models` execution.
+  Gemini READY.
+- **R4** — caller attached fresh smoke + check-models transcripts
+  (164 GREEN, no drift). Codex READY. Gemini READY. **Trilateral
+  convergence.**
+
+## v1.2.3 specific changes
+
+### F2 closure (strict quorum)
+
+- `src/lib/session-store.js::computeConvergenceSnapshot` N-ary path
+  detection changed from `Array.isArray(peers) && peers.length > 0
+  && !('peer_status' in round)` to `Array.isArray(peers) &&
+  !('peer_status' in round)`, so all-rejected rounds enter the N-ary
+  path instead of falling through.
+- New `rejected_count` field in the snapshot, populated from
+  `round.quorum.rejected` (defaults to 0 for legacy rounds).
+- Convergence predicate now requires `rejectedCount === 0` in addition
+  to all responded peers READY.
+- `buildConvergenceReason` new branch: when `blocking_peers.length === 0
+  && rejected_count > 0`, surfaces "${N} peer(s) failed at spawn
+  (rejected_count=N); strict quorum requires all requested peers to
+  respond and declare READY (spec v4.14 §6.12)".
+- Tool descriptions for `session_check_convergence` and `ask_peers`
+  updated to align with strict-quorum semantics. Spec §6.12 updated.
+- 5 new smoke invariants in `driveV414StrictQuorumUnit`.
+
+### F5 closure (lifecycle invariants)
+
+- `session_finalize` handler acquires `store.acquireLock` for the
+  entire read+write window. Inside the lock:
+  - identical re-finalize (same outcome AND same null-normalized reason)
+    → no-op success, returns `idempotent: true`. Crucially MUST NOT
+    call `store.finalize`, preserving `meta.finalized_at`.
+  - conflicting re-finalize → throws with both states surfaced.
+  - reason normalization collapses null/undefined/empty/whitespace-only
+    strings to null for comparison (gemini R2 ask).
+- `ask_peer` and `ask_peers` handlers gain `if (meta.outcome != null)
+  throw` guard immediately after `readMeta`, refusing to append a new
+  round to a finalized session.
+- `escalate_to_operator` handler acquires the session lock for
+  write-ordering but DELIBERATELY does NOT refuse on finalized sessions
+  (post-finalization annotation policy: operator may legitimately
+  escalate concluded sessions during later review).
+- Spec §6.18.1 (NEW) codifies all three contracts.
+- 4 new smoke invariants in `driveV414SessionLifecycleGuardsUnit`.
+
+## Auditor's misses (round 2)
+
+The Gemini-orchestrated audit did not credit:
+- v1.2.1 F1 path-traversal validation (sessionDir UUID guard + path.resolve containment)
+- v1.2.2 §6.10 enforcement (B+C — tool description directive + runtime detector)
+- v1.2.0 §6.20 dynamic caller resolution
+
+The audit was operating on a snapshot that pre-dated these features,
+or didn't surface them as relevant to the audit scope.
+
+## Operator action item
+
+Gemini CLI trust-directory issue persists in the audit environment:
+
+```
+Gemini CLI is not running in a trusted directory. To proceed, either
+use --skip-trust, set the GEMINI_CLI_TRUST_WORKSPACE=true environment
+variable, or trust this directory in interactive mode.
+```
+
+Same recommendation as round 1: run `gemini trust` in the workspace
+or set `GEMINI_CLI_TRUST_WORKSPACE=true` in the MCP server env block.
+The Gemini probe in this caller's session DID succeed (because Gemini's
+own MCP host runs in a different environment), so the trust issue is
+specific to the audit-host's Gemini CLI configuration.

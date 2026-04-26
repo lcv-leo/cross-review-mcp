@@ -1856,8 +1856,16 @@ converged iff caller_status === 'READY'
 `status_missing` counts AGAINST convergence. No "loose-mode"
 toggle — the strict denominator is the only semantics. Peers
 excluded at probe time live in `meta.capability_snapshot` (NOT in
-denominator). Peers failed at runtime (this round) live in
-`meta.failed_attempts` (NOT in denominator).
+denominator — the probe excluded them before round dispatch, so
+they are not "missing" in the §6.12 sense). Peers failed at
+runtime in this round (recorded in `meta.failed_attempts` and
+counted in `round.quorum.rejected`) DO count against convergence
+under strict semantics: the predicate requires
+`round.quorum.rejected === 0` in addition to all responded peers
+being READY. Pre-v1.2.3 the snapshot computation incorrectly
+ignored `rejected`, allowing 2-of-3 unanimity to be reported as
+converged when 1 peer was spawn-rejected; aligned in v1.2.3 per
+external audit round-2 closure.
 
 **Persistence.** `appendRound` computes AND persists
 `round.convergence_snapshot` at append time:
@@ -2312,6 +2320,61 @@ field-evidence demands. Audit consumers SHOULD treat unknown
 
 **Backwards compatibility.** Pre-v4.13 sessions lack
 `meta.outcome_reason`. Audit consumers MUST tolerate the absence.
+
+#### 6.18.1 Lifecycle invariants (NEW in v1.2.3, external audit round-2 closure)
+
+The external audit round 2 (Gemini-orchestrated, Codex-authored, 2026-04-26)
+identified that the session lifecycle had three writer paths with race or
+clobber risks. Closed by binding implementations to these invariants:
+
+**`session_finalize` lock + idempotency.** Implementations MUST acquire the
+session lock for the entire read+write window (`store.acquireLock` at handler
+entry, `store.releaseLock` in `finally`). Inside the lock, the handler MUST
+read the current `meta.outcome` and:
+
+- If `meta.outcome === args.outcome` AND `(meta.outcome_reason ?? null) ===
+  (args.reason ?? null)` (after null-normalization that collapses empty/
+  whitespace-only strings to null): no-op success. The handler MUST NOT call
+  `store.finalize` on this branch — `meta.finalized_at` is preserved from
+  the original call so audit trails reflect the canonical finalization time.
+  Response payload includes `idempotent: true` and a `note` field documenting
+  the no-op.
+- Otherwise (different outcome OR different reason): MUST throw with both
+  the existing state and the incoming state surfaced in the error message.
+  The error MUST instruct the caller that "Identical re-finalize is allowed
+  as a no-op; different outcome or reason is not."
+- If `meta.outcome == null`: write via `store.finalize(sessionId, outcome,
+  reason)`.
+
+This contract enables safe retry-after-network-blip (callers re-issuing the
+same request after timeouts succeed without state corruption) while
+rejecting genuine conflicts (caller bug or operator error). Pre-v1.2.3
+behavior was unconditional clobber, both racing with in-flight rounds and
+silently overwriting prior finalization.
+
+**`ask_peer` and `ask_peers` finalized-session refusal.** After acquiring
+the lock and reading `meta`, both handlers MUST throw if `meta.outcome !=
+null`. Appending a new round to a finalized session produces zombie state
+(round entries after the supposed terminal point). The error MUST instruct
+the caller to open a new session via `session_init` if the conversation
+needs extending.
+
+**`escalate_to_operator` post-finalize annotation policy.** This handler
+MUST acquire the session lock for write-ordering (was unguarded pre-v1.2.3,
+racing with concurrent ask_peers). It MUST NOT refuse on finalized sessions
+— the operator may legitimately escalate something on a concluded session
+during later review. This is a deliberate departure from the
+ask_peer/ask_peers refusal policy, justified by the semantic difference:
+escalation is an audit-trail annotation (writes to `meta.escalations[]`)
+not a state extension. Implementations MAY relax to refusal in a future
+release if the audit-annotation use case proves rare in field evidence.
+
+**Backwards compatibility.** Pre-v1.2.3 sessions never hit these paths
+(handlers didn't exist or had different semantics); existing finalized
+sessions remain readable. The new contracts apply only to handler
+invocations on a v1.2.3+ runtime. Test coverage:
+`scripts/functional-smoke.js::driveV414SessionLifecycleGuardsUnit` asserts
+the store-level invariants and anti-drift on the canonical handler text.
 
 ---
 

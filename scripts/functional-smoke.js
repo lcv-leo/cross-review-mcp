@@ -834,7 +834,160 @@ async function runAll() {
     all.push(...s51.results);
     const s52 = await driveV414PromptLanguageDescriptionDriftUnit();
     all.push(...s52.results);
+    // v1.2.3 / external audit round-2: F2 strict quorum + F5 lifecycle guards.
+    const s53 = await driveV414StrictQuorumUnit();
+    all.push(...s53.results);
+    const s54 = await driveV414SessionLifecycleGuardsUnit();
+    all.push(...s54.results);
     return all;
+}
+
+// v1.2.3 / external audit round-2 F2 — strict quorum: rejected_count counts AGAINST.
+async function driveV414StrictQuorumUnit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/session-store.js')];
+    const store = require('../src/lib/session-store.js');
+
+    // Round shape: caller READY + 2 responded peers READY + 1 rejected (quorum.rejected = 1).
+    // Pre-v1.2.3 this was reported as converged. v1.2.3+ MUST be converged=false.
+    const roundWithRejected = {
+        round: 1,
+        caller_status: 'READY',
+        peers: [
+            { agent: 'codex', peer_status: 'READY' },
+            { agent: 'gemini', peer_status: 'READY' },
+        ],
+        quorum: { requested: 3, responded: 2, rejected: 1 },
+    };
+    const snap = store.computeConvergenceSnapshot(0, roundWithRejected);
+    assert(snap.converged === false, 'v4.14 §6.12 strict quorum: rejected_count > 0 with all responded READY → converged=false');
+    assert(snap.rejected_count === 1, 'v4.14 §6.12 strict quorum: rejected_count surfaced in snapshot');
+    assert(snap.denominator_mode === 'strict', 'v4.14 §6.12 strict quorum: denominator_mode preserved');
+    results.push({ step: 'v4.14 §6.12 F2: rejected_count > 0 blocks convergence even when all responded peers READY', ok: true });
+
+    // Reason readout: gap codex flagged in R1 — when responded peers all
+    // READY but rejected_count > 0, blocking_peers IS empty (correctly), and
+    // the reason builder must surface rejected_count instead of falsely
+    // reporting "no responded peers". The reason builder is internal to
+    // session-store.js but exercised end-to-end by checkConvergence which
+    // composes the reason text. Direct readout invariant: snapshot has
+    // blocking_peers empty AND rejected_count > 0 simultaneously, which
+    // is the trigger condition for the new reason branch.
+    assert(Array.isArray(snap.blocking_peers) && snap.blocking_peers.length === 0, 'v4.14 §6.12 F2: blocking_peers empty when responded peers all READY');
+    results.push({ step: 'v4.14 §6.12 F2: snapshot exposes rejected_count for downstream reason building', ok: true });
+
+    // Edge: round.quorum undefined (legacy round shape) → defaults to 0, no false-flag.
+    const legacyRound = {
+        round: 1,
+        caller_status: 'READY',
+        peers: [{ agent: 'codex', peer_status: 'READY' }],
+    };
+    const snapLegacy = store.computeConvergenceSnapshot(0, legacyRound);
+    assert(snapLegacy.converged === true, 'v4.14 §6.12 F2: round without quorum field → rejected_count defaults to 0, converged preserved');
+    assert(snapLegacy.rejected_count === 0, 'v4.14 §6.12 F2: legacy round → rejected_count = 0 in snapshot');
+    results.push({ step: 'v4.14 §6.12 F2: legacy round shape (no quorum field) is forward-compatible', ok: true });
+
+    // Edge: ALL peers rejected (3-of-3 fail at spawn) → must enter N-ary
+    // path (codex R2 fix), produce rejected_count=3, empty blocking_peers,
+    // and a reason text mentioning "failed at spawn". Pre-R2 this fell
+    // through to legacy bilateral path and lost rejected_count.
+    const allRejected = {
+        round: 1,
+        caller_status: 'READY',
+        peers: [],
+        quorum: { requested: 3, responded: 0, rejected: 3 },
+    };
+    const snapAllRej = store.computeConvergenceSnapshot(0, allRejected);
+    assert(snapAllRej.converged === false, 'v4.14 §6.12 F2: all-rejected round → converged=false');
+    assert(snapAllRej.rejected_count === 3, 'v4.14 §6.12 F2: all-rejected snapshot exposes rejected_count=3 (codex R2 ask)');
+    assert(Array.isArray(snapAllRej.blocking_peers) && snapAllRej.blocking_peers.length === 0, 'v4.14 §6.12 F2: all-rejected has empty blocking_peers (no responded peers to classify)');
+    assert(snapAllRej.denominator_mode === 'strict', 'v4.14 §6.12 F2: all-rejected snapshot keeps denominator_mode=strict');
+    // Reason text via checkConvergence end-to-end. Build a minimal session
+    // file so the helper path runs.
+    const sidAR = store.initSession({ task: 'all-rejected reason test', artifacts: [], callerAgent: 'claude', peers: ['codex', 'gemini'] });
+    try {
+        // Inject the all-rejected round shape via direct meta write since
+        // store.appendRound only sees real ask_peers handler output.
+        const metaPath = require('node:path').join(store.sessionDir(sidAR), 'meta.json');
+        const fs = require('node:fs');
+        const metaAR = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        metaAR.rounds = [allRejected];
+        fs.writeFileSync(metaPath, JSON.stringify(metaAR, null, 2));
+        const conv = store.checkConvergence(sidAR);
+        assert(conv.converged === false, 'v4.14 §6.12 F2: all-rejected checkConvergence → converged=false');
+        assert(typeof conv.reason === 'string' && conv.reason.includes('failed at spawn'), 'v4.14 §6.12 F2: all-rejected reason contains "failed at spawn" (codex R2 ask)');
+    } finally {
+        try { require('node:fs').rmSync(store.sessionDir(sidAR), { recursive: true, force: true }); } catch {}
+    }
+    results.push({ step: 'v4.14 §6.12 F2: all-rejected (3-of-3 spawn fail) → rejected_count=3, empty blocking_peers, reason "failed at spawn"', ok: true });
+
+    return { results };
+}
+
+// v1.2.3 / external audit round-2 F5 — session lifecycle guards.
+async function driveV414SessionLifecycleGuardsUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/session-store.js')];
+    const store = require('../src/lib/session-store.js');
+
+    // F5b safe-idempotency direct test on store.finalize: same outcome+reason
+    // is allowed by the store (handler-level idempotency is exercised by
+    // server-side stdio path; here we verify the store invariants hold).
+    const sid = store.initSession({
+        task: 'lifecycle test',
+        artifacts: [],
+        callerAgent: 'claude',
+        peers: ['codex', 'gemini'],
+    });
+    try {
+        // First finalize.
+        store.finalize(sid, 'aborted', 'lifecycle_test');
+        const meta1 = store.readMeta(sid);
+        assert(meta1.outcome === 'aborted', 'v4.14 F5: store.finalize sets outcome');
+        assert(meta1.outcome_reason === 'lifecycle_test', 'v4.14 F5: store.finalize sets reason');
+        assert(typeof meta1.finalized_at === 'string', 'v4.14 F5: store.finalize stamps finalized_at');
+        results.push({ step: 'v4.14 F5: store.finalize records outcome + reason + finalized_at', ok: true });
+
+        // F5: finalizeIfUnset must NO-OP when meta.outcome already set (re-read-before-write contract).
+        const wrote = store.finalizeIfUnset(sid, 'converged', 'should_not_clobber');
+        assert(wrote === false, 'v4.14 F5: finalizeIfUnset returns false when outcome already set');
+        const meta2 = store.readMeta(sid);
+        assert(meta2.outcome === 'aborted' && meta2.outcome_reason === 'lifecycle_test', 'v4.14 F5: finalizeIfUnset preserved original outcome+reason');
+        results.push({ step: 'v4.14 F5: finalizeIfUnset never clobbers existing outcome', ok: true });
+
+        // Lock cleanup verification: after no operation, lock dir must not exist.
+        const lockPath = path.join(store.sessionDir(sid), '.lock');
+        assert(!fs.existsSync(lockPath), 'v4.14 F5: no stale lock left in session dir post-test');
+        results.push({ step: 'v4.14 F5: session dir has no stale lock after lifecycle ops', ok: true });
+    } finally {
+        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
+    }
+
+    // F5c handler-side guard: verify the description text mentions the
+    // finalized-rejection contract (anti-drift assertion — actual behavior
+    // tested by the existing stdio smoke + manual integration).
+    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+    assert(
+        serverSrc.includes('already finalized') && serverSrc.includes('cannot append a new round'),
+        'v4.14 F5c: ask_peer/ask_peers handlers contain finalized-session rejection logic'
+    );
+    assert(
+        serverSrc.includes('safe-idempotent') && serverSrc.includes('conflicting re-finalize rejected') && serverSrc.includes('Identical re-finalize is allowed as a no-op'),
+        'v4.14 F5b: session_finalize handler contains safe-idempotent + conflicting-rejection branches'
+    );
+    assert(
+        serverSrc.includes('Post-finalization escalation IS allowed'),
+        'v4.14 F5 follow-up: escalate_to_operator pinned as allowed-on-finalized + locked'
+    );
+    results.push({ step: 'v4.14 F5: handlers carry finalized-session lifecycle contracts (anti-drift)', ok: true });
+
+    return { results };
 }
 
 // v1.2.2 §6.10 enforcement — language drift detector unit tests (B+C runtime side).

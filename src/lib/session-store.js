@@ -259,8 +259,13 @@ function computeConvergenceSnapshot(roundIndex, round, context = {}) {
         : [];
     const callerReady = round.caller_status === 'READY';
 
-    // N-ary path (ask_peers rounds).
-    if (Array.isArray(round.peers) && round.peers.length > 0 && !('peer_status' in round)) {
+    // N-ary path (ask_peers rounds). v1.2.3 / external audit round-2 R2:
+    // detection no longer requires peers.length > 0 — an all-rejected round
+    // (peers=[] AND quorum.rejected > 0) is still N-ary; it must enter THIS
+    // path so rejected_count surfaces in the snapshot and reason. The
+    // discriminator is "round shape is N-ary" (Array.isArray(peers) AND no
+    // legacy scalar peer_status field), not "any peers responded".
+    if (Array.isArray(round.peers) && !('peer_status' in round)) {
         const respondedPeers = round.peers.map((p) => p.agent);
         const readyPeers = round.peers
             .filter((p) => p.peer_status === 'READY')
@@ -271,8 +276,21 @@ function computeConvergenceSnapshot(roundIndex, round, context = {}) {
                 agent: p.agent,
                 reason: classifyBlocking(p),
             }));
+        // Spec §6.12 strict-only convergence: spawn-rejected peers (recorded in
+        // round.quorum.rejected) MUST count against. Pre-v1.2.3 the snapshot
+        // only counted responded peers in round.peers, allowing 2-of-3
+        // unanimity to be reported as converged when 1 peer was rejected at
+        // spawn (rate-limit, moderation flag, command failure). External audit
+        // 2026-04-26 (round 2) flagged this inconsistency vs the in-handler
+        // allPeersReady check that already required strict equality. This
+        // close-out aligns the snapshot with the handler.
+        const rejectedCount = (round.quorum && Number.isFinite(round.quorum.rejected))
+            ? round.quorum.rejected
+            : 0;
         const allPeersReady =
-            round.peers.length > 0 && round.peers.every((p) => p.peer_status === 'READY');
+            round.peers.length > 0
+            && round.peers.every((p) => p.peer_status === 'READY')
+            && rejectedCount === 0;
         const converged = callerReady && allPeersReady;
         return {
             round_index: roundIndex,
@@ -280,6 +298,7 @@ function computeConvergenceSnapshot(roundIndex, round, context = {}) {
             denominator_mode: 'strict',
             caller_status: round.caller_status ?? null,
             responded_peers: respondedPeers,
+            rejected_count: rejectedCount,
             excluded_probe: excludedProbe,
             excluded_runtime: excludedRuntime,
             ready_peers: readyPeers,
@@ -494,6 +513,17 @@ function buildConvergenceReason(snapshot, round) {
     // N-ary path.
     if (!callerReady) {
         return `caller is ${snapshot.caller_status ?? 'MISSING'}; caller must concur with peers`;
+    }
+    // v1.2.3 / external audit round-2 F2 readout: when all responded peers
+    // are READY but spawn-rejected peers exist, the strict-quorum predicate
+    // correctly flips converged=false. The reason text MUST surface the
+    // rejected_count so the caller knows the round failed because peers
+    // never spawned, not because no peers responded.
+    const rejectedFromSnapshot = Number.isFinite(snapshot.rejected_count)
+        ? snapshot.rejected_count
+        : 0;
+    if (snapshot.blocking_peers.length === 0 && rejectedFromSnapshot > 0) {
+        return `${rejectedFromSnapshot} peer${rejectedFromSnapshot === 1 ? '' : 's'} failed at spawn (rejected_count=${rejectedFromSnapshot}); strict quorum requires all requested peers to respond and declare READY (spec v4.14 §6.12)`;
     }
     if (snapshot.blocking_peers.length === 0) {
         return `no responded peers (responded=${snapshot.responded_peers.length}, excluded_runtime=${snapshot.excluded_runtime.length})`;

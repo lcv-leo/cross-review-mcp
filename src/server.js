@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.2.2';
+const VERSION = '1.2.3';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -473,7 +473,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'session_check_convergence',
             description:
-                "Return whether convergence holds in the last round. Bilateral (ask_peer round): converged iff BOTH caller_status and peer_status are READY. N-ary (ask_peers round): converged iff caller_status is READY AND every responded peer declared READY (unanimity; spec v4.11 section 2.8). Peers excluded at probe time live in capability_snapshot and are NOT in the round's peer list. Peers that failed at spawn time are in failed_attempts and are also excluded from the denominator. peer_status values: READY | NOT_READY | NEEDS_EVIDENCE.",
+                "Return whether convergence holds in the last round. Bilateral (ask_peer round): converged iff BOTH caller_status and peer_status are READY. N-ary (ask_peers round): converged iff caller_status is READY AND every responded peer declared READY AND `round.quorum.rejected === 0` (strict quorum; spec v4.14 §6.12). Peers excluded at probe time live in capability_snapshot and are NOT in the round's peer list (the probe excluded them before dispatch, so they are not 'missing' in the §6.12 sense). Peers that failed at spawn time during the round are in `meta.failed_attempts` and counted in `round.quorum.rejected`; under strict-quorum semantics they DO count against convergence (v1.2.3 closure of an external-audit finding that the snapshot computation pre-v1.2.3 ignored rejected, allowing 2-of-3 unanimity to misreport as converged when 1 peer was spawn-rejected). peer_status values: READY | NOT_READY | NEEDS_EVIDENCE.",
             inputSchema: {
                 type: 'object',
                 properties: { session_id: { type: 'string' } },
@@ -589,7 +589,7 @@ PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be
         },
         {
             name: 'ask_peers',
-            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are excluded from the round's unanimity denominator. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. Convergence (N-ary): caller READY AND every responded peer READY. This is the canonical tool for triangular sessions.\n\nFAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): each rejected peer carries a 'failure_class' and 'recovery_hint'. The caller MUST honor the hint:\n- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): the peer's provider rejected the prompt as potentially violating its usage policy (commonly OpenAI Codex on reasoning models). The 'reformulation_advice' field gives concrete guidance — avoid charged words ('adversarial', 'jailbreak', 'exploit', 'attack', 'bypass'), replace model-introspection prose with neutral technical descriptions, prefer 'response anomaly' over 'silent_downgrade', 'edge case' over 'adversarial input'. The caller MUST reformulate the prompt and call ask_peers again in a NEW round (do NOT abort the session). Repeat up to 5 reformulation attempts before escalating to the operator.\n- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): observe 'retry_after_seconds' and resubmit after the cooldown window.\n- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.\n\nThe session continues with whatever peers responded; reformulation recovers the missing peer in a follow-up round.\n\nPROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content (this 'prompt' field, plus the session_init 'task' field) to en-US before submission. Runtime emits a non-blocking advisory 'prompt_language_warning' field on the response when non-en-US text is detected (diacritics or pt-BR lexemes); current behavior is warn-only but future versions may hard-reject when confidence is high.`,
+            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are counted in round.quorum.rejected. Under strict-quorum semantics (spec v4.14 §6.12) rejected peers count AGAINST convergence: the predicate requires caller READY AND every responded peer READY AND round.quorum.rejected === 0. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. This is the canonical tool for triangular sessions.\n\nFAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): each rejected peer carries a 'failure_class' and 'recovery_hint'. The caller MUST honor the hint:\n- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): the peer's provider rejected the prompt as potentially violating its usage policy (commonly OpenAI Codex on reasoning models). The 'reformulation_advice' field gives concrete guidance — avoid charged words ('adversarial', 'jailbreak', 'exploit', 'attack', 'bypass'), replace model-introspection prose with neutral technical descriptions, prefer 'response anomaly' over 'silent_downgrade', 'edge case' over 'adversarial input'. The caller MUST reformulate the prompt and call ask_peers again in a NEW round (do NOT abort the session). Repeat up to 5 reformulation attempts before escalating to the operator.\n- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): observe 'retry_after_seconds' and resubmit after the cooldown window.\n- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.\n\nThe session continues with whatever peers responded; reformulation recovers the missing peer in a follow-up round.\n\nPROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content (this 'prompt' field, plus the session_init 'task' field) to en-US before submission. Runtime emits a non-blocking advisory 'prompt_language_warning' field on the response when non-en-US text is detected (diacritics or pt-BR lexemes); current behavior is warn-only but future versions may hard-reject when confidence is high.`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -719,19 +719,84 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 };
             }
             case 'session_finalize': {
-                store.finalize(args.session_id, args.outcome, args.reason ?? null);
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify({
-                                ok: true,
-                                outcome: args.outcome,
-                                outcome_reason: args.reason ?? null,
-                            }, null, 2),
-                        },
-                    ],
-                };
+                // v1.2.3 / external audit round-2 F5: acquire the session
+                // lock before writing, and refuse to clobber an already
+                // finalized outcome. Pre-v1.2.3 finalize wrote unconditionally
+                // and held no lock — racing with an in-flight ask_peers could
+                // interleave appendRound and finalize, and a second
+                // finalize call silently overwrote the first outcome.
+                const sessionId = args.session_id;
+                if (!store.acquireLock(sessionId)) {
+                    throw new Error(
+                        `session ${sessionId} is currently locked by another process (TTL 1h); retry shortly or clear ~/.cross-review/${sessionId}/.lock if stale`
+                    );
+                }
+                try {
+                    const meta = store.readMeta(sessionId);
+                    if (meta.outcome != null) {
+                        // v1.2.3 / external audit round-2 F5b: safe-idempotent
+                        // re-finalize. If the second call provides the SAME
+                        // outcome AND the SAME outcome_reason (after
+                        // null-normalization), no-op success — the meta is
+                        // already in the requested terminal state, and this
+                        // just lets a retry-after-network-blip succeed
+                        // silently. Different outcome OR different reason is
+                        // rejected (real conflict).
+                        //
+                        // Null-normalization (gemini R2 ask): empty string and
+                        // whitespace-only strings collapse to null, so a
+                        // caller that retries `(id, 'aborted')` (stored null)
+                        // and then `(id, 'aborted', '')` succeeds idempotently
+                        // instead of falsely flagging the empty string as a
+                        // different reason.
+                        //
+                        // Crucially: the no-op path does NOT call
+                        // store.finalize, so meta.finalized_at is NOT rewritten.
+                        const normReason = (r) => {
+                            if (r == null) return null;
+                            const s = String(r).trim();
+                            return s.length === 0 ? null : s;
+                        };
+                        const incomingReason = normReason(args.reason);
+                        const existingReason = normReason(meta.outcome_reason);
+                        const sameOutcome = meta.outcome === args.outcome;
+                        const sameReason = existingReason === incomingReason;
+                        if (sameOutcome && sameReason) {
+                            return {
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: JSON.stringify({
+                                            ok: true,
+                                            outcome: meta.outcome,
+                                            outcome_reason: existingReason,
+                                            idempotent: true,
+                                            note: 'session was already finalized with identical outcome+reason; meta.finalized_at preserved from original call',
+                                        }, null, 2),
+                                    },
+                                ],
+                            };
+                        }
+                        throw new Error(
+                            `session ${sessionId} already finalized (outcome='${meta.outcome}', outcome_reason='${existingReason ?? '(null)'}'); conflicting re-finalize rejected (incoming outcome='${args.outcome}', outcome_reason='${incomingReason ?? '(null)'}'). Identical re-finalize is allowed as a no-op; different outcome or reason is not.`
+                        );
+                    }
+                    store.finalize(sessionId, args.outcome, args.reason ?? null);
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify({
+                                    ok: true,
+                                    outcome: args.outcome,
+                                    outcome_reason: args.reason ?? null,
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                } finally {
+                    store.releaseLock(sessionId);
+                }
             }
             case 'session_sweep': {
                 // v1.1.0 / spec v4.13 §6.18 long-idle session reconciliation.
@@ -767,6 +832,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 };
             }
             case 'escalate_to_operator': {
+                // v1.2.3 / external audit round-2 follow-up: acquire lock
+                // before writing meta.escalations[]. Pre-v1.2.3 escalation
+                // was an unguarded writer, racing with in-flight ask_peers.
+                // Post-finalization escalation IS allowed (operator may
+                // legitimately escalate something on a concluded session
+                // during later review) — we lock for write-ordering, NOT to
+                // reject finalized sessions.
                 const sessionId = args.session_id;
                 const question = args.question;
                 const context = args.context ?? null;
@@ -775,20 +847,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         `escalate_to_operator requires a non-empty 'question' string.`
                     );
                 }
-                const entry = store.saveEscalation(sessionId, CALLER, question, context);
-                log('escalate_to_operator: recorded', {
-                    session: sessionId,
-                    escalation_id: entry.escalation_id,
-                    round: entry.round_index,
-                });
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify(entry, null, 2),
-                        },
-                    ],
-                };
+                if (!store.acquireLock(sessionId)) {
+                    throw new Error(
+                        `session ${sessionId} is currently locked by another process (TTL 1h); retry shortly or clear ~/.cross-review/${sessionId}/.lock if stale`
+                    );
+                }
+                try {
+                    const entry = store.saveEscalation(sessionId, CALLER, question, context);
+                    log('escalate_to_operator: recorded', {
+                        session: sessionId,
+                        escalation_id: entry.escalation_id,
+                        round: entry.round_index,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify(entry, null, 2),
+                            },
+                        ],
+                    };
+                } finally {
+                    store.releaseLock(sessionId);
+                }
             }
             case 'ask_peer': {
                 const sessionId = args.session_id;
@@ -806,6 +887,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 }
                 try {
                     const meta = store.readMeta(sessionId);
+                    // v1.2.3 / external audit round-2 F5c: refuse on finalized
+                    // session. Appending a round to a session whose outcome is
+                    // already set produces zombie state mixing finalized and
+                    // ongoing rounds. If the caller wants to extend the
+                    // conversation, they should open a new session.
+                    if (meta.outcome != null) {
+                        throw new Error(
+                            `session ${sessionId} is already finalized (outcome='${meta.outcome}', outcome_reason='${meta.outcome_reason ?? '(null)'}'); cannot append a new round. Open a new session via session_init if you need to extend the conversation.`
+                        );
+                    }
                     // Spec v4.14 §6.20: caller is per-session (meta.caller),
                     // not the global CALLER constant. ask_peer's bilateral
                     // surface is available iff the SESSION'S caller has a
@@ -1019,6 +1110,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 }
                 try {
                     const meta = store.readMeta(sessionId);
+                    // v1.2.3 / external audit round-2 F5c: refuse on finalized
+                    // session. Same rationale as ask_peer guard above.
+                    if (meta.outcome != null) {
+                        throw new Error(
+                            `session ${sessionId} is already finalized (outcome='${meta.outcome}', outcome_reason='${meta.outcome_reason ?? '(null)'}'); cannot append a new round. Open a new session via session_init if you need to extend the conversation.`
+                        );
+                    }
                     // Spec v4.14 §6.20: caller + peers are per-session; read
                     // from meta. Backwards-compat: pre-v4.14 sessions may
                     // not have meta.peers populated as N-ary array — fall
