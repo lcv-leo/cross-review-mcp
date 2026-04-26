@@ -79,3 +79,11 @@ tmp/
 **/schema.sql
 schema.sql
 .github/copilot-instructions.md
+
+# AI-agent operator guidance — local-only by operator directive 2026-04-26.
+# These files contain internal workspace conventions, session UUIDs, and pt-BR
+# operator-facing prose; not appropriate for public GitHub. Keep on disk for
+# AI agents working from the operator's machine, but never push.
+AGENTS.md
+.gemini/
+GEMINI.md
