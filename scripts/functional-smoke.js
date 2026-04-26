@@ -1118,7 +1118,8 @@ async function driveV414ServerInfoUnit() {
     // RELEASE_DATE must match the heading for the current VERSION in
     // CHANGELOG.md. Format: `## [X.Y.Z] — YYYY-MM-DD`.
     const changelog = fs.readFileSync(path.resolve(__dirname, '..', 'CHANGELOG.md'), 'utf8');
-    const headingRe = new RegExp(`^##\\s*\\[${server.VERSION.replace(/\./g, '\\.')}\\][^\\n]*?(\\d{4}-\\d{2}-\\d{2})`, 'm');
+    const escapedVersion = server.VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const headingRe = new RegExp(`^##\\s*\\[${escapedVersion}\\][^\\n]*?(\\d{4}-\\d{2}-\\d{2})`, 'm');
     const headingMatch = changelog.match(headingRe);
     assert(
         headingMatch !== null,

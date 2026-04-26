@@ -15,6 +15,22 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.2.6] — 2026-04-26
+
+**CodeQL hardening: defensive regex-meta escape on the CHANGELOG anti-drift smoke.** GitHub Code Scanning surfaced `js/incomplete-sanitization` (high security_severity) on `scripts/functional-smoke.js:1121` minutes after the v1.2.5 publish. The regex builder for the v4.14 anti-drift step (`RELEASE_DATE constant matches CHANGELOG date for current VERSION`) used `server.VERSION.replace(/\./g, '\\.')` which only escapes dots — incomplete sanitization per CodeQL.
+
+In context this is technically a false positive: `server.VERSION` is asserted to match `/^\d+\.\d+\.\d+$/` 10 lines earlier in the same driver, so the input is structurally constrained to digits + dots and cannot contain backslashes or other regex meta-characters. But the right move per workspace `feedback_fix_dont_remove.md` ("fix errors, never silence warnings") is to escape the full regex meta-character set rather than dismiss the alert.
+
+### Corrigido
+- `scripts/functional-smoke.js:1121` regex builder now escapes the complete meta-character class `[.*+?^${}()|[\]\\]` via `replace(.../g, '\\$&')` and binds the escaped value to a named local `escapedVersion` for clarity. Behavior unchanged (input was already safe), but defense-in-depth is now structurally correct and the high-severity CodeQL alert closes.
+
+### Validação
+- `npm test` 177 GREEN (no behavioral change vs v1.2.5).
+- `npm run check-models` GREEN.
+- No new MCP tools, no spec changes, no peer cross-review session required (defensive hardening within frozen v1.x public surface).
+
+---
+
 ## [1.2.5] — 2026-04-26
 
 **External-audit round-4 closure: 4 hardening fixes + spec §6.21 retiring `shell:true` repeats.** Round-4 (Gemini-orchestrated against v1.2.4) had high yield: 1 four-time repeat (RCE/shell:true — closed via spec note), 4 new shippable items. Trilateral cross-review session `53d0d785` (caller + codex + gemini) iterated R1→R2→R3 to address peer-flagged residuals, including a **critical POSIX kill bug** gemini caught in my R2 design (process.kill(-pid) always throws ESRCH on non-detached spawns → my ESRCH-return short-circuited the fallback → guaranteed zombies on Linux/macOS).
