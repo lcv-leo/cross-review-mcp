@@ -15,6 +15,20 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.2.9] — 2026-04-26
+
+**Audit-trail bookkeeping bump.** The previous commit (`11d95a0`, `docs(audit): round-7 follow-up...`) appended a Round-7 follow-up section to `docs/external-audit-2026-04-26-gemini.md` recording (a) a caller-memory correction about `CONVERGENCE_SPEC_VERSION` being intentional two-constant design (not a bug, as previously misclassified in workspace memory), (b) a neutral verdict-criterion note distinguishing Gemini's NOT_READY criterion from Codex's READY-with-residuals criterion under the §6.21 threat model, and (c) two Codex precision corrections recorded as canonical phrasing. That commit was initially pushed as a non-versioned doc commit per advisor guidance ("npm bytes unchanged → no need to bump"), but the workspace `.agents/workflows/version-control.md` §6 rule is literal: "Qualquer modificação requer incrementar o patch + adicionar entrada no CHANGELOG.md," and explicitly classifies "mudanças de texto" (text changes) as patch-bump material. Operator caught the omission. v1.2.9 closes the bookkeeping gap.
+
+**No code change.** Runtime is identical to v1.2.8. npm bytes are identical to v1.2.8 except for the version field. The round-7 audit-doc content already landed in `11d95a0`; this commit is a strict version-bump + CHANGELOG entry + README update + the Claude Code memory `feedback_workspace_rules_supersede_advisor.md` recording the lesson that workspace-set policy supersedes advisor-suggested optimization when they conflict.
+
+### Validação
+- `npm test` 179 GREEN (no smoke change).
+- `npm run check-models` GREEN.
+- `biome check` clean on all source + script files.
+- Cross-review session per `feedback_cross_review_mandatory_pre_commit.md` directive.
+
+---
+
 ## [1.2.8] — 2026-04-26
 
 **Doc-only clarification: F4 fallback wording tightened from overstated "real reap" to honest "best-effort proc-handle reap" + new explicit deferral bullet for tree-kill completeness under `shell: true`.** Round-6 audit on v1.2.7 (Gemini-orchestrated, codex meta-eval) approved v1.2.7 as READY but both peers correctly observed in their own meta-eval that the §6.18.3 v1.2.7 amendment overstates F4 closure: under §6.21 `shell: true`, the proc handle Node holds is `cmd.exe`, so on Windows the v1.2.7 fallback `proc.kill('SIGKILL')` reaps the shell but does NOT walk the tree to the actual peer-CLI grandchild. Full tree-kill is what `taskkill /T /F` does; when `taskkill` fails the fallback is harm reduction over log-and-leak, not equivalent.
