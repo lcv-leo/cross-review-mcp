@@ -294,7 +294,108 @@ Pattern observation across rounds:
 | Round 1 | 3 (F1+F7+F8) | 0 (first audit) | 4 (F2-F6 various) |
 | Round 2 | 2 (F2+F5) | 4 (F1/F3/F4/F6) | 0 |
 | Round 3 | 1 (F8) | 4 (F1/F2/F3/F6) + 1 already-fixed | 3 (F4 partial, F5, F7) |
-| **Round 4** | **4** | 1 (§1 RCE/shell:true — spec note retires) | 0 |
+| Round 4 | 4 | 1 (§1 RCE/shell:true — spec note retires) | 0 |
+| **Round 5** | **3** (F3 streams + F4 taskkill + codex comment) | 2 (RCE re-confirmed, traversal re-confirmed) | 3 (TOCTOU, MCP request caps, peer-emulator harness) |
+
+## Round 5 closure (v1.2.7)
+
+**Setup.** Gemini ran a full re-audit against v1.2.6. Codex independently
+audited v1.2.6 in parallel and initially returned READY in cross-review
+session `a02be3db` with only a single residual (a stale comment at
+`session-store.js:498-500`). When the operator surfaced gemini's report
+to codex, codex re-evaluated and CONCURRED on gemini's findings 3, 4,
+and 5 — reversing the earlier READY.
+
+**Codex miss-profile note (atypical).** This round inverts the usual
+rigor pattern documented in `feedback_peer_review_rigor.md`. Across
+rounds 1-4, codex was the more-rigorous holdout (caught the apply-to-tree
+gap in R2 of v1.2.5; held line on §6.18.3 doc-drift through R4 of
+v1.2.5). Round-5 audit: gemini caught 2 real runtime defects; codex
+caught 0 real bugs + 1 stale comment + went READY. The codex re-eval
+recovered (concurred fully when shown gemini's evidence). Recorded here
+because pattern matters for how operator weights peer evidence in
+future rounds: never treat single-peer READY as absence of bugs even
+when that peer historically holds line.
+
+### Items fixed in v1.2.7
+
+**F3 — DoS by Memory (stream listener detach).** REAL bug. Pre-v1.2.7
+implementations called `killProcessTree(proc)` on overflow/timeout but
+left `proc.stdout` and `proc.stderr` `data` listeners attached. Windows
+`taskkill` is async (50-200ms typical); POSIX `process.kill` returns
+before child fully exits. In-flight `data` events kept growing JS-side
+buffers DURING the kill window — soft cap (4 MiB) became 8-16+ MiB
+under hostile/pathological peer load. Fix: introduced `detachStreamListeners`
+(spawnPeer) + `detachProbeListeners` (probeAgent) helpers that
+`removeAllListeners('data')` on stdout+stderr; invoked BEFORE
+`killProcessTree(proc)` in BOTH overflow handler AND timeout handler in
+each (4 leak paths total). Used `removeAllListeners` (pure JS-land) not
+`destroy()` (which races with `taskkill` on Windows producing spurious
+'error' events). Single `data` event already in microtask queue may
+still fire once after detach (single-chunk-bounded leak ≤64 KiB);
+acceptable. Spec §6.18.3 v1.2.7 amendment codifies. New structural
+anti-drift smoke `driveV414StreamListenerDetachUnit`.
+
+**F4 — Windows process reaping fallback.** REAL bug. Pre-v1.2.7 the
+`killer.on('close', code)` handler logged on `code !== 0` but had no
+recovery — `taskkill` failures (AV interference, permission inheritance
+bugs, race with normal exit) leaked the child process. The
+`killer.on('error', err)` path also only logged. Fix: both handlers now
+invoke `proc.kill('SIGKILL')` in try-catch (swallows ESRCH for
+already-dead processes) AFTER the log line. Strict improvement.
+Anti-drift smoke `driveV414TaskkillFallbackUnit`.
+
+**Codex comment fix.** Stale comment at `src/lib/session-store.js:498-500`
+described the convergence predicate as "failed-spawn peers excluded
+from denominator" — pre-v1.2.3 semantics. v1.2.3 §6.18.1 strict-quorum
+closure changed it (failed-spawn peers ARE counted in `round.quorum.rejected`
+and DO count AGAINST convergence; predicate requires `rejected_count === 0`).
+Comment was 4 releases stale. Rewritten to match current spec §6.12 +
+§6.18.1 contract.
+
+### Items deferred to v1.3.x with explicit rationale
+
+**Gemini R3 — MCP request-boundary payload caps.** REAL gap (codex
+independently corroborated as #5 in re-eval). Currently §6.18.2's
+64 KiB cap fires only at the disk-write layer; an adversarial caller
+could ship a 100 MiB `prompt`/`task`/`artifacts` payload consuming RAM
+in the handler before any write. v1.3.x material because it requires
+threshold calibration (post-truncation behavior, response shape on
+oversized input) and would be a normative request-boundary contract,
+not just an implementation hardening.
+
+**Gemini R4 — behavioral peer-emulator harness.** Already deferred at
+v1.2.5; F3 closure does NOT change that. Behavioral end-to-end tests
+that exercise the kill window (peer emitting >cap at high rate)
+require a peer-CLI emulator not currently in the stdio fixture. The
+v1.2.7 anti-drift smoke is structural (asserts wiring exists); behavioral
+coverage is independent. Slated for v1.3.x.
+
+**TOCTOU realpath-vs-I/O race.** Gemini's §2 residual ("ínfima margem
+para um ataque do tipo TOCTOU"). Accepted under §6.21 single-user
+trusted-host threat model. Eliminating it would require POSIX
+`O_NOFOLLOW`-style per-operation gates not in Node's stable fs surface.
+Filed as known limitation, not v1.3.x ship target.
+
+### Round-5 cleanup of pre-existing biome diagnostics
+
+Per workspace `feedback_fix_preexisting_errors.md` directive ("always
+fix any issues found, pre-existing or not"), v1.2.7 also cleared all
+pre-existing biome warnings on the modified files:
+
+- `src/lib/peer-spawn.js:417` — `!proc || !proc.pid` → `!proc?.pid`
+  (`useOptionalChain`).
+- `src/server.js:463` — string-concatenation tool description in
+  `session_init` switched to template literal (`useTemplate`).
+- `scripts/functional-smoke.js:1537` — useless escape `'"\,'` → `'",'`
+  (`noUselessEscapeInString`).
+- `scripts/functional-smoke.js:1675` — `Object.prototype.hasOwnProperty.call(...)`
+  → `Object.hasOwn(...)` (`noPrototypeBuiltins`; safe under Node 20+
+  engine pin).
+- Whole-file biome formatter pass on the 5 modified files; quote style
+  standardized + tab indentation enforced. Anti-drift smoke regex
+  updated to be formatter-agnostic on quote choice so future biome
+  migrations don't break gates.
 
 Round 4 had the operator restarting Gemini's MCP host so the audit ran
 against actual v1.2.4 (not stale snapshot), AND the auditor used en-US

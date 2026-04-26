@@ -2458,6 +2458,69 @@ runtime overflow code path is exercised in production via natural peer
 output spikes; structural smoke + production exposure together provide
 sufficient regression protection for v1.2.5.
 
+**v1.2.7 amendment (external audit round-5 F3+F4).** Round-5 of the
+external audit (Gemini-orchestrated, codex-corroborated against v1.2.6)
+identified two real implementation gaps in the §6.18.3 RAM-cap enforcement
+and the related §2 process-reaping path. Closed in v1.2.7:
+
+1. **Listener detach before kill.** Pre-v1.2.7 implementations called
+   `killProcessTree(proc)` on overflow/timeout but left the `proc.stdout`
+   and `proc.stderr` `data` listeners attached. Because Windows `taskkill`
+   is async (50-200ms typical) and POSIX `process.kill` returns before the
+   child fully exits, in-flight `data` events kept growing the JS-side
+   string buffers DURING the kill window — a hostile or pathological peer
+   could push the soft cap from 4 MiB to 8-16+ MiB before the process
+   actually died. Implementations MUST `removeAllListeners('data')` on
+   BOTH stdout and stderr before invoking `killProcessTree`. Use
+   `removeAllListeners` (pure JS-land) rather than `proc.stdout.destroy()`
+   (which can race with `taskkill` and emit spurious `'error'` events on
+   Windows). A single `data` event already in the microtask queue may
+   still fire once after detach (single-chunk-bounded leak ≤64 KiB per
+   event); acceptable. The pattern applies to BOTH `spawnPeer` and
+   `probeAgent`, AND to BOTH the overflow handler AND the timeout handler
+   in each (4 leak paths total).
+
+2. **Windows taskkill nonzero-exit fallback.** Pre-v1.2.7 the
+   `killer.on('close', code)` handler logged on `code !== 0` but had no
+   recovery — `taskkill` failures (AV interference, permission inheritance
+   bugs, race with normal exit) leaked the child process. The
+   `killer.on('error', err)` path also only logged. Implementations MUST
+   invoke `proc.kill('SIGKILL')` (in a try-catch that swallows ESRCH for
+   already-dead processes) on BOTH the nonzero-`close` path AND the
+   `error` path. This is a strict improvement: harmless when the child
+   already exited (catch absorbs the error) and a real reap when it didn't.
+
+**Test coverage (v1.2.7).** New structural anti-drift driver
+`driveV414StreamListenerDetachUnit` asserts both detach helpers
+(`detachStreamListeners` for `spawnPeer`, `detachProbeListeners` for
+`probeAgent`) exist with the canonical body, and that each is invoked at
+least twice (once per leak path in its closure scope). New driver
+`driveV414TaskkillFallbackUnit` asserts the close + error handlers each
+contain the `proc.kill('SIGKILL')` fallback. Behavioral coverage
+(exercising the kill window with a peer-emulator emitting >cap) remains
+deferred to v1.3.x.
+
+**Items deferred to v1.3.x (round-5 explicit deferral).** Gemini's
+recommendations 3 and 4 plus the §2 TOCTOU residual are real but outside
+v1.2.7 scope:
+- **Recommendation 3: MCP request-boundary payload caps** for `task`,
+  `prompt`, and `artifacts`. Currently the only enforcement is
+  §6.18.2's per-file persistence cap (64 KiB) at the disk-write layer.
+  An adversarial caller could ship a 100 MiB `prompt` that consumes RAM
+  before any disk write. This is a normative spec change requiring
+  threshold calibration (post-truncation behavior, response shape on
+  oversized input) and is properly v1.3.x material.
+- **Recommendation 4: behavioral peer-emulator harness** for stream
+  overflow tests. Already deferred at v1.2.5 with same rationale; F3
+  closure does NOT change that.
+- **§2 TOCTOU realpath-vs-I/O race** (round-5 §2 residual, codex round-5
+  R1 polish ask for spec-level parity with audit-doc + CHANGELOG). Window
+  exists between `fs.realpathSync` validation in `sessionDir()` and the
+  subsequent file I/O. Accepted under §6.21 single-user trusted-host
+  threat model. Eliminating it would require POSIX `O_NOFOLLOW`-style
+  per-operation gates not currently in Node's stable fs surface; not a
+  v1.3.x ship target, filed as known limitation.
+
 #### 6.18.4 Long-idle session purge (NEW in v1.2.5, external audit round-4 §4.2 closure)
 
 **Trigger.** §6.18 `session_sweep` finalized stale sessions but did not

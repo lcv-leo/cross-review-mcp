@@ -16,20 +16,20 @@
  * files are created in ~/.cross-review/<id>/.
  */
 
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
 
-const SERVER = path.resolve(__dirname, '..', 'src', 'server.js');
-const STATE_DIR = path.join(os.homedir(), '.cross-review');
+const SERVER = path.resolve(__dirname, "..", "src", "server.js");
+const STATE_DIR = path.join(os.homedir(), ".cross-review");
 
 function requestLine(id, method, params) {
-    return `${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`;
+	return `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
 }
 
 function notifLine(method, params) {
-    return `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`;
+	return `${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`;
 }
 
 // Shared reader: parse line-delimited JSON-RPC messages from a child
@@ -37,1392 +37,2427 @@ function notifLine(method, params) {
 // by every driver function; centralizing this removes repetition and
 // avoids the assignment-in-expression pattern.
 function attachJsonRpcReader(stream, responses) {
-    let buf = '';
-    stream.on('data', (d) => {
-        buf += d.toString('utf8');
-        let idx = buf.indexOf('\n');
-        while (idx !== -1) {
-            const line = buf.slice(0, idx).trim();
-            buf = buf.slice(idx + 1);
-            if (line) {
-                try {
-                    const msg = JSON.parse(line);
-                    if (msg.id != null) responses.set(msg.id, msg);
-                } catch {
-                    // ignore non-JSON lines (MCP diagnostic output etc.)
-                }
-            }
-            idx = buf.indexOf('\n');
-        }
-    });
+	let buf = "";
+	stream.on("data", (d) => {
+		buf += d.toString("utf8");
+		let idx = buf.indexOf("\n");
+		while (idx !== -1) {
+			const line = buf.slice(0, idx).trim();
+			buf = buf.slice(idx + 1);
+			if (line) {
+				try {
+					const msg = JSON.parse(line);
+					if (msg.id != null) responses.set(msg.id, msg);
+				} catch {
+					// ignore non-JSON lines (MCP diagnostic output etc.)
+				}
+			}
+			idx = buf.indexOf("\n");
+		}
+	});
 }
 
 async function driveServer(extraEnv = {}) {
-    const proc = spawn('node', [SERVER], {
-        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1', ...extraEnv },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			...extraEnv,
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
 
-    const stderrChunks = [];
-    proc.stderr.on('data', (d) => stderrChunks.push(d.toString('utf8')));
+	const stderrChunks = [];
+	proc.stderr.on("data", (d) => stderrChunks.push(d.toString("utf8")));
 
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
 
-    function call(id, method, params) {
-        return new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const timer = setTimeout(() => {
-                reject(new Error(`timeout waiting for response id=${id} method=${method}`));
-            }, 10000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(timer);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    }
+	function call(id, method, params) {
+		return new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const timer = setTimeout(() => {
+				reject(
+					new Error(`timeout waiting for response id=${id} method=${method}`),
+				);
+			}, 10000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(timer);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	}
 
-    function notify(method, params) {
-        proc.stdin.write(notifLine(method, params));
-    }
+	function notify(method, params) {
+		proc.stdin.write(notifLine(method, params));
+	}
 
-    const results = [];
+	const results = [];
 
-    try {
-        // 1) initialize
-        const init = await call(1, 'initialize', {
-            protocolVersion: '2024-11-05',
-            capabilities: {},
-            clientInfo: { name: 'smoke', version: '0.1' },
-        });
-        assert(init.result?.serverInfo?.name === 'cross-review-mcp', 'initialize: serverInfo.name');
-        results.push({ step: 'initialize', ok: true });
-        notify('notifications/initialized');
+	try {
+		// 1) initialize
+		const init = await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke", version: "0.1" },
+		});
+		assert(
+			init.result?.serverInfo?.name === "cross-review-mcp",
+			"initialize: serverInfo.name",
+		);
+		results.push({ step: "initialize", ok: true });
+		notify("notifications/initialized");
 
-        // 2) tools/list
-        const tools = await call(2, 'tools/list', {});
-        const names = tools.result.tools.map((t) => t.name).sort();
-        const expected = [
-            'ask_peer',
-            'ask_peers',
-            'escalate_to_operator',
-            'server_info',
-            'session_check_convergence',
-            'session_finalize',
-            'session_init',
-            'session_read',
-            'session_sweep',
-        ];
-        assert(
-            JSON.stringify(names) === JSON.stringify(expected),
-            `tools/list: got ${names.join(',')} expected ${expected.join(',')}`
-        );
-        results.push({ step: 'tools/list', ok: true, tools: names });
+		// 2) tools/list
+		const tools = await call(2, "tools/list", {});
+		const names = tools.result.tools.map((t) => t.name).sort();
+		const expected = [
+			"ask_peer",
+			"ask_peers",
+			"escalate_to_operator",
+			"server_info",
+			"session_check_convergence",
+			"session_finalize",
+			"session_init",
+			"session_read",
+			"session_sweep",
+		];
+		assert(
+			JSON.stringify(names) === JSON.stringify(expected),
+			`tools/list: got ${names.join(",")} expected ${expected.join(",")}`,
+		);
+		results.push({ step: "tools/list", ok: true, tools: names });
 
-        // 3) session_init
-        const init2 = await call(3, 'tools/call', {
-            name: 'session_init',
-            arguments: { task: 'smoke test', artifacts: ['C:/dummy.js'] },
-        });
-        const initPayload = JSON.parse(init2.result.content[0].text);
-        assert(typeof initPayload.session_id === 'string' && initPayload.session_id.length > 0, 'session_init: session_id');
-        assert(initPayload.caller === 'claude', 'session_init: caller');
-        assert(
-            Array.isArray(initPayload.peers) && initPayload.peers.includes('codex') && initPayload.peers.includes('gemini'),
-            'session_init: peers array contains codex and gemini'
-        );
-        assert(
-            initPayload.capability_snapshot && initPayload.capability_snapshot.skipped === true,
-            'session_init: capability_snapshot records probe skip under CROSS_REVIEW_SKIP_PROBE=1'
-        );
-        const sessionId = initPayload.session_id;
-        const sessDir = path.join(STATE_DIR, sessionId);
-        assert(fs.existsSync(path.join(sessDir, 'meta.json')), 'session_init: meta.json exists');
-        results.push({ step: 'session_init', ok: true, session_id: sessionId });
+		// 3) session_init
+		const init2 = await call(3, "tools/call", {
+			name: "session_init",
+			arguments: { task: "smoke test", artifacts: ["C:/dummy.js"] },
+		});
+		const initPayload = JSON.parse(init2.result.content[0].text);
+		assert(
+			typeof initPayload.session_id === "string" &&
+				initPayload.session_id.length > 0,
+			"session_init: session_id",
+		);
+		assert(initPayload.caller === "claude", "session_init: caller");
+		assert(
+			Array.isArray(initPayload.peers) &&
+				initPayload.peers.includes("codex") &&
+				initPayload.peers.includes("gemini"),
+			"session_init: peers array contains codex and gemini",
+		);
+		assert(
+			initPayload.capability_snapshot &&
+				initPayload.capability_snapshot.skipped === true,
+			"session_init: capability_snapshot records probe skip under CROSS_REVIEW_SKIP_PROBE=1",
+		);
+		const sessionId = initPayload.session_id;
+		const sessDir = path.join(STATE_DIR, sessionId);
+		assert(
+			fs.existsSync(path.join(sessDir, "meta.json")),
+			"session_init: meta.json exists",
+		);
+		results.push({ step: "session_init", ok: true, session_id: sessionId });
 
-        // 4) session_read
-        const read = await call(4, 'tools/call', {
-            name: 'session_read',
-            arguments: { session_id: sessionId },
-        });
-        const meta = JSON.parse(read.result.content[0].text);
-        assert(meta.task === 'smoke test', 'session_read: task');
-        assert(meta.artifacts.length === 1 && meta.artifacts[0] === 'C:/dummy.js', 'session_read: artifacts');
-        assert(Array.isArray(meta.rounds) && meta.rounds.length === 0, 'session_read: rounds empty');
-        results.push({ step: 'session_read', ok: true });
+		// 4) session_read
+		const read = await call(4, "tools/call", {
+			name: "session_read",
+			arguments: { session_id: sessionId },
+		});
+		const meta = JSON.parse(read.result.content[0].text);
+		assert(meta.task === "smoke test", "session_read: task");
+		assert(
+			meta.artifacts.length === 1 && meta.artifacts[0] === "C:/dummy.js",
+			"session_read: artifacts",
+		);
+		assert(
+			Array.isArray(meta.rounds) && meta.rounds.length === 0,
+			"session_read: rounds empty",
+		);
+		results.push({ step: "session_read", ok: true });
 
-        // 5) session_check_convergence (sem rodadas)
-        const conv = await call(5, 'tools/call', {
-            name: 'session_check_convergence',
-            arguments: { session_id: sessionId },
-        });
-        const convPayload = JSON.parse(conv.result.content[0].text);
-        assert(convPayload.converged === false, 'check_convergence: not converged yet');
-        assert(convPayload.reason === 'no rounds yet', 'check_convergence: reason');
-        results.push({ step: 'session_check_convergence', ok: true });
+		// 5) session_check_convergence (sem rodadas)
+		const conv = await call(5, "tools/call", {
+			name: "session_check_convergence",
+			arguments: { session_id: sessionId },
+		});
+		const convPayload = JSON.parse(conv.result.content[0].text);
+		assert(
+			convPayload.converged === false,
+			"check_convergence: not converged yet",
+		);
+		assert(convPayload.reason === "no rounds yet", "check_convergence: reason");
+		results.push({ step: "session_check_convergence", ok: true });
 
-        // 6) session_finalize
-        const fin = await call(6, 'tools/call', {
-            name: 'session_finalize',
-            arguments: { session_id: sessionId, outcome: 'aborted' },
-        });
-        const finPayload = JSON.parse(fin.result.content[0].text);
-        assert(finPayload.ok === true && finPayload.outcome === 'aborted', 'finalize: ok');
-        // Verify persisted
-        const meta2 = JSON.parse(
-            fs.readFileSync(path.join(sessDir, 'meta.json'), 'utf8')
-        );
-        assert(meta2.outcome === 'aborted' && typeof meta2.finalized_at === 'string', 'finalize: persisted');
-        results.push({ step: 'session_finalize', ok: true });
+		// 6) session_finalize
+		const fin = await call(6, "tools/call", {
+			name: "session_finalize",
+			arguments: { session_id: sessionId, outcome: "aborted" },
+		});
+		const finPayload = JSON.parse(fin.result.content[0].text);
+		assert(
+			finPayload.ok === true && finPayload.outcome === "aborted",
+			"finalize: ok",
+		);
+		// Verify persisted
+		const meta2 = JSON.parse(
+			fs.readFileSync(path.join(sessDir, "meta.json"), "utf8"),
+		);
+		assert(
+			meta2.outcome === "aborted" && typeof meta2.finalized_at === "string",
+			"finalize: persisted",
+		);
+		results.push({ step: "session_finalize", ok: true });
 
-        // 7) session_read after finalize
-        const read2 = await call(7, 'tools/call', {
-            name: 'session_read',
-            arguments: { session_id: sessionId },
-        });
-        const meta3 = JSON.parse(read2.result.content[0].text);
-        assert(meta3.outcome === 'aborted', 'read-after-finalize: outcome persisted');
-        results.push({ step: 'session_read (after finalize)', ok: true });
+		// 7) session_read after finalize
+		const read2 = await call(7, "tools/call", {
+			name: "session_read",
+			arguments: { session_id: sessionId },
+		});
+		const meta3 = JSON.parse(read2.result.content[0].text);
+		assert(
+			meta3.outcome === "aborted",
+			"read-after-finalize: outcome persisted",
+		);
+		results.push({ step: "session_read (after finalize)", ok: true });
 
-        // 8) error path: session_read with bad id
-        const bad = await call(8, 'tools/call', {
-            name: 'session_read',
-            arguments: { session_id: 'nonexistent-uuid-xxx' },
-        });
-        assert(bad.result.isError === true, 'read bad id: isError flag');
-        results.push({ step: 'session_read (bad id -> isError)', ok: true });
+		// 8) error path: session_read with bad id
+		const bad = await call(8, "tools/call", {
+			name: "session_read",
+			arguments: { session_id: "nonexistent-uuid-xxx" },
+		});
+		assert(bad.result.isError === true, "read bad id: isError flag");
+		results.push({ step: "session_read (bad id -> isError)", ok: true });
 
-        // Limpeza
-        if (fs.existsSync(sessDir)) {
-            fs.rmSync(sessDir, { recursive: true, force: true });
-        }
-        results.push({ step: 'cleanup', ok: true });
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
+		// Limpeza
+		if (fs.existsSync(sessDir)) {
+			fs.rmSync(sessDir, { recursive: true, force: true });
+		}
+		results.push({ step: "cleanup", ok: true });
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
 
-    return { results, stderr: stderrChunks.join('') };
+	return { results, stderr: stderrChunks.join("") };
 }
 
 function assert(cond, msg) {
-    if (!cond) throw new Error(`assertion failed: ${msg}`);
+	if (!cond) throw new Error(`assertion failed: ${msg}`);
 }
 
 // === ask_peer tests via CROSS_REVIEW_PEER_STUB ===
 // Spawn separate server instance with stub env set, exercise ask_peer +
 // bilateral convergence matrix. Stub returns a synthetic response without LLM cost.
 async function driveAskPeerMatrix() {
-    const results = [];
-    const proc = spawn('node', [SERVER], {
-        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1', CROSS_REVIEW_PEER_STUB: 'READY' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const stderrChunks = [];
-    proc.stderr.on('data', (d) => stderrChunks.push(d.toString('utf8')));
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    const notify = (method, params) => proc.stdin.write(notifLine(method, params));
+	const results = [];
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: "READY",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const stderrChunks = [];
+	proc.stderr.on("data", (d) => stderrChunks.push(d.toString("utf8")));
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	const notify = (method, params) =>
+		proc.stdin.write(notifLine(method, params));
 
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-askpeer', version: '0.1' } });
-        notify('notifications/initialized');
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-askpeer", version: "0.1" },
+		});
+		notify("notifications/initialized");
 
-        const init = await call(2, 'tools/call', { name: 'session_init', arguments: { task: 'askpeer smoke', artifacts: [] } });
-        const sid = JSON.parse(init.result.content[0].text).session_id;
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "askpeer smoke", artifacts: [] },
+		});
+		const sid = JSON.parse(init.result.content[0].text).session_id;
 
-        // Round 1: caller=NOT_READY, peer stub=READY -> not converged
-        const r1 = await call(3, 'tools/call', { name: 'ask_peer', arguments: { session_id: sid, prompt: 'test', caller_status: 'NOT_READY' } });
-        const r1Payload = JSON.parse(r1.result.content[0].text);
-        assert(r1Payload.caller_status === 'NOT_READY', 'ask_peer r1: caller_status');
-        assert(r1Payload.peer_status === 'READY', 'ask_peer r1: peer_status=READY from stub');
-        assert(r1Payload.protocol_violation === false, 'ask_peer r1: no protocol violation');
-        results.push({ step: 'ask_peer r1 (caller=NOT_READY, peer=READY)', ok: true });
+		// Round 1: caller=NOT_READY, peer stub=READY -> not converged
+		const r1 = await call(3, "tools/call", {
+			name: "ask_peer",
+			arguments: {
+				session_id: sid,
+				prompt: "test",
+				caller_status: "NOT_READY",
+			},
+		});
+		const r1Payload = JSON.parse(r1.result.content[0].text);
+		assert(
+			r1Payload.caller_status === "NOT_READY",
+			"ask_peer r1: caller_status",
+		);
+		assert(
+			r1Payload.peer_status === "READY",
+			"ask_peer r1: peer_status=READY from stub",
+		);
+		assert(
+			r1Payload.protocol_violation === false,
+			"ask_peer r1: no protocol violation",
+		);
+		results.push({
+			step: "ask_peer r1 (caller=NOT_READY, peer=READY)",
+			ok: true,
+		});
 
-        const c1 = await call(4, 'tools/call', { name: 'session_check_convergence', arguments: { session_id: sid } });
-        const c1Payload = JSON.parse(c1.result.content[0].text);
-        assert(c1Payload.converged === false, 'convergence r1: not converged');
-        assert(/caller.*NOT_READY.*peer.*READY|peer READY.*caller.*NOT_READY/i.test(c1Payload.reason), 'convergence r1: reason coherent');
-        results.push({ step: 'convergence r1 (caller NOT_READY blocks)', ok: true });
+		const c1 = await call(4, "tools/call", {
+			name: "session_check_convergence",
+			arguments: { session_id: sid },
+		});
+		const c1Payload = JSON.parse(c1.result.content[0].text);
+		assert(c1Payload.converged === false, "convergence r1: not converged");
+		assert(
+			/caller.*NOT_READY.*peer.*READY|peer READY.*caller.*NOT_READY/i.test(
+				c1Payload.reason,
+			),
+			"convergence r1: reason coherent",
+		);
+		results.push({
+			step: "convergence r1 (caller NOT_READY blocks)",
+			ok: true,
+		});
 
-        // Round 2: caller=READY, peer stub=READY -> CONVERGED
-        const r2 = await call(5, 'tools/call', { name: 'ask_peer', arguments: { session_id: sid, prompt: 'test', caller_status: 'READY' } });
-        const r2Payload = JSON.parse(r2.result.content[0].text);
-        assert(r2Payload.caller_status === 'READY', 'ask_peer r2: caller_status');
-        assert(r2Payload.peer_status === 'READY', 'ask_peer r2: peer READY');
-        results.push({ step: 'ask_peer r2 (caller=READY, peer=READY)', ok: true });
+		// Round 2: caller=READY, peer stub=READY -> CONVERGED
+		const r2 = await call(5, "tools/call", {
+			name: "ask_peer",
+			arguments: { session_id: sid, prompt: "test", caller_status: "READY" },
+		});
+		const r2Payload = JSON.parse(r2.result.content[0].text);
+		assert(r2Payload.caller_status === "READY", "ask_peer r2: caller_status");
+		assert(r2Payload.peer_status === "READY", "ask_peer r2: peer READY");
+		results.push({ step: "ask_peer r2 (caller=READY, peer=READY)", ok: true });
 
-        const c2 = await call(6, 'tools/call', { name: 'session_check_convergence', arguments: { session_id: sid } });
-        const c2Payload = JSON.parse(c2.result.content[0].text);
-        assert(c2Payload.converged === true, 'convergence r2: BILATERAL READY converged');
-        results.push({ step: 'convergence r2 (bilateral READY -> converged)', ok: true });
+		const c2 = await call(6, "tools/call", {
+			name: "session_check_convergence",
+			arguments: { session_id: sid },
+		});
+		const c2Payload = JSON.parse(c2.result.content[0].text);
+		assert(
+			c2Payload.converged === true,
+			"convergence r2: BILATERAL READY converged",
+		);
+		results.push({
+			step: "convergence r2 (bilateral READY -> converged)",
+			ok: true,
+		});
 
-        // Finalize + cleanup
-        await call(7, 'tools/call', { name: 'session_finalize', arguments: { session_id: sid, outcome: 'converged' } });
-        const sessPath = path.join(os.homedir(), '.cross-review', sid);
-        if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
-        results.push({ step: 'askpeer cleanup', ok: true });
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
+		// Finalize + cleanup
+		await call(7, "tools/call", {
+			name: "session_finalize",
+			arguments: { session_id: sid, outcome: "converged" },
+		});
+		const sessPath = path.join(os.homedir(), ".cross-review", sid);
+		if (fs.existsSync(sessPath))
+			fs.rmSync(sessPath, { recursive: true, force: true });
+		results.push({ step: "askpeer cleanup", ok: true });
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
 
-    return { results, stderr: stderrChunks.join('') };
+	return { results, stderr: stderrChunks.join("") };
 }
 
 // Test PROTOCOL_VIOLATION path: peer stub returns content without STATUS
 async function driveProtocolViolation() {
-    const results = [];
-    const proc = spawn('node', [SERVER], {
-        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1', CROSS_REVIEW_PEER_STUB: 'MISSING' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
+	const results = [];
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: "MISSING",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
 
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-violation', version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-violation", version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
 
-        const init = await call(2, 'tools/call', { name: 'session_init', arguments: { task: 'violation test', artifacts: [] } });
-        const sid = JSON.parse(init.result.content[0].text).session_id;
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "violation test", artifacts: [] },
+		});
+		const sid = JSON.parse(init.result.content[0].text).session_id;
 
-        const r = await call(3, 'tools/call', { name: 'ask_peer', arguments: { session_id: sid, prompt: 't', caller_status: 'READY' } });
-        const payload = JSON.parse(r.result.content[0].text);
-        assert(payload.peer_status === null, 'protocol violation: peer_status null');
-        assert(payload.protocol_violation === true, 'protocol violation: flag true');
-        assert(payload.peer_structured === null, 'protocol violation: peer_structured null');
-        assert(payload.status_source === null, 'protocol violation: status_source null');
-        results.push({ step: 'ask_peer with stub=MISSING -> protocol_violation', ok: true });
+		const r = await call(3, "tools/call", {
+			name: "ask_peer",
+			arguments: { session_id: sid, prompt: "t", caller_status: "READY" },
+		});
+		const payload = JSON.parse(r.result.content[0].text);
+		assert(
+			payload.peer_status === null,
+			"protocol violation: peer_status null",
+		);
+		assert(
+			payload.protocol_violation === true,
+			"protocol violation: flag true",
+		);
+		assert(
+			payload.peer_structured === null,
+			"protocol violation: peer_structured null",
+		);
+		assert(
+			payload.status_source === null,
+			"protocol violation: status_source null",
+		);
+		results.push({
+			step: "ask_peer with stub=MISSING -> protocol_violation",
+			ok: true,
+		});
 
-        const sessPath = path.join(os.homedir(), '.cross-review', sid);
-        if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
-        results.push({ step: 'violation cleanup', ok: true });
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
+		const sessPath = path.join(os.homedir(), ".cross-review", sid);
+		if (fs.existsSync(sessPath))
+			fs.rmSync(sessPath, { recursive: true, force: true });
+		results.push({ step: "violation cleanup", ok: true });
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
 
-    return { results };
+	return { results };
 }
 
 // Helper: spawn server, do one ask_peer, return payload+session_id for assertions
-async function oneShotAskPeer(stubValue, callerStatus = 'NOT_READY') {
-    const proc = spawn('node', [SERVER], {
-        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1', CROSS_REVIEW_PEER_STUB: stubValue },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: `smoke-${stubValue}`, version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
-        const init = await call(2, 'tools/call', { name: 'session_init', arguments: { task: `stub=${stubValue}`, artifacts: [] } });
-        const sid = JSON.parse(init.result.content[0].text).session_id;
-        const r = await call(3, 'tools/call', { name: 'ask_peer', arguments: { session_id: sid, prompt: 'test', caller_status: callerStatus } });
-        const payload = JSON.parse(r.result.content[0].text);
-        const conv = await call(4, 'tools/call', { name: 'session_check_convergence', arguments: { session_id: sid } });
-        const convPayload = JSON.parse(conv.result.content[0].text);
-        return { sessionId: sid, payload, convPayload };
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
+async function oneShotAskPeer(stubValue, callerStatus = "NOT_READY") {
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: stubValue,
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: `smoke-${stubValue}`, version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: `stub=${stubValue}`, artifacts: [] },
+		});
+		const sid = JSON.parse(init.result.content[0].text).session_id;
+		const r = await call(3, "tools/call", {
+			name: "ask_peer",
+			arguments: {
+				session_id: sid,
+				prompt: "test",
+				caller_status: callerStatus,
+			},
+		});
+		const payload = JSON.parse(r.result.content[0].text);
+		const conv = await call(4, "tools/call", {
+			name: "session_check_convergence",
+			arguments: { session_id: sid },
+		});
+		const convPayload = JSON.parse(conv.result.content[0].text);
+		return { sessionId: sid, payload, convPayload };
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
 }
 
 function cleanupSession(sid) {
-    const sessPath = path.join(os.homedir(), '.cross-review', sid);
-    if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
+	const sessPath = path.join(os.homedir(), ".cross-review", sid);
+	if (fs.existsSync(sessPath))
+		fs.rmSync(sessPath, { recursive: true, force: true });
 }
 
 // Test NEEDS_EVIDENCE (legacy line form): status parsed, does not converge, reason string mentions evidence.
 async function driveNeedsEvidenceLegacy() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('NEEDS_EVIDENCE', 'NOT_READY');
-    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'legacy NEEDS_EVIDENCE: peer_status');
-    assert(payload.status_source === 'regex', 'legacy NEEDS_EVIDENCE: status_source=regex');
-    assert(payload.peer_structured === null, 'legacy NEEDS_EVIDENCE: no structured');
-    assert(payload.protocol_violation === false, 'legacy NEEDS_EVIDENCE: no violation');
-    assert(convPayload.converged === false, 'legacy NEEDS_EVIDENCE: not converged');
-    assert(/NEEDS_EVIDENCE/.test(convPayload.reason), 'legacy NEEDS_EVIDENCE: reason mentions status');
-    assert(/evidence/i.test(convPayload.reason), 'legacy NEEDS_EVIDENCE: reason mentions evidence');
-    results.push({ step: 'ask_peer legacy NEEDS_EVIDENCE -> not converged + reason mentions evidence', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'needs-evidence-legacy cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"NEEDS_EVIDENCE",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === "NEEDS_EVIDENCE",
+		"legacy NEEDS_EVIDENCE: peer_status",
+	);
+	assert(
+		payload.status_source === "regex",
+		"legacy NEEDS_EVIDENCE: status_source=regex",
+	);
+	assert(
+		payload.peer_structured === null,
+		"legacy NEEDS_EVIDENCE: no structured",
+	);
+	assert(
+		payload.protocol_violation === false,
+		"legacy NEEDS_EVIDENCE: no violation",
+	);
+	assert(
+		convPayload.converged === false,
+		"legacy NEEDS_EVIDENCE: not converged",
+	);
+	assert(
+		/NEEDS_EVIDENCE/.test(convPayload.reason),
+		"legacy NEEDS_EVIDENCE: reason mentions status",
+	);
+	assert(
+		/evidence/i.test(convPayload.reason),
+		"legacy NEEDS_EVIDENCE: reason mentions evidence",
+	);
+	results.push({
+		step: "ask_peer legacy NEEDS_EVIDENCE -> not converged + reason mentions evidence",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "needs-evidence-legacy cleanup", ok: true });
+	return { results };
 }
 
 // Test structured block happy path: READY from block, no regex fallback needed
 async function driveStructuredReady() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('STRUCTURED:READY', 'READY');
-    assert(payload.peer_status === 'READY', 'structured READY: peer_status');
-    assert(payload.status_source === 'structured', 'structured READY: source');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'structured READY: structured payload');
-    assert(convPayload.converged === true, 'structured READY: bilateral converged');
-    results.push({ step: 'ask_peer STRUCTURED:READY -> source=structured + converged', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'structured-ready cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"STRUCTURED:READY",
+		"READY",
+	);
+	assert(payload.peer_status === "READY", "structured READY: peer_status");
+	assert(payload.status_source === "structured", "structured READY: source");
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"structured READY: structured payload",
+	);
+	assert(
+		convPayload.converged === true,
+		"structured READY: bilateral converged",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED:READY -> source=structured + converged",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "structured-ready cleanup", ok: true });
+	return { results };
 }
 
 // Test structured NEEDS_EVIDENCE: status from block, not converged
 async function driveStructuredNeedsEvidence() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('STRUCTURED:NEEDS_EVIDENCE', 'NOT_READY');
-    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'structured NEEDS_EVIDENCE: status');
-    assert(payload.status_source === 'structured', 'structured NEEDS_EVIDENCE: source');
-    assert(payload.peer_structured.status === 'NEEDS_EVIDENCE', 'structured NEEDS_EVIDENCE: payload');
-    assert(convPayload.converged === false, 'structured NEEDS_EVIDENCE: not converged');
-    assert(/NEEDS_EVIDENCE/.test(convPayload.reason) && /evidence/i.test(convPayload.reason), 'structured NEEDS_EVIDENCE: reason coherent');
-    results.push({ step: 'ask_peer STRUCTURED:NEEDS_EVIDENCE -> not converged + evidence guidance', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'structured-needs-evidence cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"STRUCTURED:NEEDS_EVIDENCE",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === "NEEDS_EVIDENCE",
+		"structured NEEDS_EVIDENCE: status",
+	);
+	assert(
+		payload.status_source === "structured",
+		"structured NEEDS_EVIDENCE: source",
+	);
+	assert(
+		payload.peer_structured.status === "NEEDS_EVIDENCE",
+		"structured NEEDS_EVIDENCE: payload",
+	);
+	assert(
+		convPayload.converged === false,
+		"structured NEEDS_EVIDENCE: not converged",
+	);
+	assert(
+		/NEEDS_EVIDENCE/.test(convPayload.reason) &&
+			/evidence/i.test(convPayload.reason),
+		"structured NEEDS_EVIDENCE: reason coherent",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED:NEEDS_EVIDENCE -> not converged + evidence guidance",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "structured-needs-evidence cleanup", ok: true });
+	return { results };
 }
 
 // Semantic: last-non-empty-content wins. Structured block early + regex STATUS late -> regex wins.
 async function driveRegexLastWins() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_EARLY_REGEX_LAST:READY:NOT_READY', 'NOT_READY');
-    assert(payload.peer_status === 'NOT_READY', 'last-line anchor: regex NOT_READY wins when STATUS line is last non-empty');
-    assert(payload.status_source === 'regex', 'last-line anchor: source=regex');
-    assert(payload.peer_structured === null, 'last-line anchor: structured null because regex path taken');
-    results.push({ step: 'ask_peer STRUCTURED_EARLY_REGEX_LAST -> regex (last line) wins', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'regex-last-wins cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_EARLY_REGEX_LAST:READY:NOT_READY",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === "NOT_READY",
+		"last-line anchor: regex NOT_READY wins when STATUS line is last non-empty",
+	);
+	assert(payload.status_source === "regex", "last-line anchor: source=regex");
+	assert(
+		payload.peer_structured === null,
+		"last-line anchor: structured null because regex path taken",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_EARLY_REGEX_LAST -> regex (last line) wins",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "regex-last-wins cleanup", ok: true });
+	return { results };
 }
 
 // Semantic: structured block as TAIL wins even if STATUS line appears earlier.
 async function driveStructuredTailWins() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_LAST_REGEX_EARLY:NOT_READY:READY', 'READY');
-    assert(payload.peer_status === 'READY', 'tail anchor: structured READY tail wins over earlier STATUS NOT_READY');
-    assert(payload.status_source === 'structured', 'tail anchor: source=structured');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'tail anchor: payload READY');
-    results.push({ step: 'ask_peer STRUCTURED_LAST_REGEX_EARLY -> structured (tail) wins', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'structured-tail-wins cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_LAST_REGEX_EARLY:NOT_READY:READY",
+		"READY",
+	);
+	assert(
+		payload.peer_status === "READY",
+		"tail anchor: structured READY tail wins over earlier STATUS NOT_READY",
+	);
+	assert(
+		payload.status_source === "structured",
+		"tail anchor: source=structured",
+	);
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"tail anchor: payload READY",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_LAST_REGEX_EARLY -> structured (tail) wins",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "structured-tail-wins cleanup", ok: true });
+	return { results };
 }
 
 // Malformed structured tail: closing tag ends text but JSON is invalid -> status null (no regex fallback because tail is closing tag).
 async function driveMalformedStructuredTail() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('MALFORMED_STRUCTURED_TAIL', 'NOT_READY');
-    assert(payload.peer_status === null, 'malformed tail: status null');
-    assert(payload.status_source === null, 'malformed tail: source null');
-    assert(payload.peer_structured === null, 'malformed tail: structured null');
-    assert(payload.protocol_violation === true, 'malformed tail: protocol_violation flag');
-    assert(convPayload.converged === false, 'malformed tail: not converged');
-    results.push({ step: 'ask_peer MALFORMED_STRUCTURED_TAIL -> protocol_violation, no regex fallback', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'malformed-tail cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"MALFORMED_STRUCTURED_TAIL",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === null, "malformed tail: status null");
+	assert(payload.status_source === null, "malformed tail: source null");
+	assert(payload.peer_structured === null, "malformed tail: structured null");
+	assert(
+		payload.protocol_violation === true,
+		"malformed tail: protocol_violation flag",
+	);
+	assert(convPayload.converged === false, "malformed tail: not converged");
+	results.push({
+		step: "ask_peer MALFORMED_STRUCTURED_TAIL -> protocol_violation, no regex fallback",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "malformed-tail cleanup", ok: true });
+	return { results };
 }
 
 // Invalid status inside structured tail: JSON parses but status not in enum -> null.
 async function driveInvalidStatusStructuredTail() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('INVALID_STATUS_STRUCTURED_TAIL', 'NOT_READY');
-    assert(payload.peer_status === null, 'invalid status: null');
-    assert(payload.status_source === null, 'invalid status: source null');
-    assert(payload.peer_structured === null, 'invalid status: structured nullified (not persisting garbage)');
-    assert(payload.protocol_violation === true, 'invalid status: protocol_violation');
-    results.push({ step: 'ask_peer INVALID_STATUS_STRUCTURED_TAIL -> status null, structured nullified', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'invalid-status-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"INVALID_STATUS_STRUCTURED_TAIL",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === null, "invalid status: null");
+	assert(payload.status_source === null, "invalid status: source null");
+	assert(
+		payload.peer_structured === null,
+		"invalid status: structured nullified (not persisting garbage)",
+	);
+	assert(
+		payload.protocol_violation === true,
+		"invalid status: protocol_violation",
+	);
+	results.push({
+		step: "ask_peer INVALID_STATUS_STRUCTURED_TAIL -> status null, structured nullified",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "invalid-status-cleanup", ok: true });
+	return { results };
 }
 
 // Lowercase STATUS line: regex is case-sensitive -> reject.
 async function driveLowercaseRejected() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('LOWERCASE_STATUS', 'NOT_READY');
-    assert(payload.peer_status === null, 'lowercase: rejected');
-    assert(payload.protocol_violation === true, 'lowercase: protocol_violation');
-    results.push({ step: 'ask_peer LOWERCASE_STATUS -> rejected (case-sensitive)', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'lowercase-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"LOWERCASE_STATUS",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === null, "lowercase: rejected");
+	assert(payload.protocol_violation === true, "lowercase: protocol_violation");
+	results.push({
+		step: "ask_peer LOWERCASE_STATUS -> rejected (case-sensitive)",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "lowercase-cleanup", ok: true });
+	return { results };
 }
 
 // Prose mention of STATUS line: should not trigger false positive (tail must be the STATUS line).
 async function driveProseStatusNoFalsePositive() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('PROSE_MENTION_STATUS', 'NOT_READY');
-    assert(payload.peer_status === null, 'prose mention STATUS: no false positive');
-    assert(payload.protocol_violation === true, 'prose mention STATUS: protocol_violation');
-    results.push({ step: 'ask_peer PROSE_MENTION_STATUS -> no false positive', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'prose-status-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"PROSE_MENTION_STATUS",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === null,
+		"prose mention STATUS: no false positive",
+	);
+	assert(
+		payload.protocol_violation === true,
+		"prose mention STATUS: protocol_violation",
+	);
+	results.push({
+		step: "ask_peer PROSE_MENTION_STATUS -> no false positive",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "prose-status-cleanup", ok: true });
+	return { results };
 }
 
 // Prose mention of structured block: tail is prose, not closing tag -> no match.
 async function driveProseBlockNoFalsePositive() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('PROSE_MENTION_BLOCK', 'NOT_READY');
-    assert(payload.peer_status === null, 'prose mention block: no false positive');
-    assert(payload.protocol_violation === true, 'prose mention block: protocol_violation');
-    results.push({ step: 'ask_peer PROSE_MENTION_BLOCK -> no false positive (tail is prose, not closing tag)', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'prose-block-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"PROSE_MENTION_BLOCK",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === null,
+		"prose mention block: no false positive",
+	);
+	assert(
+		payload.protocol_violation === true,
+		"prose mention block: protocol_violation",
+	);
+	results.push({
+		step: "ask_peer PROSE_MENTION_BLOCK -> no false positive (tail is prose, not closing tag)",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "prose-block-cleanup", ok: true });
+	return { results };
 }
 
 // Two structured blocks: the later (tail) wins.
 async function driveDoubleStructured() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('DOUBLE_STRUCTURED:NOT_READY:READY', 'READY');
-    assert(payload.peer_status === 'READY', 'double structured: last (tail) wins');
-    assert(payload.status_source === 'structured', 'double structured: source=structured');
-    assert(payload.peer_structured.status === 'READY', 'double structured: payload matches last block');
-    results.push({ step: 'ask_peer DOUBLE_STRUCTURED -> tail wins', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'double-structured-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"DOUBLE_STRUCTURED:NOT_READY:READY",
+		"READY",
+	);
+	assert(
+		payload.peer_status === "READY",
+		"double structured: last (tail) wins",
+	);
+	assert(
+		payload.status_source === "structured",
+		"double structured: source=structured",
+	);
+	assert(
+		payload.peer_structured.status === "READY",
+		"double structured: payload matches last block",
+	);
+	results.push({ step: "ask_peer DOUBLE_STRUCTURED -> tail wins", ok: true });
+	cleanupSession(sessionId);
+	results.push({ step: "double-structured-cleanup", ok: true });
+	return { results };
 }
 
 // Multi-line pretty-printed JSON inside the structured block.
 async function driveMultilineStructured() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('MULTILINE_STRUCTURED:READY', 'READY');
-    assert(payload.peer_status === 'READY', 'multiline structured: status parsed');
-    assert(payload.status_source === 'structured', 'multiline structured: source=structured');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'multiline structured: payload');
-    assert(convPayload.converged === true, 'multiline structured: bilateral converged');
-    results.push({ step: 'ask_peer MULTILINE_STRUCTURED -> parser tolerates pretty-printed JSON between tags', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'multiline-structured-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"MULTILINE_STRUCTURED:READY",
+		"READY",
+	);
+	assert(
+		payload.peer_status === "READY",
+		"multiline structured: status parsed",
+	);
+	assert(
+		payload.status_source === "structured",
+		"multiline structured: source=structured",
+	);
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"multiline structured: payload",
+	);
+	assert(
+		convPayload.converged === true,
+		"multiline structured: bilateral converged",
+	);
+	results.push({
+		step: "ask_peer MULTILINE_STRUCTURED -> parser tolerates pretty-printed JSON between tags",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "multiline-structured-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: schema expandido -- STRUCTURED_V4_FULL com todos os campos validos.
 async function driveStructuredV4Full() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_FULL', 'READY');
-    assert(payload.peer_status === 'READY', 'v4 full: status');
-    assert(payload.status_source === 'structured', 'v4 full: source');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 full: structured.status');
-    assert(payload.peer_structured.uncertainty === 'low', 'v4 full: uncertainty persisted');
-    assert(Array.isArray(payload.peer_structured.caller_requests) && payload.peer_structured.caller_requests.length === 2, 'v4 full: caller_requests persisted');
-    assert(Array.isArray(payload.peer_structured.follow_ups) && payload.peer_structured.follow_ups.length === 1, 'v4 full: follow_ups persisted');
-    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 0, 'v4 full: no warnings');
-    assert(payload.peer_model === 'stub', 'v4 full: peer_model persisted');
-    results.push({ step: 'ask_peer STRUCTURED_V4_FULL -> all fields validated, no warnings, peer_model stub', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-full-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_FULL",
+		"READY",
+	);
+	assert(payload.peer_status === "READY", "v4 full: status");
+	assert(payload.status_source === "structured", "v4 full: source");
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"v4 full: structured.status",
+	);
+	assert(
+		payload.peer_structured.uncertainty === "low",
+		"v4 full: uncertainty persisted",
+	);
+	assert(
+		Array.isArray(payload.peer_structured.caller_requests) &&
+			payload.peer_structured.caller_requests.length === 2,
+		"v4 full: caller_requests persisted",
+	);
+	assert(
+		Array.isArray(payload.peer_structured.follow_ups) &&
+			payload.peer_structured.follow_ups.length === 1,
+		"v4 full: follow_ups persisted",
+	);
+	assert(
+		Array.isArray(payload.parser_warnings) &&
+			payload.parser_warnings.length === 0,
+		"v4 full: no warnings",
+	);
+	assert(payload.peer_model === "stub", "v4 full: peer_model persisted");
+	results.push({
+		step: "ask_peer STRUCTURED_V4_FULL -> all fields validated, no warnings, peer_model stub",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-full-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: uncertainty with invalid value -- field dropped + warning, status preserved.
 async function driveStructuredV4BadUncertainty() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_UNCERTAINTY', 'READY');
-    assert(payload.peer_status === 'READY', 'v4 bad uncertainty: status preserved');
-    assert(payload.status_source === 'structured', 'v4 bad uncertainty: source still structured');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 bad uncertainty: structured.status');
-    assert(!('uncertainty' in payload.peer_structured), 'v4 bad uncertainty: invalid uncertainty DROPPED from structured');
-    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 1, 'v4 bad uncertainty: exactly one warning');
-    assert(/uncertainty has invalid shape/.test(payload.parser_warnings[0]), 'v4 bad uncertainty: warning message');
-    assert(payload.protocol_violation === false, 'v4 bad uncertainty: NOT a protocol violation (status was valid)');
-    results.push({ step: 'ask_peer STRUCTURED_V4_BAD_UNCERTAINTY -> uncertainty dropped + warning, status preserved', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-bad-uncertainty-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_BAD_UNCERTAINTY",
+		"READY",
+	);
+	assert(
+		payload.peer_status === "READY",
+		"v4 bad uncertainty: status preserved",
+	);
+	assert(
+		payload.status_source === "structured",
+		"v4 bad uncertainty: source still structured",
+	);
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"v4 bad uncertainty: structured.status",
+	);
+	assert(
+		!("uncertainty" in payload.peer_structured),
+		"v4 bad uncertainty: invalid uncertainty DROPPED from structured",
+	);
+	assert(
+		Array.isArray(payload.parser_warnings) &&
+			payload.parser_warnings.length === 1,
+		"v4 bad uncertainty: exactly one warning",
+	);
+	assert(
+		/uncertainty has invalid shape/.test(payload.parser_warnings[0]),
+		"v4 bad uncertainty: warning message",
+	);
+	assert(
+		payload.protocol_violation === false,
+		"v4 bad uncertainty: NOT a protocol violation (status was valid)",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_BAD_UNCERTAINTY -> uncertainty dropped + warning, status preserved",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-bad-uncertainty-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: caller_requests non-array -- invalid shape first in the order.
 async function driveStructuredV4BadCallerRequestsShape() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE', 'NOT_READY');
-    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 bad cr shape: status');
-    assert(!('caller_requests' in payload.peer_structured), 'v4 bad cr shape: caller_requests DROPPED');
-    assert(payload.parser_warnings.length === 1, 'v4 bad cr shape: one warning');
-    assert(/caller_requests has invalid shape/.test(payload.parser_warnings[0]), 'v4 bad cr shape: warning message');
-    results.push({ step: 'ask_peer STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE -> non-array dropped + warning', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-bad-cr-shape-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === "NEEDS_EVIDENCE", "v4 bad cr shape: status");
+	assert(
+		!("caller_requests" in payload.peer_structured),
+		"v4 bad cr shape: caller_requests DROPPED",
+	);
+	assert(payload.parser_warnings.length === 1, "v4 bad cr shape: one warning");
+	assert(
+		/caller_requests has invalid shape/.test(payload.parser_warnings[0]),
+		"v4 bad cr shape: warning message",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_BAD_CALLER_REQUESTS_SHAPE -> non-array dropped + warning",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-bad-cr-shape-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: non-string item inside array (deterministic rule: shape OK, qty OK, item type NOT OK -> reject at item type).
 async function driveStructuredV4NonStringItem() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_NON_STRING_ITEM', 'READY');
-    assert(payload.peer_status === 'READY', 'v4 non-string item: status');
-    assert(!('follow_ups' in payload.peer_structured), 'v4 non-string item: follow_ups DROPPED');
-    assert(payload.parser_warnings.length === 1, 'v4 non-string item: one warning');
-    assert(/follow_ups has invalid item at index 1/.test(payload.parser_warnings[0]), 'v4 non-string item: warning specifies index');
-    results.push({ step: 'ask_peer STRUCTURED_V4_NON_STRING_ITEM -> array dropped + warning with index', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-non-string-item-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_NON_STRING_ITEM",
+		"READY",
+	);
+	assert(payload.peer_status === "READY", "v4 non-string item: status");
+	assert(
+		!("follow_ups" in payload.peer_structured),
+		"v4 non-string item: follow_ups DROPPED",
+	);
+	assert(
+		payload.parser_warnings.length === 1,
+		"v4 non-string item: one warning",
+	);
+	assert(
+		/follow_ups has invalid item at index 1/.test(payload.parser_warnings[0]),
+		"v4 non-string item: warning specifies index",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_NON_STRING_ITEM -> array dropped + warning with index",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-non-string-item-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: >20 items -- quantidade excedida.
 async function driveStructuredV4TooManyCallerRequests() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS', 'NOT_READY');
-    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 too many: status');
-    assert(!('caller_requests' in payload.peer_structured), 'v4 too many: caller_requests DROPPED');
-    assert(payload.parser_warnings.length === 1, 'v4 too many: one warning');
-    assert(/caller_requests exceeds 20 items \(got 21\)/.test(payload.parser_warnings[0]), 'v4 too many: warning message');
-    results.push({ step: 'ask_peer STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS -> array dropped + warning with count', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-too-many-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === "NEEDS_EVIDENCE", "v4 too many: status");
+	assert(
+		!("caller_requests" in payload.peer_structured),
+		"v4 too many: caller_requests DROPPED",
+	);
+	assert(payload.parser_warnings.length === 1, "v4 too many: one warning");
+	assert(
+		/caller_requests exceeds 20 items \(got 21\)/.test(
+			payload.parser_warnings[0],
+		),
+		"v4 too many: warning message",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_TOO_MANY_CALLER_REQUESTS -> array dropped + warning with count",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-too-many-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: item >500 chars -- tamanho excedido.
 async function driveStructuredV4OversizedItem() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_OVERSIZED_ITEM', 'NOT_READY');
-    assert(payload.peer_status === 'NEEDS_EVIDENCE', 'v4 oversized: status');
-    assert(!('caller_requests' in payload.peer_structured), 'v4 oversized: caller_requests DROPPED');
-    assert(payload.parser_warnings.length === 1, 'v4 oversized: one warning');
-    assert(/caller_requests item at index 1 exceeds 500 chars/.test(payload.parser_warnings[0]), 'v4 oversized: warning message');
-    results.push({ step: 'ask_peer STRUCTURED_V4_OVERSIZED_ITEM -> array dropped + warning with index+size', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-oversized-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_OVERSIZED_ITEM",
+		"NOT_READY",
+	);
+	assert(payload.peer_status === "NEEDS_EVIDENCE", "v4 oversized: status");
+	assert(
+		!("caller_requests" in payload.peer_structured),
+		"v4 oversized: caller_requests DROPPED",
+	);
+	assert(payload.parser_warnings.length === 1, "v4 oversized: one warning");
+	assert(
+		/caller_requests item at index 1 exceeds 500 chars/.test(
+			payload.parser_warnings[0],
+		),
+		"v4 oversized: warning message",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_OVERSIZED_ITEM -> array dropped + warning with index+size",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-oversized-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: fields outside the whitelist -- dropped + one warning each.
 async function driveStructuredV4UnknownField() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_UNKNOWN_FIELD', 'READY');
-    assert(payload.peer_status === 'READY', 'v4 unknown field: status');
-    assert(payload.peer_structured && payload.peer_structured.status === 'READY', 'v4 unknown field: structured.status');
-    assert(!('extra' in payload.peer_structured), 'v4 unknown field: extra dropped');
-    assert(!('another_unknown' in payload.peer_structured), 'v4 unknown field: another_unknown dropped');
-    assert(payload.parser_warnings.length === 2, 'v4 unknown field: two warnings');
-    assert(payload.parser_warnings.some((w) => /unknown field 'extra' ignored/.test(w)), 'v4 unknown field: extra warning');
-    assert(payload.parser_warnings.some((w) => /unknown field 'another_unknown' ignored/.test(w)), 'v4 unknown field: another warning');
-    results.push({ step: 'ask_peer STRUCTURED_V4_UNKNOWN_FIELD -> 2 unknown fields dropped + 2 warnings', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-unknown-field-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_UNKNOWN_FIELD",
+		"READY",
+	);
+	assert(payload.peer_status === "READY", "v4 unknown field: status");
+	assert(
+		payload.peer_structured && payload.peer_structured.status === "READY",
+		"v4 unknown field: structured.status",
+	);
+	assert(
+		!("extra" in payload.peer_structured),
+		"v4 unknown field: extra dropped",
+	);
+	assert(
+		!("another_unknown" in payload.peer_structured),
+		"v4 unknown field: another_unknown dropped",
+	);
+	assert(
+		payload.parser_warnings.length === 2,
+		"v4 unknown field: two warnings",
+	);
+	assert(
+		payload.parser_warnings.some((w) =>
+			/unknown field 'extra' ignored/.test(w),
+		),
+		"v4 unknown field: extra warning",
+	);
+	assert(
+		payload.parser_warnings.some((w) =>
+			/unknown field 'another_unknown' ignored/.test(w),
+		),
+		"v4 unknown field: another warning",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_UNKNOWN_FIELD -> 2 unknown fields dropped + 2 warnings",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-unknown-field-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: arrays vazios normalizados para ausencia, sem warnings.
 async function driveStructuredV4EmptyArrays() {
-    const results = [];
-    const { sessionId, payload } = await oneShotAskPeer('STRUCTURED_V4_EMPTY_ARRAYS', 'READY');
-    assert(payload.peer_status === 'READY', 'v4 empty arrays: status');
-    assert(!('caller_requests' in payload.peer_structured), 'v4 empty arrays: empty caller_requests normalized to absent');
-    assert(!('follow_ups' in payload.peer_structured), 'v4 empty arrays: empty follow_ups normalized to absent');
-    assert(payload.parser_warnings.length === 0, 'v4 empty arrays: no warnings (empty equals absent)');
-    results.push({ step: 'ask_peer STRUCTURED_V4_EMPTY_ARRAYS -> empty arrays normalized to absent, no warnings', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'v4-empty-arrays-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload } = await oneShotAskPeer(
+		"STRUCTURED_V4_EMPTY_ARRAYS",
+		"READY",
+	);
+	assert(payload.peer_status === "READY", "v4 empty arrays: status");
+	assert(
+		!("caller_requests" in payload.peer_structured),
+		"v4 empty arrays: empty caller_requests normalized to absent",
+	);
+	assert(
+		!("follow_ups" in payload.peer_structured),
+		"v4 empty arrays: empty follow_ups normalized to absent",
+	);
+	assert(
+		payload.parser_warnings.length === 0,
+		"v4 empty arrays: no warnings (empty equals absent)",
+	);
+	results.push({
+		step: "ask_peer STRUCTURED_V4_EMPTY_ARRAYS -> empty arrays normalized to absent, no warnings",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "v4-empty-arrays-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: fecha gap 4f5d45f6 -- opening tag sem closing tag, cai em legacy sem canonical -> null.
 async function driveStructuredOpenNoClose() {
-    const results = [];
-    const { sessionId, payload, convPayload } = await oneShotAskPeer('STRUCTURED_OPEN_NO_CLOSE', 'NOT_READY');
-    assert(payload.peer_status === null, 'open-no-close: status null (fall through to legacy, no canonical STATUS line)');
-    assert(payload.status_source === null, 'open-no-close: source null');
-    assert(payload.peer_structured === null, 'open-no-close: structured null');
-    assert(payload.protocol_violation === true, 'open-no-close: protocol_violation true');
-    assert(Array.isArray(payload.parser_warnings) && payload.parser_warnings.length === 0, 'open-no-close: no warnings (failed before validation)');
-    assert(convPayload.converged === false, 'open-no-close: not converged');
-    results.push({ step: 'ask_peer STRUCTURED_OPEN_NO_CLOSE -> tail not closing tag, legacy fails, null (closes 4f5d45f6 gap)', ok: true });
-    cleanupSession(sessionId);
-    results.push({ step: 'open-no-close-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId, payload, convPayload } = await oneShotAskPeer(
+		"STRUCTURED_OPEN_NO_CLOSE",
+		"NOT_READY",
+	);
+	assert(
+		payload.peer_status === null,
+		"open-no-close: status null (fall through to legacy, no canonical STATUS line)",
+	);
+	assert(payload.status_source === null, "open-no-close: source null");
+	assert(payload.peer_structured === null, "open-no-close: structured null");
+	assert(
+		payload.protocol_violation === true,
+		"open-no-close: protocol_violation true",
+	);
+	assert(
+		Array.isArray(payload.parser_warnings) &&
+			payload.parser_warnings.length === 0,
+		"open-no-close: no warnings (failed before validation)",
+	);
+	assert(convPayload.converged === false, "open-no-close: not converged");
+	results.push({
+		step: "ask_peer STRUCTURED_OPEN_NO_CLOSE -> tail not closing tag, legacy fails, null (closes 4f5d45f6 gap)",
+		ok: true,
+	});
+	cleanupSession(sessionId);
+	results.push({ step: "open-no-close-cleanup", ok: true });
+	return { results };
 }
 
 // v0.4.0: persistencia de parser_warnings e peer_model em meta.json.rounds[i] via session_read.
 async function drivePeerModelAndWarningsPersisted() {
-    const results = [];
-    const { sessionId } = await oneShotAskPeer('STRUCTURED_V4_BAD_UNCERTAINTY', 'NOT_READY');
-    // Open a separate server to session_read the persisted meta.
-    const proc = spawn('node', [SERVER], {
-        env: { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-persist', version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
-        const readResp = await call(2, 'tools/call', { name: 'session_read', arguments: { session_id: sessionId } });
-        const meta = JSON.parse(readResp.result.content[0].text);
-        assert(Array.isArray(meta.rounds) && meta.rounds.length === 1, 'persist: one round recorded');
-        const round = meta.rounds[0];
-        assert(round.peer_model === 'stub', 'persist: peer_model persisted in meta.rounds[0]');
-        assert(Array.isArray(round.parser_warnings) && round.parser_warnings.length === 1, 'persist: parser_warnings persisted');
-        assert(/uncertainty has invalid shape/.test(round.parser_warnings[0]), 'persist: warning message preserved');
-        results.push({ step: 'session_read -> meta.rounds[0] has peer_model and parser_warnings persisted', ok: true });
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
-    cleanupSession(sessionId);
-    results.push({ step: 'persist-check-cleanup', ok: true });
-    return { results };
+	const results = [];
+	const { sessionId } = await oneShotAskPeer(
+		"STRUCTURED_V4_BAD_UNCERTAINTY",
+		"NOT_READY",
+	);
+	// Open a separate server to session_read the persisted meta.
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-persist", version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
+		const readResp = await call(2, "tools/call", {
+			name: "session_read",
+			arguments: { session_id: sessionId },
+		});
+		const meta = JSON.parse(readResp.result.content[0].text);
+		assert(
+			Array.isArray(meta.rounds) && meta.rounds.length === 1,
+			"persist: one round recorded",
+		);
+		const round = meta.rounds[0];
+		assert(
+			round.peer_model === "stub",
+			"persist: peer_model persisted in meta.rounds[0]",
+		);
+		assert(
+			Array.isArray(round.parser_warnings) &&
+				round.parser_warnings.length === 1,
+			"persist: parser_warnings persisted",
+		);
+		assert(
+			/uncertainty has invalid shape/.test(round.parser_warnings[0]),
+			"persist: warning message preserved",
+		);
+		results.push({
+			step: "session_read -> meta.rounds[0] has peer_model and parser_warnings persisted",
+			ok: true,
+		});
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
+	cleanupSession(sessionId);
+	results.push({ step: "persist-check-cleanup", ok: true });
+	return { results };
 }
 
 async function runAll() {
-    const all = [];
-    const s1 = await driveServer();
-    all.push(...s1.results);
-    const s2 = await driveAskPeerMatrix();
-    all.push(...s2.results);
-    const s3 = await driveProtocolViolation();
-    all.push(...s3.results);
-    const s4 = await driveNeedsEvidenceLegacy();
-    all.push(...s4.results);
-    const s5 = await driveStructuredReady();
-    all.push(...s5.results);
-    const s6 = await driveStructuredNeedsEvidence();
-    all.push(...s6.results);
-    const s7 = await driveRegexLastWins();
-    all.push(...s7.results);
-    const s8 = await driveStructuredTailWins();
-    all.push(...s8.results);
-    const s9 = await driveMalformedStructuredTail();
-    all.push(...s9.results);
-    const s10 = await driveInvalidStatusStructuredTail();
-    all.push(...s10.results);
-    const s11 = await driveLowercaseRejected();
-    all.push(...s11.results);
-    const s12 = await driveProseStatusNoFalsePositive();
-    all.push(...s12.results);
-    const s13 = await driveProseBlockNoFalsePositive();
-    all.push(...s13.results);
-    const s14 = await driveDoubleStructured();
-    all.push(...s14.results);
-    const s15 = await driveMultilineStructured();
-    all.push(...s15.results);
-    // v0.4.0: schema expandido.
-    const s16 = await driveStructuredV4Full();
-    all.push(...s16.results);
-    const s17 = await driveStructuredV4BadUncertainty();
-    all.push(...s17.results);
-    const s18 = await driveStructuredV4BadCallerRequestsShape();
-    all.push(...s18.results);
-    const s19 = await driveStructuredV4NonStringItem();
-    all.push(...s19.results);
-    const s20 = await driveStructuredV4TooManyCallerRequests();
-    all.push(...s20.results);
-    const s21 = await driveStructuredV4OversizedItem();
-    all.push(...s21.results);
-    const s22 = await driveStructuredV4UnknownField();
-    all.push(...s22.results);
-    const s23 = await driveStructuredV4EmptyArrays();
-    all.push(...s23.results);
-    const s24 = await driveStructuredOpenNoClose();
-    all.push(...s24.results);
-    const s25 = await drivePeerModelAndWarningsPersisted();
-    all.push(...s25.results);
-    const s26 = await drivePeerSpawnRealPathModel();
-    all.push(...s26.results);
-    const s27 = await driveModelParserUnit();
-    all.push(...s27.results);
-    const s28 = await driveGeminiArgsShape();
-    all.push(...s28.results);
-    const s29 = await driveSpawnPeersIdentityShape();
-    all.push(...s29.results);
-    const s30 = await driveProbeStubShape();
-    all.push(...s30.results);
-    const s31 = await driveSessionStoreUnit();
-    all.push(...s31.results);
-    const s32 = await driveAskPeersNAry();
-    all.push(...s32.results);
-    const s33 = await driveAskPeerGeminiCallerRejected();
-    all.push(...s33.results);
-    const s34 = await driveModelCheckMatchViaServer();
-    all.push(...s34.results);
-    const s35 = await driveModelCheckDowngradeViaServer();
-    all.push(...s35.results);
-    const s36 = await driveModelCheckMissingViaServer();
-    all.push(...s36.results);
-    const s37 = await driveV6TransportBypassUnit();
-    all.push(...s37.results);
-    const s38 = await driveV6RateLimitUnit();
-    all.push(...s38.results);
-    const s39 = await driveV6ConvergenceSnapshotUnit();
-    all.push(...s39.results);
-    const s40 = await driveV7AntiHallucinationUnit();
-    all.push(...s40.results);
-    const s41 = await driveV7BannerAttestationUnit();
-    all.push(...s41.results);
-    const s42 = await driveV7EscalateToOperatorUnit();
-    all.push(...s42.results);
-    const s43 = await driveV091GeminiAuthPrecedenceUnit();
-    all.push(...s43.results);
-    // v1.1.0 / spec v4.13 §6.17–6.19 — FU-1, FU-3, FU-4 unit coverage.
-    const s44 = await driveV413SpecVersionUnit();
-    all.push(...s44.results);
-    const s45 = await driveV413SessionSweepUnit();
-    all.push(...s45.results);
-    const s46 = await driveV413ConvergenceHealthUnit();
-    all.push(...s46.results);
-    // v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution + anti-drift.
-    const s47 = await driveV414CallerResolutionUnit();
-    all.push(...s47.results);
-    const s48 = await driveV414ReadmeVersionDriftUnit();
-    all.push(...s48.results);
-    // v1.2.1 hardening from gemini audit (F1, F8).
-    const s49 = await driveV414PathTraversalGuardUnit();
-    all.push(...s49.results);
-    const s50 = await driveV414ToolDescriptionDriftUnit();
-    all.push(...s50.results);
-    // v1.2.2 §6.10 enforcement (B+C).
-    const s51 = await driveV414PromptLanguageDetectorUnit();
-    all.push(...s51.results);
-    const s52 = await driveV414PromptLanguageDescriptionDriftUnit();
-    all.push(...s52.results);
-    // v1.2.3 / external audit round-2: F2 strict quorum + F5 lifecycle guards.
-    const s53 = await driveV414StrictQuorumUnit();
-    all.push(...s53.results);
-    const s54 = await driveV414SessionLifecycleGuardsUnit();
-    all.push(...s54.results);
-    // v1.2.4 / spec v4.14 §6.18.2 + server_info tool.
-    const s55 = await driveV414PersistenceSizeCapUnit();
-    all.push(...s55.results);
-    const s56 = await driveV414ServerInfoUnit();
-    all.push(...s56.results);
-    // v1.2.5 / external-audit round-4 closures + spec amendments.
-    const s57 = await driveV414StrictUuidV4Unit();
-    all.push(...s57.results);
-    const s58 = await driveV414StreamCapConstantsUnit();
-    all.push(...s58.results);
-    const s59 = await driveV414SessionSweepDeleteFilesUnit();
-    all.push(...s59.results);
-    const s60 = await driveV414Spec621ShellSpawnAnchorUnit();
-    all.push(...s60.results);
-    return all;
+	const all = [];
+	const s1 = await driveServer();
+	all.push(...s1.results);
+	const s2 = await driveAskPeerMatrix();
+	all.push(...s2.results);
+	const s3 = await driveProtocolViolation();
+	all.push(...s3.results);
+	const s4 = await driveNeedsEvidenceLegacy();
+	all.push(...s4.results);
+	const s5 = await driveStructuredReady();
+	all.push(...s5.results);
+	const s6 = await driveStructuredNeedsEvidence();
+	all.push(...s6.results);
+	const s7 = await driveRegexLastWins();
+	all.push(...s7.results);
+	const s8 = await driveStructuredTailWins();
+	all.push(...s8.results);
+	const s9 = await driveMalformedStructuredTail();
+	all.push(...s9.results);
+	const s10 = await driveInvalidStatusStructuredTail();
+	all.push(...s10.results);
+	const s11 = await driveLowercaseRejected();
+	all.push(...s11.results);
+	const s12 = await driveProseStatusNoFalsePositive();
+	all.push(...s12.results);
+	const s13 = await driveProseBlockNoFalsePositive();
+	all.push(...s13.results);
+	const s14 = await driveDoubleStructured();
+	all.push(...s14.results);
+	const s15 = await driveMultilineStructured();
+	all.push(...s15.results);
+	// v0.4.0: schema expandido.
+	const s16 = await driveStructuredV4Full();
+	all.push(...s16.results);
+	const s17 = await driveStructuredV4BadUncertainty();
+	all.push(...s17.results);
+	const s18 = await driveStructuredV4BadCallerRequestsShape();
+	all.push(...s18.results);
+	const s19 = await driveStructuredV4NonStringItem();
+	all.push(...s19.results);
+	const s20 = await driveStructuredV4TooManyCallerRequests();
+	all.push(...s20.results);
+	const s21 = await driveStructuredV4OversizedItem();
+	all.push(...s21.results);
+	const s22 = await driveStructuredV4UnknownField();
+	all.push(...s22.results);
+	const s23 = await driveStructuredV4EmptyArrays();
+	all.push(...s23.results);
+	const s24 = await driveStructuredOpenNoClose();
+	all.push(...s24.results);
+	const s25 = await drivePeerModelAndWarningsPersisted();
+	all.push(...s25.results);
+	const s26 = await drivePeerSpawnRealPathModel();
+	all.push(...s26.results);
+	const s27 = await driveModelParserUnit();
+	all.push(...s27.results);
+	const s28 = await driveGeminiArgsShape();
+	all.push(...s28.results);
+	const s29 = await driveSpawnPeersIdentityShape();
+	all.push(...s29.results);
+	const s30 = await driveProbeStubShape();
+	all.push(...s30.results);
+	const s31 = await driveSessionStoreUnit();
+	all.push(...s31.results);
+	const s32 = await driveAskPeersNAry();
+	all.push(...s32.results);
+	const s33 = await driveAskPeerGeminiCallerRejected();
+	all.push(...s33.results);
+	const s34 = await driveModelCheckMatchViaServer();
+	all.push(...s34.results);
+	const s35 = await driveModelCheckDowngradeViaServer();
+	all.push(...s35.results);
+	const s36 = await driveModelCheckMissingViaServer();
+	all.push(...s36.results);
+	const s37 = await driveV6TransportBypassUnit();
+	all.push(...s37.results);
+	const s38 = await driveV6RateLimitUnit();
+	all.push(...s38.results);
+	const s39 = await driveV6ConvergenceSnapshotUnit();
+	all.push(...s39.results);
+	const s40 = await driveV7AntiHallucinationUnit();
+	all.push(...s40.results);
+	const s41 = await driveV7BannerAttestationUnit();
+	all.push(...s41.results);
+	const s42 = await driveV7EscalateToOperatorUnit();
+	all.push(...s42.results);
+	const s43 = await driveV091GeminiAuthPrecedenceUnit();
+	all.push(...s43.results);
+	// v1.1.0 / spec v4.13 §6.17–6.19 — FU-1, FU-3, FU-4 unit coverage.
+	const s44 = await driveV413SpecVersionUnit();
+	all.push(...s44.results);
+	const s45 = await driveV413SessionSweepUnit();
+	all.push(...s45.results);
+	const s46 = await driveV413ConvergenceHealthUnit();
+	all.push(...s46.results);
+	// v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution + anti-drift.
+	const s47 = await driveV414CallerResolutionUnit();
+	all.push(...s47.results);
+	const s48 = await driveV414ReadmeVersionDriftUnit();
+	all.push(...s48.results);
+	// v1.2.1 hardening from gemini audit (F1, F8).
+	const s49 = await driveV414PathTraversalGuardUnit();
+	all.push(...s49.results);
+	const s50 = await driveV414ToolDescriptionDriftUnit();
+	all.push(...s50.results);
+	// v1.2.2 §6.10 enforcement (B+C).
+	const s51 = await driveV414PromptLanguageDetectorUnit();
+	all.push(...s51.results);
+	const s52 = await driveV414PromptLanguageDescriptionDriftUnit();
+	all.push(...s52.results);
+	// v1.2.3 / external audit round-2: F2 strict quorum + F5 lifecycle guards.
+	const s53 = await driveV414StrictQuorumUnit();
+	all.push(...s53.results);
+	const s54 = await driveV414SessionLifecycleGuardsUnit();
+	all.push(...s54.results);
+	// v1.2.4 / spec v4.14 §6.18.2 + server_info tool.
+	const s55 = await driveV414PersistenceSizeCapUnit();
+	all.push(...s55.results);
+	const s56 = await driveV414ServerInfoUnit();
+	all.push(...s56.results);
+	// v1.2.5 / external-audit round-4 closures + spec amendments.
+	const s57 = await driveV414StrictUuidV4Unit();
+	all.push(...s57.results);
+	const s58 = await driveV414StreamCapConstantsUnit();
+	all.push(...s58.results);
+	const s59 = await driveV414SessionSweepDeleteFilesUnit();
+	all.push(...s59.results);
+	const s60 = await driveV414Spec621ShellSpawnAnchorUnit();
+	all.push(...s60.results);
+	// v1.2.7 / external-audit round-5 closure (F3+F4).
+	const s61 = await driveV414StreamListenerDetachUnit();
+	all.push(...s61.results);
+	const s62 = await driveV414TaskkillFallbackUnit();
+	all.push(...s62.results);
+	return all;
 }
 
 // v1.2.5 / external-audit round-4 §3 — strict UUIDv4 (version+variant bits).
 async function driveV414StrictUuidV4Unit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/session-store.js')];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
 
-    // Strict v4 UUID: third group MUST start with 4, fourth with [89ab].
-    // Real UUIDv4 examples — accept.
-    const validV4 = [
-        '12345678-1234-4234-8234-123456789012',
-        'abcdef01-2345-4abc-9def-abcdef012345',
-        'AAAAAAAA-BBBB-4CCC-AAAA-BBBBBBBBBBBB',  // case-insensitive
-    ];
-    for (const uuid of validV4) {
-        store.assertValidSessionId(uuid);
-    }
-    results.push({ step: 'v4.14 §3: strict UUIDv4 accepts valid v4 (version 4 + variant [89ab])', ok: true });
+	// Strict v4 UUID: third group MUST start with 4, fourth with [89ab].
+	// Real UUIDv4 examples — accept.
+	const validV4 = [
+		"12345678-1234-4234-8234-123456789012",
+		"abcdef01-2345-4abc-9def-abcdef012345",
+		"AAAAAAAA-BBBB-4CCC-AAAA-BBBBBBBBBBBB", // case-insensitive
+	];
+	for (const uuid of validV4) {
+		store.assertValidSessionId(uuid);
+	}
+	results.push({
+		step: "v4.14 §3: strict UUIDv4 accepts valid v4 (version 4 + variant [89ab])",
+		ok: true,
+	});
 
-    // Strict rejection: 8-4-4-4-12 hex but NOT v4.
-    const looseHexButNotV4 = [
-        '12345678-1234-1234-1234-123456789012',  // version 1, not 4
-        '12345678-1234-2234-1234-123456789012',  // version 2, not 4
-        '12345678-1234-4234-1234-123456789012',  // wrong variant (1, not [89ab])
-        '12345678-1234-4234-7234-123456789012',  // wrong variant (7)
-        '12345678-1234-4234-c234-123456789012',  // wrong variant (c)
-    ];
-    for (const bad of looseHexButNotV4) {
-        let threw = false;
-        try { store.assertValidSessionId(bad); } catch { threw = true; }
-        assert(threw, `v4.14 §3: strict UUIDv4 rejects loose-hex non-v4 ${bad}`);
-    }
-    results.push({ step: 'v4.14 §3: strict UUIDv4 rejects 8-4-4-4-12 hex with wrong version or variant bits', ok: true });
+	// Strict rejection: 8-4-4-4-12 hex but NOT v4.
+	const looseHexButNotV4 = [
+		"12345678-1234-1234-1234-123456789012", // version 1, not 4
+		"12345678-1234-2234-1234-123456789012", // version 2, not 4
+		"12345678-1234-4234-1234-123456789012", // wrong variant (1, not [89ab])
+		"12345678-1234-4234-7234-123456789012", // wrong variant (7)
+		"12345678-1234-4234-c234-123456789012", // wrong variant (c)
+	];
+	for (const bad of looseHexButNotV4) {
+		let threw = false;
+		try {
+			store.assertValidSessionId(bad);
+		} catch {
+			threw = true;
+		}
+		assert(threw, `v4.14 §3: strict UUIDv4 rejects loose-hex non-v4 ${bad}`);
+	}
+	results.push({
+		step: "v4.14 §3: strict UUIDv4 rejects 8-4-4-4-12 hex with wrong version or variant bits",
+		ok: true,
+	});
 
-    // isPathContained helper: cross-platform containment.
-    const path = require('node:path');
-    const root = path.resolve('/tmp/test');
-    assert(store.isPathContained(root, root) === true, 'v4.14 §3: isPathContained same path → true');
-    assert(store.isPathContained(path.join(root, 'sub'), root) === true, 'v4.14 §3: isPathContained descendant → true');
-    assert(store.isPathContained(path.resolve('/tmp/other'), root) === false, 'v4.14 §3: isPathContained sibling → false');
-    assert(store.isPathContained(path.resolve('/'), root) === false, 'v4.14 §3: isPathContained ancestor → false');
-    results.push({ step: 'v4.14 §3: isPathContained helper covers same/descendant/sibling/ancestor cases', ok: true });
+	// isPathContained helper: cross-platform containment.
+	const path = require("node:path");
+	const root = path.resolve("/tmp/test");
+	assert(
+		store.isPathContained(root, root) === true,
+		"v4.14 §3: isPathContained same path → true",
+	);
+	assert(
+		store.isPathContained(path.join(root, "sub"), root) === true,
+		"v4.14 §3: isPathContained descendant → true",
+	);
+	assert(
+		store.isPathContained(path.resolve("/tmp/other"), root) === false,
+		"v4.14 §3: isPathContained sibling → false",
+	);
+	assert(
+		store.isPathContained(path.resolve("/"), root) === false,
+		"v4.14 §3: isPathContained ancestor → false",
+	);
+	results.push({
+		step: "v4.14 §3: isPathContained helper covers same/descendant/sibling/ancestor cases",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.5 / external-audit round-4 §4.1 — per-stream byte cap constants exported.
 async function driveV414StreamCapConstantsUnit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/peer-spawn.js')];
-    const peerSpawn = require('../src/lib/peer-spawn.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/peer-spawn.js")];
+	const peerSpawn = require("../src/lib/peer-spawn.js");
 
-    assert(peerSpawn.PEER_STREAM_MAX_BYTES === 4 * 1024 * 1024, 'v4.14 §4.1: PEER_STREAM_MAX_BYTES = 4 MiB');
-    assert(peerSpawn.PROBE_STREAM_MAX_BYTES === 256 * 1024, 'v4.14 §4.1: PROBE_STREAM_MAX_BYTES = 256 KiB');
-    assert(peerSpawn.PROBE_STREAM_MAX_BYTES < peerSpawn.PEER_STREAM_MAX_BYTES, 'v4.14 §4.1: probe cap is tighter than spawn cap (probes are short by design)');
-    results.push({ step: 'v4.14 §4.1 §6.18.3: PEER_STREAM_MAX_BYTES + PROBE_STREAM_MAX_BYTES exported with correct ordering', ok: true });
+	assert(
+		peerSpawn.PEER_STREAM_MAX_BYTES === 4 * 1024 * 1024,
+		"v4.14 §4.1: PEER_STREAM_MAX_BYTES = 4 MiB",
+	);
+	assert(
+		peerSpawn.PROBE_STREAM_MAX_BYTES === 256 * 1024,
+		"v4.14 §4.1: PROBE_STREAM_MAX_BYTES = 256 KiB",
+	);
+	assert(
+		peerSpawn.PROBE_STREAM_MAX_BYTES < peerSpawn.PEER_STREAM_MAX_BYTES,
+		"v4.14 §4.1: probe cap is tighter than spawn cap (probes are short by design)",
+	);
+	results.push({
+		step: "v4.14 §4.1 §6.18.3: PEER_STREAM_MAX_BYTES + PROBE_STREAM_MAX_BYTES exported with correct ordering",
+		ok: true,
+	});
 
-    // Anti-drift: stream_overflow path must be wired in spawnPeer (verified
-    // by source inspection — runtime overflow test would require a peer
-    // CLI that actually streams >4 MiB which is heavy for smoke).
-    const fs = require('node:fs');
-    const pathMod = require('node:path');
-    const peerSpawnSrc = fs.readFileSync(pathMod.resolve(__dirname, '..', 'src', 'lib', 'peer-spawn.js'), 'utf8');
-    assert(peerSpawnSrc.includes('PEER_STREAM_MAX_BYTES') && peerSpawnSrc.includes('stream_overflow'), 'v4.14 §4.1: spawnPeer wires stream cap + stream_overflow error attribute');
-    assert(peerSpawnSrc.includes('PROBE_STREAM_MAX_BYTES'), 'v4.14 §4.1: probeAgent wires probe stream cap');
-    assert(peerSpawnSrc.includes("'probe_stream_overflow'"), 'v4.14 §4.1: probeAgent has probe_stream_overflow failure_class');
+	// Anti-drift: stream_overflow path must be wired in spawnPeer (verified
+	// by source inspection — runtime overflow test would require a peer
+	// CLI that actually streams >4 MiB which is heavy for smoke).
+	const fs = require("node:fs");
+	const pathMod = require("node:path");
+	const peerSpawnSrc = fs.readFileSync(
+		pathMod.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	assert(
+		peerSpawnSrc.includes("PEER_STREAM_MAX_BYTES") &&
+			peerSpawnSrc.includes("stream_overflow"),
+		"v4.14 §4.1: spawnPeer wires stream cap + stream_overflow error attribute",
+	);
+	assert(
+		peerSpawnSrc.includes("PROBE_STREAM_MAX_BYTES"),
+		"v4.14 §4.1: probeAgent wires probe stream cap",
+	);
+	assert(
+		/['"]probe_stream_overflow['"]/.test(peerSpawnSrc),
+		"v4.14 §4.1: probeAgent has probe_stream_overflow failure_class",
+	);
 
-    // server.js classification chain: both ask_peer + ask_peers handlers
-    // must include 'stream_overflow' branch.
-    const serverSrc = fs.readFileSync(pathMod.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
-    const overflowMatches = serverSrc.match(/'stream_overflow'/g);
-    assert(overflowMatches !== null && overflowMatches.length >= 2, 'v4.14 §4.1: server.js classifies stream_overflow in BOTH ask_peer + ask_peers handlers');
-    results.push({ step: 'v4.14 §4.1: stream_overflow classification wired end-to-end (peer-spawn + both server handlers)', ok: true });
+	// server.js classification chain: both ask_peer + ask_peers handlers
+	// must include 'stream_overflow' branch (quote-agnostic).
+	const serverSrc = fs.readFileSync(
+		pathMod.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+	const overflowMatches = serverSrc.match(/['"]stream_overflow['"]/g);
+	assert(
+		overflowMatches !== null && overflowMatches.length >= 2,
+		"v4.14 §4.1: server.js classifies stream_overflow in BOTH ask_peer + ask_peers handlers",
+	);
+	results.push({
+		step: "v4.14 §4.1: stream_overflow classification wired end-to-end (peer-spawn + both server handlers)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.5 / external-audit round-4 §4.2 — session_sweep delete_files mode.
 async function driveV414SessionSweepDeleteFilesUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/session-store.js')];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
 
-    // Inline minimal mkTestSession (mirrors driveV413SessionSweepUnit).
-    const crypto = require('node:crypto');
-    function mkStaleSession(NOW) {
-        const id = crypto.randomUUID();
-        fs.mkdirSync(store.sessionDir(id), { recursive: true });
-        const meta = {
-            session_id: id,
-            spec_version: store.SESSION_SPEC_VERSION,
-            task: 'sweep delete_files test',
-            artifacts: [],
-            caller: 'claude',
-            peers: ['codex'],
-            started_at: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
-            rounds: [],
-            failed_attempts: [],
-            outcome: null,
-            outcome_reason: null,
-        };
-        fs.writeFileSync(path.join(store.sessionDir(id), 'meta.json'), JSON.stringify(meta, null, 2));
-        // Also drop a round-NN-prompt.md file to verify it gets purged.
-        fs.writeFileSync(path.join(store.sessionDir(id), 'round-01-prompt.md'), 'test prompt content');
-        return id;
-    }
+	// Inline minimal mkTestSession (mirrors driveV413SessionSweepUnit).
+	const crypto = require("node:crypto");
+	function mkStaleSession(NOW) {
+		const id = crypto.randomUUID();
+		fs.mkdirSync(store.sessionDir(id), { recursive: true });
+		const meta = {
+			session_id: id,
+			spec_version: store.SESSION_SPEC_VERSION,
+			task: "sweep delete_files test",
+			artifacts: [],
+			caller: "claude",
+			peers: ["codex"],
+			started_at: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
+			rounds: [],
+			failed_attempts: [],
+			outcome: null,
+			outcome_reason: null,
+		};
+		fs.writeFileSync(
+			path.join(store.sessionDir(id), "meta.json"),
+			JSON.stringify(meta, null, 2),
+		);
+		// Also drop a round-NN-prompt.md file to verify it gets purged.
+		fs.writeFileSync(
+			path.join(store.sessionDir(id), "round-01-prompt.md"),
+			"test prompt content",
+		);
+		return id;
+	}
 
-    const NOW = Date.parse('2026-04-27T12:00:00Z');
-    const sid = mkStaleSession(NOW);
-    try {
-        // Dry-run: must NOT touch files.
-        const dry = store.sweepStaleSessions({ staleDays: 7, dryRun: true, deleteFiles: true, now: NOW });
-        assert(dry.purged.length === 0, 'v4.14 §4.2: dry_run + delete_files=true → purged is empty');
-        assert(fs.existsSync(store.sessionDir(sid)), 'v4.14 §4.2: dry_run did NOT remove session dir');
+	const NOW = Date.parse("2026-04-27T12:00:00Z");
+	const sid = mkStaleSession(NOW);
+	try {
+		// Dry-run: must NOT touch files.
+		const dry = store.sweepStaleSessions({
+			staleDays: 7,
+			dryRun: true,
+			deleteFiles: true,
+			now: NOW,
+		});
+		assert(
+			dry.purged.length === 0,
+			"v4.14 §4.2: dry_run + delete_files=true → purged is empty",
+		);
+		assert(
+			fs.existsSync(store.sessionDir(sid)),
+			"v4.14 §4.2: dry_run did NOT remove session dir",
+		);
 
-        // Wet-run with delete_files=false (default): finalize but preserve.
-        const wetNoDelete = store.sweepStaleSessions({ staleDays: 7, dryRun: false, deleteFiles: false, now: NOW });
-        assert(wetNoDelete.finalized.some((f) => f.session_id === sid), 'v4.14 §4.2: wet-run-no-delete finalizes the candidate');
-        assert(wetNoDelete.purged.length === 0, 'v4.14 §4.2: wet-run-no-delete leaves purged empty');
-        assert(fs.existsSync(store.sessionDir(sid)), 'v4.14 §4.2: wet-run-no-delete preserves session dir on disk');
-        const metaAfterFinalize = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8'));
-        assert(metaAfterFinalize.outcome === 'aborted', 'v4.14 §4.2: wet-run-no-delete writes outcome=aborted');
-        results.push({ step: 'v4.14 §4.2: dry_run is read-only + wet-run-no-delete preserves files (default behavior)', ok: true });
+		// Wet-run with delete_files=false (default): finalize but preserve.
+		const wetNoDelete = store.sweepStaleSessions({
+			staleDays: 7,
+			dryRun: false,
+			deleteFiles: false,
+			now: NOW,
+		});
+		assert(
+			wetNoDelete.finalized.some((f) => f.session_id === sid),
+			"v4.14 §4.2: wet-run-no-delete finalizes the candidate",
+		);
+		assert(
+			wetNoDelete.purged.length === 0,
+			"v4.14 §4.2: wet-run-no-delete leaves purged empty",
+		);
+		assert(
+			fs.existsSync(store.sessionDir(sid)),
+			"v4.14 §4.2: wet-run-no-delete preserves session dir on disk",
+		);
+		const metaAfterFinalize = JSON.parse(
+			fs.readFileSync(path.join(store.sessionDir(sid), "meta.json"), "utf8"),
+		);
+		assert(
+			metaAfterFinalize.outcome === "aborted",
+			"v4.14 §4.2: wet-run-no-delete writes outcome=aborted",
+		);
+		results.push({
+			step: "v4.14 §4.2: dry_run is read-only + wet-run-no-delete preserves files (default behavior)",
+			ok: true,
+		});
 
-        // Now create a NEW stale session to test wet-run + delete_files.
-        const sid2 = mkStaleSession(NOW);
-        const wetDelete = store.sweepStaleSessions({ staleDays: 7, dryRun: false, deleteFiles: true, now: NOW });
-        assert(wetDelete.finalized.some((f) => f.session_id === sid2), 'v4.14 §4.2: wet-run-with-delete finalizes the new candidate');
-        assert(wetDelete.purged.some((p) => p.session_id === sid2), 'v4.14 §4.2: wet-run-with-delete adds to purged array');
-        assert(!fs.existsSync(store.sessionDir(sid2)), 'v4.14 §4.2: wet-run-with-delete physically removes session dir');
-        results.push({ step: 'v4.14 §4.2: wet-run + delete_files=true finalizes + physically removes session directory', ok: true });
+		// Now create a NEW stale session to test wet-run + delete_files.
+		const sid2 = mkStaleSession(NOW);
+		const wetDelete = store.sweepStaleSessions({
+			staleDays: 7,
+			dryRun: false,
+			deleteFiles: true,
+			now: NOW,
+		});
+		assert(
+			wetDelete.finalized.some((f) => f.session_id === sid2),
+			"v4.14 §4.2: wet-run-with-delete finalizes the new candidate",
+		);
+		assert(
+			wetDelete.purged.some((p) => p.session_id === sid2),
+			"v4.14 §4.2: wet-run-with-delete adds to purged array",
+		);
+		assert(
+			!fs.existsSync(store.sessionDir(sid2)),
+			"v4.14 §4.2: wet-run-with-delete physically removes session dir",
+		);
+		results.push({
+			step: "v4.14 §4.2: wet-run + delete_files=true finalizes + physically removes session directory",
+			ok: true,
+		});
 
-        // Cleanup the first session that was finalized but not purged.
-        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
-    } catch (e) {
-        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
-        throw e;
-    }
+		// Cleanup the first session that was finalized but not purged.
+		try {
+			fs.rmSync(store.sessionDir(sid), { recursive: true, force: true });
+		} catch {}
+	} catch (e) {
+		try {
+			fs.rmSync(store.sessionDir(sid), { recursive: true, force: true });
+		} catch {}
+		throw e;
+	}
 
-    return { results };
+	return { results };
 }
 
 // v1.2.5 / external-audit round-4 §1 — spec §6.21 anchor presence (anti-drift).
 async function driveV414Spec621ShellSpawnAnchorUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const specSrc = fs.readFileSync(path.resolve(__dirname, '..', 'docs', 'workflow-spec.md'), 'utf8');
-    assert(
-        specSrc.includes('### 6.21 Shell-spawn architecture decision'),
-        'v4.14 §6.21: spec contains the shell-spawn architecture decision section'
-    );
-    // Whitespace-tolerant: the spec wraps lines, so the directive sentence
-    // may have newlines/spaces between words. Check for keyword presence in
-    // proximity rather than verbatim string match.
-    assert(
-        /Repeating the finding\s+without engaging the rationale is non-yielding/m.test(specSrc),
-        'v4.14 §6.21: spec includes the audit-guidance directive retiring round-1..N RCE/shell:true repeats'
-    );
-    results.push({ step: 'v4.14 §6.21: shell-spawn architecture decision section present + audit-guidance directive', ok: true });
-    return { results };
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const specSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "docs", "workflow-spec.md"),
+		"utf8",
+	);
+	assert(
+		specSrc.includes("### 6.21 Shell-spawn architecture decision"),
+		"v4.14 §6.21: spec contains the shell-spawn architecture decision section",
+	);
+	// Whitespace-tolerant: the spec wraps lines, so the directive sentence
+	// may have newlines/spaces between words. Check for keyword presence in
+	// proximity rather than verbatim string match.
+	assert(
+		/Repeating the finding\s+without engaging the rationale is non-yielding/m.test(
+			specSrc,
+		),
+		"v4.14 §6.21: spec includes the audit-guidance directive retiring round-1..N RCE/shell:true repeats",
+	);
+	results.push({
+		step: "v4.14 §6.21: shell-spawn architecture decision section present + audit-guidance directive",
+		ok: true,
+	});
+	return { results };
+}
+
+// v1.2.7 / external-audit round-5 F3 — anti-drift: assert listener detach is
+// wired in all 4 leak paths (spawnPeer overflow + timeout, probeAgent overflow
+// + timeout). Source-inspection structural anti-drift (matches v1.2.5
+// §4.1 pattern). Behavioral coverage requires peer-emulator harness, deferred.
+async function driveV414StreamListenerDetachUnit() {
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const peerSpawnSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	// Both helper names must exist (one per closure scope).
+	assert(
+		peerSpawnSrc.includes("const detachStreamListeners = ()"),
+		"v4.14 §6.18.3 F3: spawnPeer detachStreamListeners helper present",
+	);
+	assert(
+		peerSpawnSrc.includes("const detachProbeListeners = ()"),
+		"v4.14 §6.18.3 F3: probeAgent detachProbeListeners helper present",
+	);
+	// Both helpers must call removeAllListeners on stdout AND stderr (formatter-
+	// agnostic on quote style + whitespace; biome may flip 'data' to "data" and
+	// expand single-line try-blocks to multi-line bodies).
+	const detachHelperBody =
+		/detach(Stream|Probe)Listeners = \(\) => \{[\s\S]{0,300}?proc\.stdout\.removeAllListeners\(['"]data['"]\)[\s\S]{0,300}?proc\.stderr\.removeAllListeners\(['"]data['"]\)/g;
+	const helperMatches = peerSpawnSrc.match(detachHelperBody) || [];
+	assert(
+		helperMatches.length === 2,
+		`v4.14 §6.18.3 F3: both detach helpers detach stdout+stderr listeners (found ${helperMatches.length}/2)`,
+	);
+	// The 4 leak paths must invoke their respective helper BEFORE killProcessTree.
+	const detachStreamCalls = (
+		peerSpawnSrc.match(/detachStreamListeners\(\)/g) || []
+	).length;
+	const detachProbeCalls = (
+		peerSpawnSrc.match(/detachProbeListeners\(\)/g) || []
+	).length;
+	assert(
+		detachStreamCalls >= 2,
+		`v4.14 §6.18.3 F3: spawnPeer invokes detachStreamListeners in BOTH overflow + timeout paths (found ${detachStreamCalls}/2)`,
+	);
+	assert(
+		detachProbeCalls >= 2,
+		`v4.14 §6.18.3 F3: probeAgent invokes detachProbeListeners in BOTH overflow + timeout paths (found ${detachProbeCalls}/2)`,
+	);
+	results.push({
+		step: "v4.14 §6.18.3 F3: stream listener detach wired in all 4 leak paths (spawnPeer + probeAgent × overflow + timeout)",
+		ok: true,
+	});
+	return { results };
+}
+
+// v1.2.7 / external-audit round-5 F4 — anti-drift: assert Windows taskkill
+// nonzero-exit and runtime-error paths fall back to proc.kill('SIGKILL').
+// Pre-v1.2.7 only logged on nonzero exit, leaking the process if taskkill
+// itself failed (rare: AV interference, permission inheritance, race).
+async function driveV414TaskkillFallbackUnit() {
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const peerSpawnSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	// Locate the killer.on("close", ...) handler block — must contain the
+	// fallback proc.kill("SIGKILL") AFTER the nonzero-exit log. Quote-agnostic.
+	const closeHandler = peerSpawnSrc.match(
+		/killer\.on\(['"]close['"], \(code\) => \{[\s\S]*?\n\t{2}\}\);/,
+	);
+	assert(closeHandler, "v4.14 §6.18.3 F4: taskkill close handler present");
+	assert(
+		closeHandler[0].includes("falling back to proc.kill"),
+		"v4.14 §6.18.3 F4: taskkill close handler logs fallback intent",
+	);
+	assert(
+		/proc\.kill\(['"]SIGKILL['"]\)/.test(closeHandler[0]),
+		"v4.14 §6.18.3 F4: taskkill close handler invokes proc.kill SIGKILL fallback on nonzero exit",
+	);
+	// Same for the error handler.
+	const errorHandler = peerSpawnSrc.match(
+		/killer\.on\(['"]error['"], \(err\) => \{[\s\S]*?\n\t{2}\}\);/,
+	);
+	assert(errorHandler, "v4.14 §6.18.3 F4: taskkill error handler present");
+	assert(
+		/proc\.kill\(['"]SIGKILL['"]\)/.test(errorHandler[0]),
+		"v4.14 §6.18.3 F4: taskkill error handler invokes proc.kill SIGKILL fallback",
+	);
+	results.push({
+		step: "v4.14 §6.18.3 F4: Windows taskkill fallback to proc.kill on close-nonzero AND error events",
+		ok: true,
+	});
+	return { results };
 }
 
 // v1.2.4 / spec v4.14 §6.18.2 — F8 closure: per-file persistence size cap.
 async function driveV414PersistenceSizeCapUnit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/session-store.js')];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
 
-    // Under the cap → unchanged.
-    const small = 'short content';
-    const c1 = store.clipForPersistence(small, 'unit_under_cap');
-    assert(c1.truncated === false, '§6.18.2 F8: under-cap content NOT truncated');
-    assert(c1.content === small, '§6.18.2 F8: under-cap content preserved verbatim');
-    assert(c1.original_bytes === Buffer.byteLength(small, 'utf8'), '§6.18.2 F8: original_bytes reflects byte length');
+	// Under the cap → unchanged.
+	const small = "short content";
+	const c1 = store.clipForPersistence(small, "unit_under_cap");
+	assert(c1.truncated === false, "§6.18.2 F8: under-cap content NOT truncated");
+	assert(
+		c1.content === small,
+		"§6.18.2 F8: under-cap content preserved verbatim",
+	);
+	assert(
+		c1.original_bytes === Buffer.byteLength(small, "utf8"),
+		"§6.18.2 F8: original_bytes reflects byte length",
+	);
 
-    // Over the cap → truncated + marker.
-    const overSize = store.PERSISTENCE_MAX_BYTES * 2;  // 128 KiB
-    const big = 'A'.repeat(overSize);  // ASCII 1 byte/char
-    const c2 = store.clipForPersistence(big, 'unit_over_cap');
-    assert(c2.truncated === true, '§6.18.2 F8: over-cap content marked truncated');
-    assert(c2.original_bytes === overSize, '§6.18.2 F8: original_bytes preserves true size');
-    assert(c2.content.length < overSize, '§6.18.2 F8: persisted content shorter than original');
-    assert(c2.content.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8: marker mentions spec section');
-    assert(c2.content.includes(`original=${overSize} bytes`), '§6.18.2 F8: marker names original byte count');
-    assert(c2.content.includes(`written=${store.PERSISTENCE_MAX_BYTES} bytes`), '§6.18.2 F8: marker names written byte count');
-    assert(c2.content.includes('label=unit_over_cap'), '§6.18.2 F8: marker preserves label for audit');
-    results.push({ step: 'v4.14 §6.18.2 F8: clipForPersistence under-cap pass-through + over-cap truncation with audit marker', ok: true });
+	// Over the cap → truncated + marker.
+	const overSize = store.PERSISTENCE_MAX_BYTES * 2; // 128 KiB
+	const big = "A".repeat(overSize); // ASCII 1 byte/char
+	const c2 = store.clipForPersistence(big, "unit_over_cap");
+	assert(
+		c2.truncated === true,
+		"§6.18.2 F8: over-cap content marked truncated",
+	);
+	assert(
+		c2.original_bytes === overSize,
+		"§6.18.2 F8: original_bytes preserves true size",
+	);
+	assert(
+		c2.content.length < overSize,
+		"§6.18.2 F8: persisted content shorter than original",
+	);
+	assert(
+		c2.content.includes("truncated by spec v4.14 §6.18.2 size cap"),
+		"§6.18.2 F8: marker mentions spec section",
+	);
+	assert(
+		c2.content.includes(`original=${overSize} bytes`),
+		"§6.18.2 F8: marker names original byte count",
+	);
+	assert(
+		c2.content.includes(`written=${store.PERSISTENCE_MAX_BYTES} bytes`),
+		"§6.18.2 F8: marker names written byte count",
+	);
+	assert(
+		c2.content.includes("label=unit_over_cap"),
+		"§6.18.2 F8: marker preserves label for audit",
+	);
+	results.push({
+		step: "v4.14 §6.18.2 F8: clipForPersistence under-cap pass-through + over-cap truncation with audit marker",
+		ok: true,
+	});
 
-    // Type-shape: non-string → empty string + truncated=false.
-    const c3 = store.clipForPersistence(null, 'null_input');
-    assert(c3.content === '' && c3.truncated === false && c3.original_bytes === 0, '§6.18.2 F8: null input → empty content, not truncated');
-    const c4 = store.clipForPersistence(123, 'number_input');
-    assert(c4.content === '' && c4.truncated === false, '§6.18.2 F8: non-string input → empty content');
-    results.push({ step: 'v4.14 §6.18.2 F8: clipForPersistence type-shape rejections', ok: true });
+	// Type-shape: non-string → empty string + truncated=false.
+	const c3 = store.clipForPersistence(null, "null_input");
+	assert(
+		c3.content === "" && c3.truncated === false && c3.original_bytes === 0,
+		"§6.18.2 F8: null input → empty content, not truncated",
+	);
+	const c4 = store.clipForPersistence(123, "number_input");
+	assert(
+		c4.content === "" && c4.truncated === false,
+		"§6.18.2 F8: non-string input → empty content",
+	);
+	results.push({
+		step: "v4.14 §6.18.2 F8: clipForPersistence type-shape rejections",
+		ok: true,
+	});
 
-    // End-to-end via savePromptForRound + savePeerResponse: oversize input
-    // produces a written file capped at MAX + marker.
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const sid = store.initSession({
-        task: 'F8 e2e test',
-        artifacts: [],
-        callerAgent: 'claude',
-        peers: ['codex', 'gemini'],
-    });
-    try {
-        const oversize = 'B'.repeat(overSize);
-        const fname = store.savePromptForRound(sid, 1, oversize);
-        const filePath = path.join(store.sessionDir(sid), fname);
-        const written = fs.readFileSync(filePath, 'utf8');
-        const writtenBytes = Buffer.byteLength(written, 'utf8');
-        assert(writtenBytes < overSize, '§6.18.2 F8 e2e: prompt file on disk is smaller than oversized input');
-        assert(written.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8 e2e: prompt file contains the truncation marker');
+	// End-to-end via savePromptForRound + savePeerResponse: oversize input
+	// produces a written file capped at MAX + marker.
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const sid = store.initSession({
+		task: "F8 e2e test",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+	});
+	try {
+		const oversize = "B".repeat(overSize);
+		const fname = store.savePromptForRound(sid, 1, oversize);
+		const filePath = path.join(store.sessionDir(sid), fname);
+		const written = fs.readFileSync(filePath, "utf8");
+		const writtenBytes = Buffer.byteLength(written, "utf8");
+		assert(
+			writtenBytes < overSize,
+			"§6.18.2 F8 e2e: prompt file on disk is smaller than oversized input",
+		);
+		assert(
+			written.includes("truncated by spec v4.14 §6.18.2 size cap"),
+			"§6.18.2 F8 e2e: prompt file contains the truncation marker",
+		);
 
-        const peerFname = store.savePeerResponse(sid, 1, 'codex', oversize, 'READY');
-        const peerPath = path.join(store.sessionDir(sid), peerFname);
-        const peerWritten = fs.readFileSync(peerPath, 'utf8');
-        assert(Buffer.byteLength(peerWritten, 'utf8') < overSize, '§6.18.2 F8 e2e: peer-response file on disk smaller than oversized input');
-        assert(peerWritten.includes('<!-- round=1 peer=codex'), '§6.18.2 F8 e2e: peer-response file preserves header');
-        assert(peerWritten.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8 e2e: peer-response file contains marker');
-    } finally {
-        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
-    }
-    results.push({ step: 'v4.14 §6.18.2 F8: savePromptForRound + savePeerResponse cap oversize input on disk + preserve marker', ok: true });
+		const peerFname = store.savePeerResponse(
+			sid,
+			1,
+			"codex",
+			oversize,
+			"READY",
+		);
+		const peerPath = path.join(store.sessionDir(sid), peerFname);
+		const peerWritten = fs.readFileSync(peerPath, "utf8");
+		assert(
+			Buffer.byteLength(peerWritten, "utf8") < overSize,
+			"§6.18.2 F8 e2e: peer-response file on disk smaller than oversized input",
+		);
+		assert(
+			peerWritten.includes("<!-- round=1 peer=codex"),
+			"§6.18.2 F8 e2e: peer-response file preserves header",
+		);
+		assert(
+			peerWritten.includes("truncated by spec v4.14 §6.18.2 size cap"),
+			"§6.18.2 F8 e2e: peer-response file contains marker",
+		);
+	} finally {
+		try {
+			fs.rmSync(store.sessionDir(sid), { recursive: true, force: true });
+		} catch {}
+	}
+	results.push({
+		step: "v4.14 §6.18.2 F8: savePromptForRound + savePeerResponse cap oversize input on disk + preserve marker",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.4 §6.18.2 — server_info tool + RELEASE_DATE / CHANGELOG sync (anti-drift).
 async function driveV414ServerInfoUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/server.js')];
-    const server = require('../src/server.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/server.js")];
+	const server = require("../src/server.js");
 
-    // Direct invocation via stdio is exercised by the tools/list expansion
-    // earlier in driveServer. Here we focus on RELEASE_DATE consistency
-    // with CHANGELOG.md (anti-drift) plus the constant exports.
-    assert(typeof server.VERSION === 'string' && /^\d+\.\d+\.\d+$/.test(server.VERSION), 'v4.14 server_info: VERSION format X.Y.Z');
-    // RELEASE_DATE: must be ISO date YYYY-MM-DD.
-    const releaseDateMatch = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8').match(/^const RELEASE_DATE\s*=\s*['"]([0-9]{4}-[0-9]{2}-[0-9]{2})['"]/m);
-    assert(releaseDateMatch !== null, 'v4.14 server_info: RELEASE_DATE constant present + ISO format');
-    const releaseDate = releaseDateMatch[1];
-    results.push({ step: 'v4.14 server_info: VERSION + RELEASE_DATE constants present + ISO format', ok: true });
+	// Direct invocation via stdio is exercised by the tools/list expansion
+	// earlier in driveServer. Here we focus on RELEASE_DATE consistency
+	// with CHANGELOG.md (anti-drift) plus the constant exports.
+	assert(
+		typeof server.VERSION === "string" &&
+			/^\d+\.\d+\.\d+$/.test(server.VERSION),
+		"v4.14 server_info: VERSION format X.Y.Z",
+	);
+	// RELEASE_DATE: must be ISO date YYYY-MM-DD.
+	const releaseDateMatch = fs
+		.readFileSync(path.resolve(__dirname, "..", "src", "server.js"), "utf8")
+		.match(/^const RELEASE_DATE\s*=\s*['"]([0-9]{4}-[0-9]{2}-[0-9]{2})['"]/m);
+	assert(
+		releaseDateMatch !== null,
+		"v4.14 server_info: RELEASE_DATE constant present + ISO format",
+	);
+	const releaseDate = releaseDateMatch[1];
+	results.push({
+		step: "v4.14 server_info: VERSION + RELEASE_DATE constants present + ISO format",
+		ok: true,
+	});
 
-    // RELEASE_DATE must match the heading for the current VERSION in
-    // CHANGELOG.md. Format: `## [X.Y.Z] — YYYY-MM-DD`.
-    const changelog = fs.readFileSync(path.resolve(__dirname, '..', 'CHANGELOG.md'), 'utf8');
-    const escapedVersion = server.VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const headingRe = new RegExp(`^##\\s*\\[${escapedVersion}\\][^\\n]*?(\\d{4}-\\d{2}-\\d{2})`, 'm');
-    const headingMatch = changelog.match(headingRe);
-    assert(
-        headingMatch !== null,
-        `v4.14 anti-drift: CHANGELOG.md has heading for v${server.VERSION} with date`
-    );
-    assert(
-        headingMatch[1] === releaseDate,
-        `v4.14 anti-drift: CHANGELOG date for v${server.VERSION} (${headingMatch[1]}) === RELEASE_DATE constant (${releaseDate})`
-    );
-    results.push({ step: 'v4.14 anti-drift: RELEASE_DATE constant matches CHANGELOG date for current VERSION', ok: true });
+	// RELEASE_DATE must match the heading for the current VERSION in
+	// CHANGELOG.md. Format: `## [X.Y.Z] — YYYY-MM-DD`.
+	const changelog = fs.readFileSync(
+		path.resolve(__dirname, "..", "CHANGELOG.md"),
+		"utf8",
+	);
+	const escapedVersion = server.VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const headingRe = new RegExp(
+		`^##\\s*\\[${escapedVersion}\\][^\\n]*?(\\d{4}-\\d{2}-\\d{2})`,
+		"m",
+	);
+	const headingMatch = changelog.match(headingRe);
+	assert(
+		headingMatch !== null,
+		`v4.14 anti-drift: CHANGELOG.md has heading for v${server.VERSION} with date`,
+	);
+	assert(
+		headingMatch[1] === releaseDate,
+		`v4.14 anti-drift: CHANGELOG date for v${server.VERSION} (${headingMatch[1]}) === RELEASE_DATE constant (${releaseDate})`,
+	);
+	results.push({
+		step: "v4.14 anti-drift: RELEASE_DATE constant matches CHANGELOG date for current VERSION",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.3 / external audit round-2 F2 — strict quorum: rejected_count counts AGAINST.
 async function driveV414StrictQuorumUnit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/session-store.js')];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
 
-    // Round shape: caller READY + 2 responded peers READY + 1 rejected (quorum.rejected = 1).
-    // Pre-v1.2.3 this was reported as converged. v1.2.3+ MUST be converged=false.
-    const roundWithRejected = {
-        round: 1,
-        caller_status: 'READY',
-        peers: [
-            { agent: 'codex', peer_status: 'READY' },
-            { agent: 'gemini', peer_status: 'READY' },
-        ],
-        quorum: { requested: 3, responded: 2, rejected: 1 },
-    };
-    const snap = store.computeConvergenceSnapshot(0, roundWithRejected);
-    assert(snap.converged === false, 'v4.14 §6.12 strict quorum: rejected_count > 0 with all responded READY → converged=false');
-    assert(snap.rejected_count === 1, 'v4.14 §6.12 strict quorum: rejected_count surfaced in snapshot');
-    assert(snap.denominator_mode === 'strict', 'v4.14 §6.12 strict quorum: denominator_mode preserved');
-    results.push({ step: 'v4.14 §6.12 F2: rejected_count > 0 blocks convergence even when all responded peers READY', ok: true });
+	// Round shape: caller READY + 2 responded peers READY + 1 rejected (quorum.rejected = 1).
+	// Pre-v1.2.3 this was reported as converged. v1.2.3+ MUST be converged=false.
+	const roundWithRejected = {
+		round: 1,
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: "READY" },
+		],
+		quorum: { requested: 3, responded: 2, rejected: 1 },
+	};
+	const snap = store.computeConvergenceSnapshot(0, roundWithRejected);
+	assert(
+		snap.converged === false,
+		"v4.14 §6.12 strict quorum: rejected_count > 0 with all responded READY → converged=false",
+	);
+	assert(
+		snap.rejected_count === 1,
+		"v4.14 §6.12 strict quorum: rejected_count surfaced in snapshot",
+	);
+	assert(
+		snap.denominator_mode === "strict",
+		"v4.14 §6.12 strict quorum: denominator_mode preserved",
+	);
+	results.push({
+		step: "v4.14 §6.12 F2: rejected_count > 0 blocks convergence even when all responded peers READY",
+		ok: true,
+	});
 
-    // Reason readout: gap codex flagged in R1 — when responded peers all
-    // READY but rejected_count > 0, blocking_peers IS empty (correctly), and
-    // the reason builder must surface rejected_count instead of falsely
-    // reporting "no responded peers". The reason builder is internal to
-    // session-store.js but exercised end-to-end by checkConvergence which
-    // composes the reason text. Direct readout invariant: snapshot has
-    // blocking_peers empty AND rejected_count > 0 simultaneously, which
-    // is the trigger condition for the new reason branch.
-    assert(Array.isArray(snap.blocking_peers) && snap.blocking_peers.length === 0, 'v4.14 §6.12 F2: blocking_peers empty when responded peers all READY');
-    results.push({ step: 'v4.14 §6.12 F2: snapshot exposes rejected_count for downstream reason building', ok: true });
+	// Reason readout: gap codex flagged in R1 — when responded peers all
+	// READY but rejected_count > 0, blocking_peers IS empty (correctly), and
+	// the reason builder must surface rejected_count instead of falsely
+	// reporting "no responded peers". The reason builder is internal to
+	// session-store.js but exercised end-to-end by checkConvergence which
+	// composes the reason text. Direct readout invariant: snapshot has
+	// blocking_peers empty AND rejected_count > 0 simultaneously, which
+	// is the trigger condition for the new reason branch.
+	assert(
+		Array.isArray(snap.blocking_peers) && snap.blocking_peers.length === 0,
+		"v4.14 §6.12 F2: blocking_peers empty when responded peers all READY",
+	);
+	results.push({
+		step: "v4.14 §6.12 F2: snapshot exposes rejected_count for downstream reason building",
+		ok: true,
+	});
 
-    // Edge: round.quorum undefined (legacy round shape) → defaults to 0, no false-flag.
-    const legacyRound = {
-        round: 1,
-        caller_status: 'READY',
-        peers: [{ agent: 'codex', peer_status: 'READY' }],
-    };
-    const snapLegacy = store.computeConvergenceSnapshot(0, legacyRound);
-    assert(snapLegacy.converged === true, 'v4.14 §6.12 F2: round without quorum field → rejected_count defaults to 0, converged preserved');
-    assert(snapLegacy.rejected_count === 0, 'v4.14 §6.12 F2: legacy round → rejected_count = 0 in snapshot');
-    results.push({ step: 'v4.14 §6.12 F2: legacy round shape (no quorum field) is forward-compatible', ok: true });
+	// Edge: round.quorum undefined (legacy round shape) → defaults to 0, no false-flag.
+	const legacyRound = {
+		round: 1,
+		caller_status: "READY",
+		peers: [{ agent: "codex", peer_status: "READY" }],
+	};
+	const snapLegacy = store.computeConvergenceSnapshot(0, legacyRound);
+	assert(
+		snapLegacy.converged === true,
+		"v4.14 §6.12 F2: round without quorum field → rejected_count defaults to 0, converged preserved",
+	);
+	assert(
+		snapLegacy.rejected_count === 0,
+		"v4.14 §6.12 F2: legacy round → rejected_count = 0 in snapshot",
+	);
+	results.push({
+		step: "v4.14 §6.12 F2: legacy round shape (no quorum field) is forward-compatible",
+		ok: true,
+	});
 
-    // Edge: ALL peers rejected (3-of-3 fail at spawn) → must enter N-ary
-    // path (codex R2 fix), produce rejected_count=3, empty blocking_peers,
-    // and a reason text mentioning "failed at spawn". Pre-R2 this fell
-    // through to legacy bilateral path and lost rejected_count.
-    const allRejected = {
-        round: 1,
-        caller_status: 'READY',
-        peers: [],
-        quorum: { requested: 3, responded: 0, rejected: 3 },
-    };
-    const snapAllRej = store.computeConvergenceSnapshot(0, allRejected);
-    assert(snapAllRej.converged === false, 'v4.14 §6.12 F2: all-rejected round → converged=false');
-    assert(snapAllRej.rejected_count === 3, 'v4.14 §6.12 F2: all-rejected snapshot exposes rejected_count=3 (codex R2 ask)');
-    assert(Array.isArray(snapAllRej.blocking_peers) && snapAllRej.blocking_peers.length === 0, 'v4.14 §6.12 F2: all-rejected has empty blocking_peers (no responded peers to classify)');
-    assert(snapAllRej.denominator_mode === 'strict', 'v4.14 §6.12 F2: all-rejected snapshot keeps denominator_mode=strict');
-    // Reason text via checkConvergence end-to-end. Build a minimal session
-    // file so the helper path runs.
-    const sidAR = store.initSession({ task: 'all-rejected reason test', artifacts: [], callerAgent: 'claude', peers: ['codex', 'gemini'] });
-    try {
-        // Inject the all-rejected round shape via direct meta write since
-        // store.appendRound only sees real ask_peers handler output.
-        const metaPath = require('node:path').join(store.sessionDir(sidAR), 'meta.json');
-        const fs = require('node:fs');
-        const metaAR = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        metaAR.rounds = [allRejected];
-        fs.writeFileSync(metaPath, JSON.stringify(metaAR, null, 2));
-        const conv = store.checkConvergence(sidAR);
-        assert(conv.converged === false, 'v4.14 §6.12 F2: all-rejected checkConvergence → converged=false');
-        assert(typeof conv.reason === 'string' && conv.reason.includes('failed at spawn'), 'v4.14 §6.12 F2: all-rejected reason contains "failed at spawn" (codex R2 ask)');
-    } finally {
-        try { require('node:fs').rmSync(store.sessionDir(sidAR), { recursive: true, force: true }); } catch {}
-    }
-    results.push({ step: 'v4.14 §6.12 F2: all-rejected (3-of-3 spawn fail) → rejected_count=3, empty blocking_peers, reason "failed at spawn"', ok: true });
+	// Edge: ALL peers rejected (3-of-3 fail at spawn) → must enter N-ary
+	// path (codex R2 fix), produce rejected_count=3, empty blocking_peers,
+	// and a reason text mentioning "failed at spawn". Pre-R2 this fell
+	// through to legacy bilateral path and lost rejected_count.
+	const allRejected = {
+		round: 1,
+		caller_status: "READY",
+		peers: [],
+		quorum: { requested: 3, responded: 0, rejected: 3 },
+	};
+	const snapAllRej = store.computeConvergenceSnapshot(0, allRejected);
+	assert(
+		snapAllRej.converged === false,
+		"v4.14 §6.12 F2: all-rejected round → converged=false",
+	);
+	assert(
+		snapAllRej.rejected_count === 3,
+		"v4.14 §6.12 F2: all-rejected snapshot exposes rejected_count=3 (codex R2 ask)",
+	);
+	assert(
+		Array.isArray(snapAllRej.blocking_peers) &&
+			snapAllRej.blocking_peers.length === 0,
+		"v4.14 §6.12 F2: all-rejected has empty blocking_peers (no responded peers to classify)",
+	);
+	assert(
+		snapAllRej.denominator_mode === "strict",
+		"v4.14 §6.12 F2: all-rejected snapshot keeps denominator_mode=strict",
+	);
+	// Reason text via checkConvergence end-to-end. Build a minimal session
+	// file so the helper path runs.
+	const sidAR = store.initSession({
+		task: "all-rejected reason test",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+	});
+	try {
+		// Inject the all-rejected round shape via direct meta write since
+		// store.appendRound only sees real ask_peers handler output.
+		const metaPath = require("node:path").join(
+			store.sessionDir(sidAR),
+			"meta.json",
+		);
+		const fs = require("node:fs");
+		const metaAR = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+		metaAR.rounds = [allRejected];
+		fs.writeFileSync(metaPath, JSON.stringify(metaAR, null, 2));
+		const conv = store.checkConvergence(sidAR);
+		assert(
+			conv.converged === false,
+			"v4.14 §6.12 F2: all-rejected checkConvergence → converged=false",
+		);
+		assert(
+			typeof conv.reason === "string" &&
+				conv.reason.includes("failed at spawn"),
+			'v4.14 §6.12 F2: all-rejected reason contains "failed at spawn" (codex R2 ask)',
+		);
+	} finally {
+		try {
+			require("node:fs").rmSync(store.sessionDir(sidAR), {
+				recursive: true,
+				force: true,
+			});
+		} catch {}
+	}
+	results.push({
+		step: 'v4.14 §6.12 F2: all-rejected (3-of-3 spawn fail) → rejected_count=3, empty blocking_peers, reason "failed at spawn"',
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.3 / external audit round-2 F5 — session lifecycle guards.
 async function driveV414SessionLifecycleGuardsUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/lib/session-store.js')];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
 
-    // F5b safe-idempotency direct test on store.finalize: same outcome+reason
-    // is allowed by the store (handler-level idempotency is exercised by
-    // server-side stdio path; here we verify the store invariants hold).
-    const sid = store.initSession({
-        task: 'lifecycle test',
-        artifacts: [],
-        callerAgent: 'claude',
-        peers: ['codex', 'gemini'],
-    });
-    try {
-        // First finalize.
-        store.finalize(sid, 'aborted', 'lifecycle_test');
-        const meta1 = store.readMeta(sid);
-        assert(meta1.outcome === 'aborted', 'v4.14 F5: store.finalize sets outcome');
-        assert(meta1.outcome_reason === 'lifecycle_test', 'v4.14 F5: store.finalize sets reason');
-        assert(typeof meta1.finalized_at === 'string', 'v4.14 F5: store.finalize stamps finalized_at');
-        results.push({ step: 'v4.14 F5: store.finalize records outcome + reason + finalized_at', ok: true });
+	// F5b safe-idempotency direct test on store.finalize: same outcome+reason
+	// is allowed by the store (handler-level idempotency is exercised by
+	// server-side stdio path; here we verify the store invariants hold).
+	const sid = store.initSession({
+		task: "lifecycle test",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+	});
+	try {
+		// First finalize.
+		store.finalize(sid, "aborted", "lifecycle_test");
+		const meta1 = store.readMeta(sid);
+		assert(
+			meta1.outcome === "aborted",
+			"v4.14 F5: store.finalize sets outcome",
+		);
+		assert(
+			meta1.outcome_reason === "lifecycle_test",
+			"v4.14 F5: store.finalize sets reason",
+		);
+		assert(
+			typeof meta1.finalized_at === "string",
+			"v4.14 F5: store.finalize stamps finalized_at",
+		);
+		results.push({
+			step: "v4.14 F5: store.finalize records outcome + reason + finalized_at",
+			ok: true,
+		});
 
-        // F5: finalizeIfUnset must NO-OP when meta.outcome already set (re-read-before-write contract).
-        const wrote = store.finalizeIfUnset(sid, 'converged', 'should_not_clobber');
-        assert(wrote === false, 'v4.14 F5: finalizeIfUnset returns false when outcome already set');
-        const meta2 = store.readMeta(sid);
-        assert(meta2.outcome === 'aborted' && meta2.outcome_reason === 'lifecycle_test', 'v4.14 F5: finalizeIfUnset preserved original outcome+reason');
-        results.push({ step: 'v4.14 F5: finalizeIfUnset never clobbers existing outcome', ok: true });
+		// F5: finalizeIfUnset must NO-OP when meta.outcome already set (re-read-before-write contract).
+		const wrote = store.finalizeIfUnset(sid, "converged", "should_not_clobber");
+		assert(
+			wrote === false,
+			"v4.14 F5: finalizeIfUnset returns false when outcome already set",
+		);
+		const meta2 = store.readMeta(sid);
+		assert(
+			meta2.outcome === "aborted" && meta2.outcome_reason === "lifecycle_test",
+			"v4.14 F5: finalizeIfUnset preserved original outcome+reason",
+		);
+		results.push({
+			step: "v4.14 F5: finalizeIfUnset never clobbers existing outcome",
+			ok: true,
+		});
 
-        // Lock cleanup verification: after no operation, lock dir must not exist.
-        const lockPath = path.join(store.sessionDir(sid), '.lock');
-        assert(!fs.existsSync(lockPath), 'v4.14 F5: no stale lock left in session dir post-test');
-        results.push({ step: 'v4.14 F5: session dir has no stale lock after lifecycle ops', ok: true });
-    } finally {
-        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
-    }
+		// Lock cleanup verification: after no operation, lock dir must not exist.
+		const lockPath = path.join(store.sessionDir(sid), ".lock");
+		assert(
+			!fs.existsSync(lockPath),
+			"v4.14 F5: no stale lock left in session dir post-test",
+		);
+		results.push({
+			step: "v4.14 F5: session dir has no stale lock after lifecycle ops",
+			ok: true,
+		});
+	} finally {
+		try {
+			fs.rmSync(store.sessionDir(sid), { recursive: true, force: true });
+		} catch {}
+	}
 
-    // F5c handler-side guard: verify the description text mentions the
-    // finalized-rejection contract (anti-drift assertion — actual behavior
-    // tested by the existing stdio smoke + manual integration).
-    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
-    assert(
-        serverSrc.includes('already finalized') && serverSrc.includes('cannot append a new round'),
-        'v4.14 F5c: ask_peer/ask_peers handlers contain finalized-session rejection logic'
-    );
-    assert(
-        serverSrc.includes('safe-idempotent') && serverSrc.includes('conflicting re-finalize rejected') && serverSrc.includes('Identical re-finalize is allowed as a no-op'),
-        'v4.14 F5b: session_finalize handler contains safe-idempotent + conflicting-rejection branches'
-    );
-    assert(
-        serverSrc.includes('Post-finalization escalation IS allowed'),
-        'v4.14 F5 follow-up: escalate_to_operator pinned as allowed-on-finalized + locked'
-    );
-    results.push({ step: 'v4.14 F5: handlers carry finalized-session lifecycle contracts (anti-drift)', ok: true });
+	// F5c handler-side guard: verify the description text mentions the
+	// finalized-rejection contract (anti-drift assertion — actual behavior
+	// tested by the existing stdio smoke + manual integration).
+	const serverSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+	assert(
+		serverSrc.includes("already finalized") &&
+			serverSrc.includes("cannot append a new round"),
+		"v4.14 F5c: ask_peer/ask_peers handlers contain finalized-session rejection logic",
+	);
+	assert(
+		serverSrc.includes("safe-idempotent") &&
+			serverSrc.includes("conflicting re-finalize rejected") &&
+			serverSrc.includes("Identical re-finalize is allowed as a no-op"),
+		"v4.14 F5b: session_finalize handler contains safe-idempotent + conflicting-rejection branches",
+	);
+	assert(
+		serverSrc.includes("Post-finalization escalation IS allowed"),
+		"v4.14 F5 follow-up: escalate_to_operator pinned as allowed-on-finalized + locked",
+	);
+	results.push({
+		step: "v4.14 F5: handlers carry finalized-session lifecycle contracts (anti-drift)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.2 §6.10 enforcement — language drift detector unit tests (B+C runtime side).
 async function driveV414PromptLanguageDetectorUnit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    delete require.cache[require.resolve('../src/server.js')];
-    const server = require('../src/server.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	delete require.cache[require.resolve("../src/server.js")];
+	const server = require("../src/server.js");
 
-    // Clean en-US: must NOT be flagged.
-    const enClean = 'Please audit the code in server.js for security vulnerabilities. Report findings without modifying code. Return READY when done.';
-    assert(server.detectPromptLanguageDrift(enClean) === null, '§6.10 detector: clean en-US prompt is not flagged');
+	// Clean en-US: must NOT be flagged.
+	const enClean =
+		"Please audit the code in server.js for security vulnerabilities. Report findings without modifying code. Return READY when done.";
+	assert(
+		server.detectPromptLanguageDrift(enClean) === null,
+		"§6.10 detector: clean en-US prompt is not flagged",
+	);
 
-    // Clean en-US technical with identifiers: must NOT be flagged.
-    const enTechnical = 'Run ask_peers with caller_status=NOT_READY and verify the convergence_health field shifts from normal to extended at round 6. Check meta.caller_resolution.source equals arg when caller is passed explicitly.';
-    assert(server.detectPromptLanguageDrift(enTechnical) === null, '§6.10 detector: en-US technical with identifiers is not flagged');
+	// Clean en-US technical with identifiers: must NOT be flagged.
+	const enTechnical =
+		"Run ask_peers with caller_status=NOT_READY and verify the convergence_health field shifts from normal to extended at round 6. Check meta.caller_resolution.source equals arg when caller is passed explicitly.";
+	assert(
+		server.detectPromptLanguageDrift(enTechnical) === null,
+		"§6.10 detector: en-US technical with identifiers is not flagged",
+	);
 
-    // Loanwords with 1-2 diacritics: must NOT be flagged (under threshold of 4).
-    const enLoanwords = 'The naïve approach is to fetch the café data without auth.';
-    assert(server.detectPromptLanguageDrift(enLoanwords) === null, '§6.10 detector: en-US prose with 2 diacritics under threshold');
+	// Loanwords with 1-2 diacritics: must NOT be flagged (under threshold of 4).
+	const enLoanwords =
+		"The naïve approach is to fetch the café data without auth.";
+	assert(
+		server.detectPromptLanguageDrift(enLoanwords) === null,
+		"§6.10 detector: en-US prose with 2 diacritics under threshold",
+	);
 
-    // The actual offending prompt from field-evidence 2026-04-26 (Gemini-initiated, pt-BR).
-    const ptOffender = 'Por favor, realize uma auditoria de segurança e robustez no código fonte do servidor cross-review-mcp. Concentre-se em identificar vulnerabilidades de injeção no spawn de processos, vazamento de sessão, falhas de sincronização na leitura do stdout/stderr, fragilidades nos regex dos parsers e falhas no modelo de concorrência.';
-    const flagged = server.detectPromptLanguageDrift(ptOffender);
-    assert(flagged !== null, '§6.10 detector: the canonical pt-BR offending prompt IS flagged');
-    assert(flagged.suspected_language === 'non-en-us', '§6.10 detector: suspected_language=non-en-us');
-    assert(flagged.signals.diacritics_count >= server.PROMPT_LANG_DIACRITICS_THRESHOLD, '§6.10 detector: diacritics_count meets threshold');
-    assert(Array.isArray(flagged.signals.lexemes_matched) && flagged.signals.lexemes_matched.length >= server.PROMPT_LANG_LEXEMES_THRESHOLD, '§6.10 detector: lexemes_matched meets threshold');
-    assert(flagged.spec_reference === 'spec v4.14 §6.10', '§6.10 detector: spec reference attached');
-    assert(flagged.recovery_hint === 'reformulate_in_en_us', '§6.10 detector: recovery_hint attached');
-    assert(['low', 'medium', 'high'].includes(flagged.confidence), '§6.10 detector: confidence is one of low/medium/high');
-    // v1.2.4 anti-drift: recovery_advice must reference the live
-    // server.VERSION (caught by external Gemini runtime check that the
-    // hardcoded "v1.2.2" was still in v1.2.3 source). Future regressions
-    // where someone pastes a hardcoded version literal back will fail here.
-    assert(
-        typeof flagged.recovery_advice === 'string'
-            && flagged.recovery_advice.includes(`v${server.VERSION}`),
-        `v4.14 §6.10 anti-drift: recovery_advice contains current runtime VERSION (v${server.VERSION})`
-    );
-    results.push({ step: 'v4.14 §6.10 detector: clean en-US not flagged + canonical pt-BR offender IS flagged with full payload + recovery_advice references runtime VERSION', ok: true });
+	// The actual offending prompt from field-evidence 2026-04-26 (Gemini-initiated, pt-BR).
+	const ptOffender =
+		"Por favor, realize uma auditoria de segurança e robustez no código fonte do servidor cross-review-mcp. Concentre-se em identificar vulnerabilidades de injeção no spawn de processos, vazamento de sessão, falhas de sincronização na leitura do stdout/stderr, fragilidades nos regex dos parsers e falhas no modelo de concorrência.";
+	const flagged = server.detectPromptLanguageDrift(ptOffender);
+	assert(
+		flagged !== null,
+		"§6.10 detector: the canonical pt-BR offending prompt IS flagged",
+	);
+	assert(
+		flagged.suspected_language === "non-en-us",
+		"§6.10 detector: suspected_language=non-en-us",
+	);
+	assert(
+		flagged.signals.diacritics_count >= server.PROMPT_LANG_DIACRITICS_THRESHOLD,
+		"§6.10 detector: diacritics_count meets threshold",
+	);
+	assert(
+		Array.isArray(flagged.signals.lexemes_matched) &&
+			flagged.signals.lexemes_matched.length >=
+				server.PROMPT_LANG_LEXEMES_THRESHOLD,
+		"§6.10 detector: lexemes_matched meets threshold",
+	);
+	assert(
+		flagged.spec_reference === "spec v4.14 §6.10",
+		"§6.10 detector: spec reference attached",
+	);
+	assert(
+		flagged.recovery_hint === "reformulate_in_en_us",
+		"§6.10 detector: recovery_hint attached",
+	);
+	assert(
+		["low", "medium", "high"].includes(flagged.confidence),
+		"§6.10 detector: confidence is one of low/medium/high",
+	);
+	// v1.2.4 anti-drift: recovery_advice must reference the live
+	// server.VERSION (caught by external Gemini runtime check that the
+	// hardcoded "v1.2.2" was still in v1.2.3 source). Future regressions
+	// where someone pastes a hardcoded version literal back will fail here.
+	assert(
+		typeof flagged.recovery_advice === "string" &&
+			flagged.recovery_advice.includes(`v${server.VERSION}`),
+		`v4.14 §6.10 anti-drift: recovery_advice contains current runtime VERSION (v${server.VERSION})`,
+	);
+	results.push({
+		step: "v4.14 §6.10 detector: clean en-US not flagged + canonical pt-BR offender IS flagged with full payload + recovery_advice references runtime VERSION",
+		ok: true,
+	});
 
-    // Lexeme-only path: prompt without diacritics but with multiple pt-BR lexemes (defi-decomposed style).
-    const ptNoAccents = 'concentre-se nas vulnerabilidades das falhas e fragilidades dos arquivos do servidor';
-    const lexemeFlag = server.detectPromptLanguageDrift(ptNoAccents);
-    assert(lexemeFlag !== null && lexemeFlag.signals.lexemes_matched.length >= 3, '§6.10 detector: lexeme-only path flags at threshold (3 distinct matches)');
-    results.push({ step: 'v4.14 §6.10 detector: lexeme-only path flags without diacritics', ok: true });
+	// Lexeme-only path: prompt without diacritics but with multiple pt-BR lexemes (defi-decomposed style).
+	const ptNoAccents =
+		"concentre-se nas vulnerabilidades das falhas e fragilidades dos arquivos do servidor";
+	const lexemeFlag = server.detectPromptLanguageDrift(ptNoAccents);
+	assert(
+		lexemeFlag !== null && lexemeFlag.signals.lexemes_matched.length >= 3,
+		"§6.10 detector: lexeme-only path flags at threshold (3 distinct matches)",
+	);
+	results.push({
+		step: "v4.14 §6.10 detector: lexeme-only path flags without diacritics",
+		ok: true,
+	});
 
-    // Type-shape rejections.
-    assert(server.detectPromptLanguageDrift(null) === null, '§6.10 detector: null input → null');
-    assert(server.detectPromptLanguageDrift('') === null, '§6.10 detector: empty input → null');
-    assert(server.detectPromptLanguageDrift(123) === null, '§6.10 detector: non-string input → null');
-    results.push({ step: 'v4.14 §6.10 detector: rejects non-string + empty inputs', ok: true });
+	// Type-shape rejections.
+	assert(
+		server.detectPromptLanguageDrift(null) === null,
+		"§6.10 detector: null input → null",
+	);
+	assert(
+		server.detectPromptLanguageDrift("") === null,
+		"§6.10 detector: empty input → null",
+	);
+	assert(
+		server.detectPromptLanguageDrift(123) === null,
+		"§6.10 detector: non-string input → null",
+	);
+	results.push({
+		step: "v4.14 §6.10 detector: rejects non-string + empty inputs",
+		ok: true,
+	});
 
-    // Threshold exposure.
-    assert(server.PROMPT_LANG_DIACRITICS_THRESHOLD === 4, '§6.10 detector: diacritics threshold pinned at 4');
-    assert(server.PROMPT_LANG_LEXEMES_THRESHOLD === 3, '§6.10 detector: lexemes threshold pinned at 3');
-    assert(Array.isArray(server.PT_BR_LEXEMES) && server.PT_BR_LEXEMES.length >= 10, '§6.10 detector: lexeme list exported and non-trivial');
-    results.push({ step: 'v4.14 §6.10 detector: thresholds + lexeme list exported for tuning', ok: true });
+	// Threshold exposure.
+	assert(
+		server.PROMPT_LANG_DIACRITICS_THRESHOLD === 4,
+		"§6.10 detector: diacritics threshold pinned at 4",
+	);
+	assert(
+		server.PROMPT_LANG_LEXEMES_THRESHOLD === 3,
+		"§6.10 detector: lexemes threshold pinned at 3",
+	);
+	assert(
+		Array.isArray(server.PT_BR_LEXEMES) && server.PT_BR_LEXEMES.length >= 10,
+		"§6.10 detector: lexeme list exported and non-trivial",
+	);
+	results.push({
+		step: "v4.14 §6.10 detector: thresholds + lexeme list exported for tuning",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.2 §6.10 anti-drift — assert canonical en-US directive appears in tool descriptions (B side).
 async function driveV414PromptLanguageDescriptionDriftUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const serverSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
 
-    // Each of the three peer-exchange tool descriptions must contain the
-    // canonical en-US marker. We check for a stable substring ('§6.10' +
-    // 'en-US') so future paraphrasing is fine but the directive intent is
-    // preserved.
-    const toolDescriptionAnchors = [
-        { name: 'session_init', requires: 'task_language_warning' },
-        { name: 'ask_peer', requires: 'prompt_language_warning' },
-        { name: 'ask_peers', requires: 'prompt_language_warning' },
-    ];
-    for (const t of toolDescriptionAnchors) {
-        // Find the description block for the named tool. The pattern
-        // assumes "name: 'X'" then "description:" within ~3 lines.
-        const nameIdx = serverSrc.indexOf(`name: '${t.name}'`);
-        assert(nameIdx >= 0, `§6.10 anti-drift: tool '${t.name}' is registered`);
-        const descSlice = serverSrc.slice(nameIdx, nameIdx + 8000);
-        assert(
-            descSlice.includes('§6.10') && descSlice.includes('en-US'),
-            `§6.10 anti-drift: '${t.name}' description references §6.10 + en-US`
-        );
-        assert(
-            descSlice.includes(t.requires),
-            `§6.10 anti-drift: '${t.name}' description names the response field '${t.requires}'`
-        );
-    }
-    results.push({ step: 'v4.14 §6.10 anti-drift: session_init / ask_peer / ask_peers descriptions all carry the en-US directive + warning field name', ok: true });
+	// Each of the three peer-exchange tool descriptions must contain the
+	// canonical en-US marker. We check for a stable substring ('§6.10' +
+	// 'en-US') so future paraphrasing is fine but the directive intent is
+	// preserved.
+	const toolDescriptionAnchors = [
+		{ name: "session_init", requires: "task_language_warning" },
+		{ name: "ask_peer", requires: "prompt_language_warning" },
+		{ name: "ask_peers", requires: "prompt_language_warning" },
+	];
+	for (const t of toolDescriptionAnchors) {
+		// Find the description block for the named tool. Quote-agnostic on
+		// the registered name (biome may flip 'X' to "X").
+		const nameRe = new RegExp(`name:\\s*['"]${t.name}['"]`);
+		const nameMatch = serverSrc.match(nameRe);
+		assert(nameMatch, `§6.10 anti-drift: tool '${t.name}' is registered`);
+		const nameIdx = nameMatch.index;
+		const descSlice = serverSrc.slice(nameIdx, nameIdx + 8000);
+		assert(
+			descSlice.includes("§6.10") && descSlice.includes("en-US"),
+			`§6.10 anti-drift: '${t.name}' description references §6.10 + en-US`,
+		);
+		assert(
+			descSlice.includes(t.requires),
+			`§6.10 anti-drift: '${t.name}' description names the response field '${t.requires}'`,
+		);
+	}
+	results.push({
+		step: "v4.14 §6.10 anti-drift: session_init / ask_peer / ask_peers descriptions all carry the en-US directive + warning field name",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.1 hardening — F1 + F4 from gemini audit 2026-04-26: session_id must be
 // a well-formed UUID; path traversal attempts must throw before any FS op.
 async function driveV414PathTraversalGuardUnit() {
-    const results = [];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const store = require("../src/lib/session-store.js");
 
-    const traversalPayloads = [
-        '../foo',
-        '../../etc/passwd',
-        '..\\..\\Windows\\System32',
-        'a/b',
-        'a\\b',
-        'not-a-uuid',
-        '',
-        '00000000-0000-0000-0000-00000000000',  // 11 hex in last group, invalid
-        '00000000-0000-0000-0000-0000000000001',  // 13 hex in last group, invalid
-    ];
-    for (const bad of traversalPayloads) {
-        let threw = false;
-        try { store.sessionDir(bad); } catch { threw = true; }
-        assert(threw, `v4.14 hardening: sessionDir('${bad}') throws (invalid UUID rejected)`);
-    }
-    results.push({ step: 'v4.14 hardening F1: sessionDir rejects traversal + non-UUID payloads', ok: true });
+	const traversalPayloads = [
+		"../foo",
+		"../../etc/passwd",
+		"..\\..\\Windows\\System32",
+		"a/b",
+		"a\\b",
+		"not-a-uuid",
+		"",
+		"00000000-0000-0000-0000-00000000000", // 11 hex in last group, invalid
+		"00000000-0000-0000-0000-0000000000001", // 13 hex in last group, invalid
+	];
+	for (const bad of traversalPayloads) {
+		let threw = false;
+		try {
+			store.sessionDir(bad);
+		} catch {
+			threw = true;
+		}
+		assert(
+			threw,
+			`v4.14 hardening: sessionDir('${bad}') throws (invalid UUID rejected)`,
+		);
+	}
+	results.push({
+		step: "v4.14 hardening F1: sessionDir rejects traversal + non-UUID payloads",
+		ok: true,
+	});
 
-    // Type-shape rejections.
-    let threwOnNull = false;
-    try { store.sessionDir(null); } catch { threwOnNull = true; }
-    assert(threwOnNull, 'v4.14 hardening F1: sessionDir(null) throws');
-    let threwOnNumber = false;
-    try { store.sessionDir(123); } catch { threwOnNumber = true; }
-    assert(threwOnNumber, 'v4.14 hardening F1: sessionDir(123) throws');
-    results.push({ step: 'v4.14 hardening F1: sessionDir rejects non-string types', ok: true });
+	// Type-shape rejections.
+	let threwOnNull = false;
+	try {
+		store.sessionDir(null);
+	} catch {
+		threwOnNull = true;
+	}
+	assert(threwOnNull, "v4.14 hardening F1: sessionDir(null) throws");
+	let threwOnNumber = false;
+	try {
+		store.sessionDir(123);
+	} catch {
+		threwOnNumber = true;
+	}
+	assert(threwOnNumber, "v4.14 hardening F1: sessionDir(123) throws");
+	results.push({
+		step: "v4.14 hardening F1: sessionDir rejects non-string types",
+		ok: true,
+	});
 
-    // Valid UUID accepted.
-    // v1.2.5: strict UUIDv4 enforced (version 4 + variant [89ab]). Test
-    // fixture updated to use a real v4-shaped UUID. Old fixture (version 1)
-    // is now correctly rejected by the strict regex.
-    const validUuid = '12345678-1234-4234-8234-123456789012';
-    const dir = store.sessionDir(validUuid);
-    assert(typeof dir === 'string' && dir.includes(validUuid), 'v4.14 hardening F1: valid UUIDv4 accepted');
-    results.push({ step: 'v4.14 hardening F1: valid UUIDv4 accepted by sessionDir', ok: true });
+	// Valid UUID accepted.
+	// v1.2.5: strict UUIDv4 enforced (version 4 + variant [89ab]). Test
+	// fixture updated to use a real v4-shaped UUID. Old fixture (version 1)
+	// is now correctly rejected by the strict regex.
+	const validUuid = "12345678-1234-4234-8234-123456789012";
+	const dir = store.sessionDir(validUuid);
+	assert(
+		typeof dir === "string" && dir.includes(validUuid),
+		"v4.14 hardening F1: valid UUIDv4 accepted",
+	);
+	results.push({
+		step: "v4.14 hardening F1: valid UUIDv4 accepted by sessionDir",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.1 hardening — F8 from gemini audit: ensure no stale model IDs in tool
@@ -1430,349 +2465,643 @@ async function driveV414PathTraversalGuardUnit() {
 // in lockstep. This step asserts each pinned model ID appears in the
 // descriptions of ask_peer + ask_peers.
 async function driveV414ToolDescriptionDriftUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const peerSpawn = require('../src/lib/peer-spawn.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const peerSpawn = require("../src/lib/peer-spawn.js");
 
-    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+	const serverSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
 
-    // Stale model IDs that should NOT appear anywhere in current descriptions.
-    const staleModels = ['gemini-2.5-pro', 'gemini-2.0-pro', 'gemini-1.5-pro'];
-    for (const stale of staleModels) {
-        // It's allowed in code comments / examples (lib stripping context),
-        // but NOT inside tool descriptions. We approximate by checking that
-        // the substring does NOT appear in lines containing 'description:'.
-        const lines = serverSrc.split('\n');
-        let leaks = 0;
-        let inDescription = false;
-        for (const line of lines) {
-            if (/description:\s*[`'"]/.test(line)) inDescription = true;
-            if (inDescription && line.includes(stale)) leaks++;
-            if (inDescription && (line.includes('`,') || line.includes('"\,') || /^\s+inputSchema/.test(line))) {
-                inDescription = false;
-            }
-        }
-        assert(
-            leaks === 0,
-            `v4.14 hardening F8: stale model id '${stale}' must not appear in tool descriptions in server.js (${leaks} occurrences)`
-        );
-    }
+	// Stale model IDs that should NOT appear anywhere in current descriptions.
+	const staleModels = ["gemini-2.5-pro", "gemini-2.0-pro", "gemini-1.5-pro"];
+	for (const stale of staleModels) {
+		// It's allowed in code comments / examples (lib stripping context),
+		// but NOT inside tool descriptions. We approximate by checking that
+		// the substring does NOT appear in lines containing 'description:'.
+		const lines = serverSrc.split("\n");
+		let leaks = 0;
+		let inDescription = false;
+		for (const line of lines) {
+			if (/description:\s*[`'"]/.test(line)) inDescription = true;
+			if (inDescription && line.includes(stale)) leaks++;
+			if (
+				inDescription &&
+				(line.includes("`,") ||
+					line.includes('",') ||
+					/^\s+inputSchema/.test(line))
+			) {
+				inDescription = false;
+			}
+		}
+		assert(
+			leaks === 0,
+			`v4.14 hardening F8: stale model id '${stale}' must not appear in tool descriptions in server.js (${leaks} occurrences)`,
+		);
+	}
 
-    // Pinned IDs from peer-spawn.js MUST appear in the server.js descriptions
-    // at least once each so callers see the canonical pin.
-    const pinned = [peerSpawn.CODEX_MODEL, peerSpawn.CLAUDE_MODEL, peerSpawn.GEMINI_MODEL];
-    for (const p of pinned) {
-        assert(
-            serverSrc.includes(p),
-            `v4.14 hardening F8: pinned model '${p}' must appear in server.js (descriptions or constants)`
-        );
-    }
-    results.push({ step: 'v4.14 hardening F8: tool descriptions reference pinned models, no stale IDs', ok: true });
+	// Pinned IDs from peer-spawn.js MUST appear in the server.js descriptions
+	// at least once each so callers see the canonical pin.
+	const pinned = [
+		peerSpawn.CODEX_MODEL,
+		peerSpawn.CLAUDE_MODEL,
+		peerSpawn.GEMINI_MODEL,
+	];
+	for (const p of pinned) {
+		assert(
+			serverSrc.includes(p),
+			`v4.14 hardening F8: pinned model '${p}' must appear in server.js (descriptions or constants)`,
+		);
+	}
+	results.push({
+		step: "v4.14 hardening F8: tool descriptions reference pinned models, no stale IDs",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution.
 async function driveV414CallerResolutionUnit() {
-    const results = [];
-    // The resolver helpers are exported from server.js but server.js boots
-    // an MCP server when required without TEST_IMPORT. Reuse the test guard.
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    process.env.CROSS_REVIEW_CALLER = 'claude';
-    // Re-require with cleared cache so env-var changes take effect.
-    delete require.cache[require.resolve('../src/server.js')];
-    const server = require('../src/server.js');
+	const results = [];
+	// The resolver helpers are exported from server.js but server.js boots
+	// an MCP server when required without TEST_IMPORT. Reuse the test guard.
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	process.env.CROSS_REVIEW_CALLER = "claude";
+	// Re-require with cleared cache so env-var changes take effect.
+	delete require.cache[require.resolve("../src/server.js")];
+	const server = require("../src/server.js");
 
-    // Direct unit: clientInfo → agent mapping.
-    assert(server.resolveCallerFromClientInfo({ name: 'claude-code' }) === 'claude', '§6.20: claude-code → claude');
-    assert(server.resolveCallerFromClientInfo({ name: 'gemini-cli' }) === 'gemini', '§6.20: gemini-cli → gemini');
-    assert(server.resolveCallerFromClientInfo({ name: 'codex' }) === 'codex', '§6.20: codex → codex');
-    assert(server.resolveCallerFromClientInfo({ name: 'Claude Code v2.1' }) === 'claude', '§6.20: substring match case-insensitive');
-    assert(server.resolveCallerFromClientInfo({ name: 'unknown-tool' }) === null, '§6.20: unknown client → null');
-    assert(server.resolveCallerFromClientInfo(null) === null, '§6.20: null clientInfo → null');
-    assert(server.resolveCallerFromClientInfo({}) === null, '§6.20: clientInfo without name → null');
-    results.push({ step: 'v4.14 §6.20: clientInfo→agent mapping (claude/gemini/codex/unknown/null)', ok: true });
+	// Direct unit: clientInfo → agent mapping.
+	assert(
+		server.resolveCallerFromClientInfo({ name: "claude-code" }) === "claude",
+		"§6.20: claude-code → claude",
+	);
+	assert(
+		server.resolveCallerFromClientInfo({ name: "gemini-cli" }) === "gemini",
+		"§6.20: gemini-cli → gemini",
+	);
+	assert(
+		server.resolveCallerFromClientInfo({ name: "codex" }) === "codex",
+		"§6.20: codex → codex",
+	);
+	assert(
+		server.resolveCallerFromClientInfo({ name: "Claude Code v2.1" }) ===
+			"claude",
+		"§6.20: substring match case-insensitive",
+	);
+	assert(
+		server.resolveCallerFromClientInfo({ name: "unknown-tool" }) === null,
+		"§6.20: unknown client → null",
+	);
+	assert(
+		server.resolveCallerFromClientInfo(null) === null,
+		"§6.20: null clientInfo → null",
+	);
+	assert(
+		server.resolveCallerFromClientInfo({}) === null,
+		"§6.20: clientInfo without name → null",
+	);
+	results.push({
+		step: "v4.14 §6.20: clientInfo→agent mapping (claude/gemini/codex/unknown/null)",
+		ok: true,
+	});
 
-    // Resolver precedence: args.caller > clientInfo > env var.
-    const r1 = server.resolveCallerForSession('gemini', { name: 'claude-code' });
-    assert(r1.caller === 'gemini' && r1.source === 'arg', '§6.20: args.caller wins over clientInfo');
-    const r2 = server.resolveCallerForSession(null, { name: 'gemini-cli' });
-    assert(r2.caller === 'gemini' && r2.source === 'client_info', '§6.20: clientInfo used when args.caller absent');
-    const r3 = server.resolveCallerForSession(null, { name: 'unknown' });
-    assert(r3.caller === 'claude' && r3.source === 'env_var', '§6.20: env var used when args + clientInfo both fail');
-    const r4 = server.resolveCallerForSession(null, null);
-    assert(r4.caller === 'claude' && r4.source === 'env_var', '§6.20: env var used when no clientInfo at all');
-    results.push({ step: 'v4.14 §6.20: resolveCallerForSession precedence (arg > client_info > env_var)', ok: true });
+	// Resolver precedence: args.caller > clientInfo > env var.
+	const r1 = server.resolveCallerForSession("gemini", { name: "claude-code" });
+	assert(
+		r1.caller === "gemini" && r1.source === "arg",
+		"§6.20: args.caller wins over clientInfo",
+	);
+	const r2 = server.resolveCallerForSession(null, { name: "gemini-cli" });
+	assert(
+		r2.caller === "gemini" && r2.source === "client_info",
+		"§6.20: clientInfo used when args.caller absent",
+	);
+	const r3 = server.resolveCallerForSession(null, { name: "unknown" });
+	assert(
+		r3.caller === "claude" && r3.source === "env_var",
+		"§6.20: env var used when args + clientInfo both fail",
+	);
+	const r4 = server.resolveCallerForSession(null, null);
+	assert(
+		r4.caller === "claude" && r4.source === "env_var",
+		"§6.20: env var used when no clientInfo at all",
+	);
+	results.push({
+		step: "v4.14 §6.20: resolveCallerForSession precedence (arg > client_info > env_var)",
+		ok: true,
+	});
 
-    // Invalid args.caller → throws.
-    let threw = false;
-    try { server.resolveCallerForSession('not-a-real-agent', null); } catch { threw = true; }
-    assert(threw, '§6.20: invalid args.caller throws');
+	// Invalid args.caller → throws.
+	let threw = false;
+	try {
+		server.resolveCallerForSession("not-a-real-agent", null);
+	} catch {
+		threw = true;
+	}
+	assert(threw, "§6.20: invalid args.caller throws");
 
-    // Resolution carries client_info_name for audit even when arg wins.
-    const r5 = server.resolveCallerForSession('codex', { name: 'gemini-cli' });
-    assert(r5.caller === 'codex' && r5.source === 'arg' && r5.client_info_name === 'gemini-cli', '§6.20: client_info_name preserved in resolution audit');
-    results.push({ step: 'v4.14 §6.20: invalid caller throws + audit fields preserved', ok: true });
+	// Resolution carries client_info_name for audit even when arg wins.
+	const r5 = server.resolveCallerForSession("codex", { name: "gemini-cli" });
+	assert(
+		r5.caller === "codex" &&
+			r5.source === "arg" &&
+			r5.client_info_name === "gemini-cli",
+		"§6.20: client_info_name preserved in resolution audit",
+	);
+	results.push({
+		step: "v4.14 §6.20: invalid caller throws + audit fields preserved",
+		ok: true,
+	});
 
-    // peersForCaller derives complement of VALID_AGENTS.
-    const peersClaude = server.PEERS;
-    // Re-derive via peersForCaller and compare. Note: peersForCaller is not
-    // exported; we test it indirectly via resolveCallerForSession + observed
-    // behavior. The list we expect for caller=gemini is [claude, codex].
-    // (Peer-set derivation is also exercised end-to-end by smoke session_init
-    // calls when the runtime is fully booted.)
-    assert(peersClaude.length === 2 && peersClaude.includes('codex') && peersClaude.includes('gemini'), '§6.20: env-derived PEERS for caller=claude is [codex, gemini]');
-    results.push({ step: 'v4.14 §6.20: peer-set derivation invariant under env-var caller', ok: true });
+	// peersForCaller derives complement of VALID_AGENTS.
+	const peersClaude = server.PEERS;
+	// Re-derive via peersForCaller and compare. Note: peersForCaller is not
+	// exported; we test it indirectly via resolveCallerForSession + observed
+	// behavior. The list we expect for caller=gemini is [claude, codex].
+	// (Peer-set derivation is also exercised end-to-end by smoke session_init
+	// calls when the runtime is fully booted.)
+	assert(
+		peersClaude.length === 2 &&
+			peersClaude.includes("codex") &&
+			peersClaude.includes("gemini"),
+		"§6.20: env-derived PEERS for caller=claude is [codex, gemini]",
+	);
+	results.push({
+		step: "v4.14 §6.20: peer-set derivation invariant under env-var caller",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.2.0 / spec v4.14 anti-drift — assert README.md "Current release" matches code VERSION.
 // Prevents the v1.0.4/v1.0.5 doc-drift recurrence (operator noticed READMEs were stuck at v1.0.3
 // while three releases had shipped).
 async function driveV414ReadmeVersionDriftUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const server = require('../src/server.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const server = require("../src/server.js");
 
-    const readme = fs.readFileSync(path.resolve(__dirname, '..', 'README.md'), 'utf8');
-    // Looks for line shape: "Current release: **vX.Y.Z**"
-    const m = readme.match(/Current release:\s*\*\*v(\d+\.\d+\.\d+)\*\*/);
-    assert(m !== null, 'v4.14 anti-drift: README.md contains "Current release: **vX.Y.Z**" line');
-    const readmeVersion = m[1];
-    assert(
-        readmeVersion === server.VERSION,
-        `v4.14 anti-drift: README.md "Current release" (${readmeVersion}) === server.VERSION (${server.VERSION})`
-    );
-    results.push({ step: 'v4.14 anti-drift: README.md "Current release" matches server.VERSION', ok: true });
+	const readme = fs.readFileSync(
+		path.resolve(__dirname, "..", "README.md"),
+		"utf8",
+	);
+	// Looks for line shape: "Current release: **vX.Y.Z**"
+	const m = readme.match(/Current release:\s*\*\*v(\d+\.\d+\.\d+)\*\*/);
+	assert(
+		m !== null,
+		'v4.14 anti-drift: README.md contains "Current release: **vX.Y.Z**" line',
+	);
+	const readmeVersion = m[1];
+	assert(
+		readmeVersion === server.VERSION,
+		`v4.14 anti-drift: README.md "Current release" (${readmeVersion}) === server.VERSION (${server.VERSION})`,
+	);
+	results.push({
+		step: 'v4.14 anti-drift: README.md "Current release" matches server.VERSION',
+		ok: true,
+	});
 
-    // Same check for spec banner: README mentions current spec version.
-    const specPath = path.resolve(__dirname, '..', 'docs', 'workflow-spec.md');
-    const spec = fs.readFileSync(specPath, 'utf8');
-    const specBanner = spec.match(/^# Cross-Review MCP Workflow Specification (v\d+\.\d+)/m);
-    assert(specBanner !== null, 'v4.14 anti-drift: spec doc has banner with version');
-    const specVersion = specBanner[1];
-    const readmeMentionsSpec = readme.includes(`spec ${specVersion}`)
-        || readme.includes(`spec: ${specVersion}`)
-        || readme.includes(`**${specVersion}**`)
-        || readme.includes(`**spec ${specVersion}**`);
-    assert(
-        readmeMentionsSpec,
-        `v4.14 anti-drift: README.md mentions current spec version (${specVersion}) at least once`
-    );
-    results.push({ step: 'v4.14 anti-drift: README.md mentions current spec version', ok: true });
+	// Same check for spec banner: README mentions current spec version.
+	const specPath = path.resolve(__dirname, "..", "docs", "workflow-spec.md");
+	const spec = fs.readFileSync(specPath, "utf8");
+	const specBanner = spec.match(
+		/^# Cross-Review MCP Workflow Specification (v\d+\.\d+)/m,
+	);
+	assert(
+		specBanner !== null,
+		"v4.14 anti-drift: spec doc has banner with version",
+	);
+	const specVersion = specBanner[1];
+	const readmeMentionsSpec =
+		readme.includes(`spec ${specVersion}`) ||
+		readme.includes(`spec: ${specVersion}`) ||
+		readme.includes(`**${specVersion}**`) ||
+		readme.includes(`**spec ${specVersion}**`);
+	assert(
+		readmeMentionsSpec,
+		`v4.14 anti-drift: README.md mentions current spec version (${specVersion}) at least once`,
+	);
+	results.push({
+		step: "v4.14 anti-drift: README.md mentions current spec version",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v1.1.0 / spec v4.13 §6.17 — spec_version persistence in meta.json (FU-1).
 async function driveV413SpecVersionUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const store = require("../src/lib/session-store.js");
 
-    // Create a real session and verify meta carries spec_version.
-    const sid = store.initSession({
-        task: 'v4.13 §6.17 unit',
-        artifacts: [],
-        callerAgent: 'claude',
-        peers: ['codex', 'gemini'],
-    });
-    try {
-        const meta = JSON.parse(
-            fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8')
-        );
-        assert(meta.spec_version === store.SESSION_SPEC_VERSION, 'v4.13 §6.17: meta.spec_version equals SESSION_SPEC_VERSION constant');
-        assert(meta.spec_version === 'v4.14', 'v4.13 §6.17: SESSION_SPEC_VERSION literal v4.14 in this release');
-        assert(Object.prototype.hasOwnProperty.call(meta, 'outcome_reason') && meta.outcome_reason === null, 'v4.13 §6.17: outcome_reason initialized to null');
-        results.push({ step: 'v4.13 §6.17: spec_version + outcome_reason persisted on session_init', ok: true });
+	// Create a real session and verify meta carries spec_version.
+	const sid = store.initSession({
+		task: "v4.13 §6.17 unit",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+	});
+	try {
+		const meta = JSON.parse(
+			fs.readFileSync(path.join(store.sessionDir(sid), "meta.json"), "utf8"),
+		);
+		assert(
+			meta.spec_version === store.SESSION_SPEC_VERSION,
+			"v4.13 §6.17: meta.spec_version equals SESSION_SPEC_VERSION constant",
+		);
+		assert(
+			meta.spec_version === "v4.14",
+			"v4.13 §6.17: SESSION_SPEC_VERSION literal v4.14 in this release",
+		);
+		assert(
+			Object.hasOwn(meta, "outcome_reason") && meta.outcome_reason === null,
+			"v4.13 §6.17: outcome_reason initialized to null",
+		);
+		results.push({
+			step: "v4.13 §6.17: spec_version + outcome_reason persisted on session_init",
+			ok: true,
+		});
 
-        // Round-trip: finalize with reason, verify meta.outcome_reason set.
-        store.finalize(sid, 'aborted', 'unit_test_reason');
-        const meta2 = JSON.parse(
-            fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8')
-        );
-        assert(meta2.outcome === 'aborted', 'v4.13 §6.17: finalize sets outcome');
-        assert(meta2.outcome_reason === 'unit_test_reason', 'v4.13 §6.17: finalize records reason');
-        results.push({ step: 'v4.13 §6.17: finalize(sessionId, outcome, reason) round-trips outcome_reason', ok: true });
-    } finally {
-        // Cleanup
-        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
-    }
-    return { results };
+		// Round-trip: finalize with reason, verify meta.outcome_reason set.
+		store.finalize(sid, "aborted", "unit_test_reason");
+		const meta2 = JSON.parse(
+			fs.readFileSync(path.join(store.sessionDir(sid), "meta.json"), "utf8"),
+		);
+		assert(meta2.outcome === "aborted", "v4.13 §6.17: finalize sets outcome");
+		assert(
+			meta2.outcome_reason === "unit_test_reason",
+			"v4.13 §6.17: finalize records reason",
+		);
+		results.push({
+			step: "v4.13 §6.17: finalize(sessionId, outcome, reason) round-trips outcome_reason",
+			ok: true,
+		});
+	} finally {
+		// Cleanup
+		try {
+			fs.rmSync(store.sessionDir(sid), { recursive: true, force: true });
+		} catch {}
+	}
+	return { results };
 }
 
 // v1.1.0 / spec v4.13 §6.18 — long-idle session reconciliation (FU-3).
 // Creates synthetic stale sessions, runs sweep with deterministic `now`, asserts
 // the 7 invariants ratified by cross-review session 483b2d1c R1.
 async function driveV413SessionSweepUnit() {
-    const results = [];
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const store = require("../src/lib/session-store.js");
 
-    // Helper: create a session dir with a hand-crafted meta.json.
-    const crypto = require('node:crypto');
-    function mkTestSession({ startedAtIso, rounds = [], outcome = null, withLock = false, malformedTimestamp = false }) {
-        const id = crypto.randomUUID();
-        fs.mkdirSync(store.sessionDir(id), { recursive: true });
-        const meta = {
-            session_id: id,
-            spec_version: store.SESSION_SPEC_VERSION,
-            task: 'sweep test session',
-            artifacts: [],
-            caller: 'claude',
-            peers: ['codex'],
-            started_at: malformedTimestamp ? 'not-a-date' : startedAtIso,
-            rounds,
-            failed_attempts: [],
-            outcome,
-            outcome_reason: null,
-        };
-        fs.writeFileSync(path.join(store.sessionDir(id), 'meta.json'), JSON.stringify(meta, null, 2));
-        if (withLock) {
-            fs.mkdirSync(path.join(store.sessionDir(id), '.lock'), { recursive: true });
-        }
-        return id;
-    }
+	// Helper: create a session dir with a hand-crafted meta.json.
+	const crypto = require("node:crypto");
+	function mkTestSession({
+		startedAtIso,
+		rounds = [],
+		outcome = null,
+		withLock = false,
+		malformedTimestamp = false,
+	}) {
+		const id = crypto.randomUUID();
+		fs.mkdirSync(store.sessionDir(id), { recursive: true });
+		const meta = {
+			session_id: id,
+			spec_version: store.SESSION_SPEC_VERSION,
+			task: "sweep test session",
+			artifacts: [],
+			caller: "claude",
+			peers: ["codex"],
+			started_at: malformedTimestamp ? "not-a-date" : startedAtIso,
+			rounds,
+			failed_attempts: [],
+			outcome,
+			outcome_reason: null,
+		};
+		fs.writeFileSync(
+			path.join(store.sessionDir(id), "meta.json"),
+			JSON.stringify(meta, null, 2),
+		);
+		if (withLock) {
+			fs.mkdirSync(path.join(store.sessionDir(id), ".lock"), {
+				recursive: true,
+			});
+		}
+		return id;
+	}
 
-    const cleanup = [];
-    const NOW = Date.parse('2026-04-26T12:00:00Z');
-    const day = 24 * 60 * 60 * 1000;
+	const cleanup = [];
+	const NOW = Date.parse("2026-04-26T12:00:00Z");
+	const day = 24 * 60 * 60 * 1000;
 
-    // (1) 0-round, 10d-old, no lock, outcome=null → would_finalize=true.
-    const sHappy = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString() });
-    cleanup.push(sHappy);
+	// (1) 0-round, 10d-old, no lock, outcome=null → would_finalize=true.
+	const sHappy = mkTestSession({
+		startedAtIso: new Date(NOW - 10 * day).toISOString(),
+	});
+	cleanup.push(sHappy);
 
-    // (2) 12h-old, would be candidate by stale_days=0 but blocked by 24h floor.
-    const sYoung = mkTestSession({ startedAtIso: new Date(NOW - 12 * 60 * 60 * 1000).toISOString() });
-    cleanup.push(sYoung);
+	// (2) 12h-old, would be candidate by stale_days=0 but blocked by 24h floor.
+	const sYoung = mkTestSession({
+		startedAtIso: new Date(NOW - 12 * 60 * 60 * 1000).toISOString(),
+	});
+	cleanup.push(sYoung);
 
-    // (3) 10d-old + lock → reported with locked:true, would_finalize:false.
-    const sLocked = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString(), withLock: true });
-    cleanup.push(sLocked);
+	// (3) 10d-old + lock → reported with locked:true, would_finalize:false.
+	const sLocked = mkTestSession({
+		startedAtIso: new Date(NOW - 10 * day).toISOString(),
+		withLock: true,
+	});
+	cleanup.push(sLocked);
 
-    // (4) 10d-old but already finalized → never appears.
-    const sFinalized = mkTestSession({ startedAtIso: new Date(NOW - 10 * day).toISOString(), outcome: 'converged' });
-    cleanup.push(sFinalized);
+	// (4) 10d-old but already finalized → never appears.
+	const sFinalized = mkTestSession({
+		startedAtIso: new Date(NOW - 10 * day).toISOString(),
+		outcome: "converged",
+	});
+	cleanup.push(sFinalized);
 
-    // (5) Last activity recent (2h ago) but started_at long ago → NOT stale.
-    const sActive = mkTestSession({
-        startedAtIso: new Date(NOW - 30 * day).toISOString(),
-        rounds: [{ round: 1, completed_at: new Date(NOW - 2 * 60 * 60 * 1000).toISOString() }],
-    });
-    cleanup.push(sActive);
+	// (5) Last activity recent (2h ago) but started_at long ago → NOT stale.
+	const sActive = mkTestSession({
+		startedAtIso: new Date(NOW - 30 * day).toISOString(),
+		rounds: [
+			{
+				round: 1,
+				completed_at: new Date(NOW - 2 * 60 * 60 * 1000).toISOString(),
+			},
+		],
+	});
+	cleanup.push(sActive);
 
-    // (6) Malformed timestamp → reported with skip_reason: malformed_timestamp.
-    const sMalformed = mkTestSession({ startedAtIso: 'not-a-date', malformedTimestamp: true });
-    cleanup.push(sMalformed);
+	// (6) Malformed timestamp → reported with skip_reason: malformed_timestamp.
+	const sMalformed = mkTestSession({
+		startedAtIso: "not-a-date",
+		malformedTimestamp: true,
+	});
+	cleanup.push(sMalformed);
 
-    try {
-        // Invariant set 1: dry-run is read-only.
-        const beforeMtimes = cleanup.map((id) => {
-            try { return fs.statSync(path.join(store.sessionDir(id), 'meta.json')).mtimeMs; } catch { return null; }
-        });
-        const dryRun = store.sweepStaleSessions({ staleDays: 7, dryRun: true, now: NOW });
-        const afterMtimes = cleanup.map((id) => {
-            try { return fs.statSync(path.join(store.sessionDir(id), 'meta.json')).mtimeMs; } catch { return null; }
-        });
-        for (let i = 0; i < beforeMtimes.length; i++) {
-            assert(beforeMtimes[i] === afterMtimes[i], `v4.13 §6.18 inv-1: dry-run leaves meta.mtime unchanged for session ${i}`);
-        }
-        assert(dryRun.finalized.length === 0, 'v4.13 §6.18 inv-1: dry-run finalized=[] always');
-        results.push({ step: 'v4.13 §6.18 inv-1: dry-run is read-only', ok: true });
+	try {
+		// Invariant set 1: dry-run is read-only.
+		const beforeMtimes = cleanup.map((id) => {
+			try {
+				return fs.statSync(path.join(store.sessionDir(id), "meta.json"))
+					.mtimeMs;
+			} catch {
+				return null;
+			}
+		});
+		const dryRun = store.sweepStaleSessions({
+			staleDays: 7,
+			dryRun: true,
+			now: NOW,
+		});
+		const afterMtimes = cleanup.map((id) => {
+			try {
+				return fs.statSync(path.join(store.sessionDir(id), "meta.json"))
+					.mtimeMs;
+			} catch {
+				return null;
+			}
+		});
+		for (let i = 0; i < beforeMtimes.length; i++) {
+			assert(
+				beforeMtimes[i] === afterMtimes[i],
+				`v4.13 §6.18 inv-1: dry-run leaves meta.mtime unchanged for session ${i}`,
+			);
+		}
+		assert(
+			dryRun.finalized.length === 0,
+			"v4.13 §6.18 inv-1: dry-run finalized=[] always",
+		);
+		results.push({ step: "v4.13 §6.18 inv-1: dry-run is read-only", ok: true });
 
-        // Invariant set 2: happy path.
-        assert(dryRun.candidates.some((c) => c.session_id === sHappy && c.would_finalize === true), 'v4.13 §6.18 inv-2: happy-path session in candidates with would_finalize=true');
+		// Invariant set 2: happy path.
+		assert(
+			dryRun.candidates.some(
+				(c) => c.session_id === sHappy && c.would_finalize === true,
+			),
+			"v4.13 §6.18 inv-2: happy-path session in candidates with would_finalize=true",
+		);
 
-        // Invariant set 3: 24h hard floor.
-        assert(!dryRun.candidates.some((c) => c.session_id === sYoung), 'v4.13 §6.18 inv-3: 12h session never appears in candidates');
-        // Even with stale_days=0, the floor holds.
-        const dryRunZero = store.sweepStaleSessions({ staleDays: 0, dryRun: true, now: NOW });
-        assert(!dryRunZero.candidates.some((c) => c.session_id === sYoung), 'v4.13 §6.18 inv-3: stale_days=0 still excludes <24h sessions (non-overridable floor)');
-        results.push({ step: 'v4.13 §6.18 inv-3: 24h hard floor non-overridable', ok: true });
+		// Invariant set 3: 24h hard floor.
+		assert(
+			!dryRun.candidates.some((c) => c.session_id === sYoung),
+			"v4.13 §6.18 inv-3: 12h session never appears in candidates",
+		);
+		// Even with stale_days=0, the floor holds.
+		const dryRunZero = store.sweepStaleSessions({
+			staleDays: 0,
+			dryRun: true,
+			now: NOW,
+		});
+		assert(
+			!dryRunZero.candidates.some((c) => c.session_id === sYoung),
+			"v4.13 §6.18 inv-3: stale_days=0 still excludes <24h sessions (non-overridable floor)",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-3: 24h hard floor non-overridable",
+			ok: true,
+		});
 
-        // Invariant set 4: lock collision.
-        const lockedRow = dryRun.candidates.find((c) => c.session_id === sLocked);
-        assert(lockedRow && lockedRow.locked === true && lockedRow.would_finalize === false && lockedRow.skip_reason === 'locked', 'v4.13 §6.18 inv-4: locked candidate row shape');
-        results.push({ step: 'v4.13 §6.18 inv-4: lock collision report (locked=true, would_finalize=false, skip_reason=locked)', ok: true });
+		// Invariant set 4: lock collision.
+		const lockedRow = dryRun.candidates.find((c) => c.session_id === sLocked);
+		assert(
+			lockedRow &&
+				lockedRow.locked === true &&
+				lockedRow.would_finalize === false &&
+				lockedRow.skip_reason === "locked",
+			"v4.13 §6.18 inv-4: locked candidate row shape",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-4: lock collision report (locked=true, would_finalize=false, skip_reason=locked)",
+			ok: true,
+		});
 
-        // Invariant set 5: already-finalized never appears.
-        assert(!dryRun.candidates.some((c) => c.session_id === sFinalized), 'v4.13 §6.18 inv-5: already-finalized session absent from candidates');
-        results.push({ step: 'v4.13 §6.18 inv-5: already-finalized excluded from candidates', ok: true });
+		// Invariant set 5: already-finalized never appears.
+		assert(
+			!dryRun.candidates.some((c) => c.session_id === sFinalized),
+			"v4.13 §6.18 inv-5: already-finalized session absent from candidates",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-5: already-finalized excluded from candidates",
+			ok: true,
+		});
 
-        // Active session: not stale (last_activity recent).
-        assert(!dryRun.candidates.some((c) => c.session_id === sActive), 'v4.13 §6.18 last-activity: active session not classified as stale');
+		// Active session: not stale (last_activity recent).
+		assert(
+			!dryRun.candidates.some((c) => c.session_id === sActive),
+			"v4.13 §6.18 last-activity: active session not classified as stale",
+		);
 
-        // Malformed timestamp: reported, never auto-finalized.
-        const malformedRow = dryRun.candidates.find((c) => c.session_id === sMalformed);
-        assert(malformedRow && malformedRow.skip_reason === 'malformed_timestamp' && malformedRow.would_finalize === false, 'v4.13 §6.18 inv-7: malformed_timestamp reported, would_finalize=false');
-        results.push({ step: 'v4.13 §6.18 inv-7: malformed timestamp never auto-finalized', ok: true });
+		// Malformed timestamp: reported, never auto-finalized.
+		const malformedRow = dryRun.candidates.find(
+			(c) => c.session_id === sMalformed,
+		);
+		assert(
+			malformedRow &&
+				malformedRow.skip_reason === "malformed_timestamp" &&
+				malformedRow.would_finalize === false,
+			"v4.13 §6.18 inv-7: malformed_timestamp reported, would_finalize=false",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-7: malformed timestamp never auto-finalized",
+			ok: true,
+		});
 
-        // Now exercise the finalize path with dry_run=false.
-        const wet = store.sweepStaleSessions({ staleDays: 7, dryRun: false, reason: 'stale', now: NOW });
-        assert(wet.finalized.some((f) => f.session_id === sHappy && f.outcome === 'aborted' && f.outcome_reason === 'stale'), 'v4.13 §6.18 inv-2: wet-run finalizes happy candidate with outcome=aborted + reason=stale');
-        // Locked session was NOT finalized.
-        assert(!wet.finalized.some((f) => f.session_id === sLocked), 'v4.13 §6.18 inv-4: wet-run did NOT finalize locked candidate');
-        // Verify on disk.
-        const happyMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sHappy), 'meta.json'), 'utf8'));
-        assert(happyMeta.outcome === 'aborted' && happyMeta.outcome_reason === 'stale', 'v4.13 §6.18 inv-2: meta.json on disk shows outcome=aborted + reason=stale');
-        const lockedMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sLocked), 'meta.json'), 'utf8'));
-        assert(lockedMeta.outcome === null, 'v4.13 §6.18 inv-4: locked meta.outcome remained null');
-        results.push({ step: 'v4.13 §6.18 inv-2 + inv-4 wet path: happy finalized, locked untouched', ok: true });
+		// Now exercise the finalize path with dry_run=false.
+		const wet = store.sweepStaleSessions({
+			staleDays: 7,
+			dryRun: false,
+			reason: "stale",
+			now: NOW,
+		});
+		assert(
+			wet.finalized.some(
+				(f) =>
+					f.session_id === sHappy &&
+					f.outcome === "aborted" &&
+					f.outcome_reason === "stale",
+			),
+			"v4.13 §6.18 inv-2: wet-run finalizes happy candidate with outcome=aborted + reason=stale",
+		);
+		// Locked session was NOT finalized.
+		assert(
+			!wet.finalized.some((f) => f.session_id === sLocked),
+			"v4.13 §6.18 inv-4: wet-run did NOT finalize locked candidate",
+		);
+		// Verify on disk.
+		const happyMeta = JSON.parse(
+			fs.readFileSync(path.join(store.sessionDir(sHappy), "meta.json"), "utf8"),
+		);
+		assert(
+			happyMeta.outcome === "aborted" && happyMeta.outcome_reason === "stale",
+			"v4.13 §6.18 inv-2: meta.json on disk shows outcome=aborted + reason=stale",
+		);
+		const lockedMeta = JSON.parse(
+			fs.readFileSync(
+				path.join(store.sessionDir(sLocked), "meta.json"),
+				"utf8",
+			),
+		);
+		assert(
+			lockedMeta.outcome === null,
+			"v4.13 §6.18 inv-4: locked meta.outcome remained null",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-2 + inv-4 wet path: happy finalized, locked untouched",
+			ok: true,
+		});
 
-        // Invariant set 6: re-read before write — finalizeIfUnset returns false on second call.
-        const second = store.finalizeIfUnset(sHappy, 'converged', 'should_not_clobber');
-        assert(second === false, 'v4.13 §6.18 inv-6: finalizeIfUnset returns false when outcome already set');
-        const stillHappyMeta = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sHappy), 'meta.json'), 'utf8'));
-        assert(stillHappyMeta.outcome === 'aborted' && stillHappyMeta.outcome_reason === 'stale', 'v4.13 §6.18 inv-6: meta unchanged after no-op finalizeIfUnset');
-        results.push({ step: 'v4.13 §6.18 inv-6: finalizeIfUnset re-read-before-write semantics', ok: true });
-    } finally {
-        for (const id of cleanup) {
-            try { fs.rmSync(store.sessionDir(id), { recursive: true, force: true }); } catch {}
-        }
-    }
-    return { results };
+		// Invariant set 6: re-read before write — finalizeIfUnset returns false on second call.
+		const second = store.finalizeIfUnset(
+			sHappy,
+			"converged",
+			"should_not_clobber",
+		);
+		assert(
+			second === false,
+			"v4.13 §6.18 inv-6: finalizeIfUnset returns false when outcome already set",
+		);
+		const stillHappyMeta = JSON.parse(
+			fs.readFileSync(path.join(store.sessionDir(sHappy), "meta.json"), "utf8"),
+		);
+		assert(
+			stillHappyMeta.outcome === "aborted" &&
+				stillHappyMeta.outcome_reason === "stale",
+			"v4.13 §6.18 inv-6: meta unchanged after no-op finalizeIfUnset",
+		);
+		results.push({
+			step: "v4.13 §6.18 inv-6: finalizeIfUnset re-read-before-write semantics",
+			ok: true,
+		});
+	} finally {
+		for (const id of cleanup) {
+			try {
+				fs.rmSync(store.sessionDir(id), { recursive: true, force: true });
+			} catch {}
+		}
+	}
+	return { results };
 }
 
 // v1.1.0 / spec v4.13 §6.19 — convergence_health hint per round (FU-4).
 async function driveV413ConvergenceHealthUnit() {
-    const results = [];
-    const server = require('../src/server.js');
+	const results = [];
+	const server = require("../src/server.js");
 
-    // Invariant 1+2: rounds 1-5 → normal.
-    for (const n of [1, 2, 3, 4, 5]) {
-        assert(server.computeConvergenceHealth(n) === 'normal', `v4.13 §6.19 inv-1: round ${n} → normal`);
-    }
-    results.push({ step: 'v4.13 §6.19 inv-1: rounds 1-5 → normal', ok: true });
+	// Invariant 1+2: rounds 1-5 → normal.
+	for (const n of [1, 2, 3, 4, 5]) {
+		assert(
+			server.computeConvergenceHealth(n) === "normal",
+			`v4.13 §6.19 inv-1: round ${n} → normal`,
+		);
+	}
+	results.push({ step: "v4.13 §6.19 inv-1: rounds 1-5 → normal", ok: true });
 
-    // Invariant 3: rounds 6+7 → extended.
-    assert(server.computeConvergenceHealth(6) === 'extended', 'v4.13 §6.19 inv-2: round 6 → extended');
-    assert(server.computeConvergenceHealth(7) === 'extended', 'v4.13 §6.19 inv-2: round 7 → extended');
-    results.push({ step: 'v4.13 §6.19 inv-2: rounds 6-7 → extended', ok: true });
+	// Invariant 3: rounds 6+7 → extended.
+	assert(
+		server.computeConvergenceHealth(6) === "extended",
+		"v4.13 §6.19 inv-2: round 6 → extended",
+	);
+	assert(
+		server.computeConvergenceHealth(7) === "extended",
+		"v4.13 §6.19 inv-2: round 7 → extended",
+	);
+	results.push({ step: "v4.13 §6.19 inv-2: rounds 6-7 → extended", ok: true });
 
-    // Invariant 4: rounds 8+ → concerning.
-    for (const n of [8, 9, 10, 50]) {
-        assert(server.computeConvergenceHealth(n) === 'concerning', `v4.13 §6.19 inv-3: round ${n} → concerning`);
-    }
-    results.push({ step: 'v4.13 §6.19 inv-3: rounds 8+ → concerning', ok: true });
+	// Invariant 4: rounds 8+ → concerning.
+	for (const n of [8, 9, 10, 50]) {
+		assert(
+			server.computeConvergenceHealth(n) === "concerning",
+			`v4.13 §6.19 inv-3: round ${n} → concerning`,
+		);
+	}
+	results.push({ step: "v4.13 §6.19 inv-3: rounds 8+ → concerning", ok: true });
 
-    // Edge: invalid input → normal (defensive default).
-    assert(server.computeConvergenceHealth(0) === 'normal', 'v4.13 §6.19 edge: round 0 falls through to normal');
-    assert(server.computeConvergenceHealth(-3) === 'normal', 'v4.13 §6.19 edge: negative round normal');
-    assert(server.computeConvergenceHealth('abc') === 'normal', 'v4.13 §6.19 edge: NaN input → normal');
-    assert(server.computeConvergenceHealth(null) === 'normal', 'v4.13 §6.19 edge: null input → normal');
-    results.push({ step: 'v4.13 §6.19 edge: invalid input falls through to normal (defensive)', ok: true });
+	// Edge: invalid input → normal (defensive default).
+	assert(
+		server.computeConvergenceHealth(0) === "normal",
+		"v4.13 §6.19 edge: round 0 falls through to normal",
+	);
+	assert(
+		server.computeConvergenceHealth(-3) === "normal",
+		"v4.13 §6.19 edge: negative round normal",
+	);
+	assert(
+		server.computeConvergenceHealth("abc") === "normal",
+		"v4.13 §6.19 edge: NaN input → normal",
+	);
+	assert(
+		server.computeConvergenceHealth(null) === "normal",
+		"v4.13 §6.19 edge: null input → normal",
+	);
+	results.push({
+		step: "v4.13 §6.19 edge: invalid input falls through to normal (defensive)",
+		ok: true,
+	});
 
-    // Invariant: thresholds exposed for documentation/tuning.
-    assert(server.CONVERGENCE_HEALTH_EXTENDED_AT === 6, 'v4.13 §6.19: EXTENDED threshold pinned at 6');
-    assert(server.CONVERGENCE_HEALTH_CONCERNING_AT === 8, 'v4.13 §6.19: CONCERNING threshold pinned at 8');
-    results.push({ step: 'v4.13 §6.19: thresholds exported for audit/tuning', ok: true });
+	// Invariant: thresholds exposed for documentation/tuning.
+	assert(
+		server.CONVERGENCE_HEALTH_EXTENDED_AT === 6,
+		"v4.13 §6.19: EXTENDED threshold pinned at 6",
+	);
+	assert(
+		server.CONVERGENCE_HEALTH_CONCERNING_AT === 8,
+		"v4.13 §6.19: CONCERNING threshold pinned at 8",
+	);
+	results.push({
+		step: "v4.13 §6.19: thresholds exported for audit/tuning",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v0.9.0-alpha.1 / spec v4.11 fix — Gemini transport-detection precedence.
@@ -1782,292 +3111,519 @@ async function driveV413ConvergenceHealthUnit() {
 // settings.json selected oauth-personal. Fix: settings.json precedence
 // first, then env, then oauth_creds, then default.
 async function driveV091GeminiAuthPrecedenceUnit() {
-    const results = [];
-    const { geminiAuthFromSignals } = require('../src/lib/peer-spawn.js');
+	const results = [];
+	const { geminiAuthFromSignals } = require("../src/lib/peer-spawn.js");
 
-    // Canonical settings.json values win over every env/fs signal.
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: 'oauth-personal', hasApiKeyEnv: true, hasOauthCreds: true }) === 'oauth-personal',
-        'v0.9.0-alpha.1: settings=oauth-personal wins even with env=T + oauth_creds=T (6cf09af3 regression)'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings=oauth-personal precedence over env+creds (session 6cf09af3 regression)', ok: true });
+	// Canonical settings.json values win over every env/fs signal.
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: "oauth-personal",
+			hasApiKeyEnv: true,
+			hasOauthCreds: true,
+		}) === "oauth-personal",
+		"v0.9.0-alpha.1: settings=oauth-personal wins even with env=T + oauth_creds=T (6cf09af3 regression)",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings=oauth-personal precedence over env+creds (session 6cf09af3 regression)",
+		ok: true,
+	});
 
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: 'oauth-personal', hasApiKeyEnv: true, hasOauthCreds: false }) === 'oauth-personal',
-        'v0.9.0-alpha.1: settings=oauth-personal wins over env=T'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings=oauth-personal precedence over env', ok: true });
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: "oauth-personal",
+			hasApiKeyEnv: true,
+			hasOauthCreds: false,
+		}) === "oauth-personal",
+		"v0.9.0-alpha.1: settings=oauth-personal wins over env=T",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings=oauth-personal precedence over env",
+		ok: true,
+	});
 
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: 'api-key', hasApiKeyEnv: false, hasOauthCreds: true }) === 'api-key',
-        'v0.9.0-alpha.1: settings=api-key wins over oauth_creds presence'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings=api-key precedence over oauth_creds', ok: true });
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: "api-key",
+			hasApiKeyEnv: false,
+			hasOauthCreds: true,
+		}) === "api-key",
+		"v0.9.0-alpha.1: settings=api-key wins over oauth_creds presence",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings=api-key precedence over oauth_creds",
+		ok: true,
+	});
 
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: 'gemini-api-key', hasApiKeyEnv: false, hasOauthCreds: false }) === 'api-key',
-        'v0.9.0-alpha.1: settings=gemini-api-key alias accepted as api-key'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings=gemini-api-key alias → api-key', ok: true });
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: "gemini-api-key",
+			hasApiKeyEnv: false,
+			hasOauthCreds: false,
+		}) === "api-key",
+		"v0.9.0-alpha.1: settings=gemini-api-key alias accepted as api-key",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings=gemini-api-key alias → api-key",
+		ok: true,
+	});
 
-    // Unrecognized/missing settingsSelectedType → fall through to env.
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: true, hasOauthCreds: true }) === 'api-key',
-        'v0.9.0-alpha.1: settings absent, env=T → api-key (env beats oauth_creds)'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings null, env=T wins over oauth_creds', ok: true });
+	// Unrecognized/missing settingsSelectedType → fall through to env.
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: null,
+			hasApiKeyEnv: true,
+			hasOauthCreds: true,
+		}) === "api-key",
+		"v0.9.0-alpha.1: settings absent, env=T → api-key (env beats oauth_creds)",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings null, env=T wins over oauth_creds",
+		ok: true,
+	});
 
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: false, hasOauthCreds: true }) === 'oauth-personal',
-        'v0.9.0-alpha.1: settings absent, env=F, oauth_creds=T → oauth-personal'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: settings null, oauth_creds=T → oauth-personal', ok: true });
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: null,
+			hasApiKeyEnv: false,
+			hasOauthCreds: true,
+		}) === "oauth-personal",
+		"v0.9.0-alpha.1: settings absent, env=F, oauth_creds=T → oauth-personal",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: settings null, oauth_creds=T → oauth-personal",
+		ok: true,
+	});
 
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: null, hasApiKeyEnv: false, hasOauthCreds: false }) === 'oauth-personal',
-        'v0.9.0-alpha.1: all absent → oauth-personal (documented CLI default)'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: all signals absent → default oauth-personal', ok: true });
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: null,
+			hasApiKeyEnv: false,
+			hasOauthCreds: false,
+		}) === "oauth-personal",
+		"v0.9.0-alpha.1: all absent → oauth-personal (documented CLI default)",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: all signals absent → default oauth-personal",
+		ok: true,
+	});
 
-    // Unrecognized settingsSelectedType string must fall through, not crash.
-    assert(
-        geminiAuthFromSignals({ settingsSelectedType: 'future-auth-type', hasApiKeyEnv: true, hasOauthCreds: false }) === 'api-key',
-        'v0.9.0-alpha.1: unrecognized settings value falls through to env signal'
-    );
-    results.push({ step: 'v0.9.0-alpha.1: unrecognized settingsSelectedType falls through', ok: true });
+	// Unrecognized settingsSelectedType string must fall through, not crash.
+	assert(
+		geminiAuthFromSignals({
+			settingsSelectedType: "future-auth-type",
+			hasApiKeyEnv: true,
+			hasOauthCreds: false,
+		}) === "api-key",
+		"v0.9.0-alpha.1: unrecognized settings value falls through to env signal",
+	);
+	results.push({
+		step: "v0.9.0-alpha.1: unrecognized settingsSelectedType falls through",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v0.7.0-alpha / spec v4.10 unit coverage.
 async function driveV7AntiHallucinationUnit() {
-    const results = [];
-    const sp = require('../src/lib/status-parser.js');
+	const results = [];
+	const sp = require("../src/lib/status-parser.js");
 
-    // confidence='verified' without evidence_sources -> advisory warning.
-    const stdoutVerifiedEmpty = `body\n\n<cross_review_status>${JSON.stringify({
-        status: 'READY',
-        confidence: 'verified',
-    })}</cross_review_status>\n`;
-    const pv = sp.parsePeerResponse(stdoutVerifiedEmpty);
-    assert(pv.status === 'READY', 'v4.10 Item D: status READY preserved');
-    assert(pv.structured.confidence === 'verified', 'v4.10 Item D: confidence preserved');
-    assert(
-        pv.parser_warnings.some((w) => w.includes("confidence='verified'")),
-        'v4.10 Item D: advisory warning for verified without evidence'
-    );
-    results.push({ step: 'v4.10 Item D: confidence=verified without evidence_sources emits advisory', ok: true });
+	// confidence='verified' without evidence_sources -> advisory warning.
+	const stdoutVerifiedEmpty = `body\n\n<cross_review_status>${JSON.stringify({
+		status: "READY",
+		confidence: "verified",
+	})}</cross_review_status>\n`;
+	const pv = sp.parsePeerResponse(stdoutVerifiedEmpty);
+	assert(pv.status === "READY", "v4.10 Item D: status READY preserved");
+	assert(
+		pv.structured.confidence === "verified",
+		"v4.10 Item D: confidence preserved",
+	);
+	assert(
+		pv.parser_warnings.some((w) => w.includes("confidence='verified'")),
+		"v4.10 Item D: advisory warning for verified without evidence",
+	);
+	results.push({
+		step: "v4.10 Item D: confidence=verified without evidence_sources emits advisory",
+		ok: true,
+	});
 
-    // confidence='unknown' with status=READY -> hard-pair violation warning.
-    const stdoutUnknownReady = `body\n\n<cross_review_status>${JSON.stringify({
-        status: 'READY',
-        confidence: 'unknown',
-    })}</cross_review_status>\n`;
-    const pu = sp.parsePeerResponse(stdoutUnknownReady);
-    assert(
-        pu.parser_warnings.some((w) => w.includes(`confidence='unknown'`) && w.includes('NEEDS_EVIDENCE')),
-        'v4.10 Item D: hard-pair warning for unknown+READY'
-    );
-    results.push({ step: 'v4.10 Item D: confidence=unknown must pair with NEEDS_EVIDENCE (hard-pair rule)', ok: true });
+	// confidence='unknown' with status=READY -> hard-pair violation warning.
+	const stdoutUnknownReady = `body\n\n<cross_review_status>${JSON.stringify({
+		status: "READY",
+		confidence: "unknown",
+	})}</cross_review_status>\n`;
+	const pu = sp.parsePeerResponse(stdoutUnknownReady);
+	assert(
+		pu.parser_warnings.some(
+			(w) => w.includes(`confidence='unknown'`) && w.includes("NEEDS_EVIDENCE"),
+		),
+		"v4.10 Item D: hard-pair warning for unknown+READY",
+	);
+	results.push({
+		step: "v4.10 Item D: confidence=unknown must pair with NEEDS_EVIDENCE (hard-pair rule)",
+		ok: true,
+	});
 
-    // confidence='unknown' + status='NEEDS_EVIDENCE' -> no hard-pair warning.
-    const stdoutUnknownNE = `body\n\n<cross_review_status>${JSON.stringify({
-        status: 'NEEDS_EVIDENCE',
-        confidence: 'unknown',
-        caller_requests: ['need primary source X'],
-    })}</cross_review_status>\n`;
-    const pun = sp.parsePeerResponse(stdoutUnknownNE);
-    assert(
-        !pun.parser_warnings.some((w) => w.includes('hard-pair') || (w.includes('confidence') && w.includes('pair'))),
-        'v4.10 Item D: unknown+NEEDS_EVIDENCE: no hard-pair violation'
-    );
-    assert(pun.structured.confidence === 'unknown', 'v4.10 Item D: confidence=unknown preserved');
-    results.push({ step: 'v4.10 Item D: unknown+NEEDS_EVIDENCE compliant', ok: true });
+	// confidence='unknown' + status='NEEDS_EVIDENCE' -> no hard-pair warning.
+	const stdoutUnknownNE = `body\n\n<cross_review_status>${JSON.stringify({
+		status: "NEEDS_EVIDENCE",
+		confidence: "unknown",
+		caller_requests: ["need primary source X"],
+	})}</cross_review_status>\n`;
+	const pun = sp.parsePeerResponse(stdoutUnknownNE);
+	assert(
+		!pun.parser_warnings.some(
+			(w) =>
+				w.includes("hard-pair") ||
+				(w.includes("confidence") && w.includes("pair")),
+		),
+		"v4.10 Item D: unknown+NEEDS_EVIDENCE: no hard-pair violation",
+	);
+	assert(
+		pun.structured.confidence === "unknown",
+		"v4.10 Item D: confidence=unknown preserved",
+	);
+	results.push({
+		step: "v4.10 Item D: unknown+NEEDS_EVIDENCE compliant",
+		ok: true,
+	});
 
-    // evidence_sources validated like caller_requests.
-    const stdoutEvidence = `body\n\n<cross_review_status>${JSON.stringify({
-        status: 'READY',
-        confidence: 'verified',
-        evidence_sources: ['file:src/lib/peer-spawn.js', 'cli:gemini --help'],
-    })}</cross_review_status>\n`;
-    const pe = sp.parsePeerResponse(stdoutEvidence);
-    assert(
-        Array.isArray(pe.structured.evidence_sources) && pe.structured.evidence_sources.length === 2,
-        'v4.10 Item D: evidence_sources parsed as array'
-    );
-    assert(
-        !pe.parser_warnings.some((w) => w.includes("confidence='verified'") && w.includes('evidence_sources')),
-        'v4.10 Item D: no advisory when verified + evidence_sources populated'
-    );
-    results.push({ step: 'v4.10 Item D: evidence_sources validated + advisory suppressed', ok: true });
+	// evidence_sources validated like caller_requests.
+	const stdoutEvidence = `body\n\n<cross_review_status>${JSON.stringify({
+		status: "READY",
+		confidence: "verified",
+		evidence_sources: ["file:src/lib/peer-spawn.js", "cli:gemini --help"],
+	})}</cross_review_status>\n`;
+	const pe = sp.parsePeerResponse(stdoutEvidence);
+	assert(
+		Array.isArray(pe.structured.evidence_sources) &&
+			pe.structured.evidence_sources.length === 2,
+		"v4.10 Item D: evidence_sources parsed as array",
+	);
+	assert(
+		!pe.parser_warnings.some(
+			(w) =>
+				w.includes("confidence='verified'") && w.includes("evidence_sources"),
+		),
+		"v4.10 Item D: no advisory when verified + evidence_sources populated",
+	);
+	results.push({
+		step: "v4.10 Item D: evidence_sources validated + advisory suppressed",
+		ok: true,
+	});
 
-    // invalid confidence value -> warning, not accepted.
-    const stdoutBadConfidence = `body\n\n<cross_review_status>${JSON.stringify({
-        status: 'READY',
-        confidence: 'super-sure',
-    })}</cross_review_status>\n`;
-    const pbc = sp.parsePeerResponse(stdoutBadConfidence);
-    assert(pbc.status === 'READY', 'v4.10 Item D: status preserved despite invalid confidence');
-    assert(pbc.structured.confidence === undefined, 'v4.10 Item D: invalid confidence dropped');
-    assert(
-        pbc.parser_warnings.some((w) => w.includes('confidence has invalid shape')),
-        'v4.10 Item D: invalid confidence emits warning'
-    );
-    results.push({ step: 'v4.10 Item D: invalid confidence dropped + warning', ok: true });
+	// invalid confidence value -> warning, not accepted.
+	const stdoutBadConfidence = `body\n\n<cross_review_status>${JSON.stringify({
+		status: "READY",
+		confidence: "super-sure",
+	})}</cross_review_status>\n`;
+	const pbc = sp.parsePeerResponse(stdoutBadConfidence);
+	assert(
+		pbc.status === "READY",
+		"v4.10 Item D: status preserved despite invalid confidence",
+	);
+	assert(
+		pbc.structured.confidence === undefined,
+		"v4.10 Item D: invalid confidence dropped",
+	);
+	assert(
+		pbc.parser_warnings.some((w) => w.includes("confidence has invalid shape")),
+		"v4.10 Item D: invalid confidence emits warning",
+	);
+	results.push({
+		step: "v4.10 Item D: invalid confidence dropped + warning",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 async function driveV7BannerAttestationUnit() {
-    const results = [];
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    const server = require('../src/server.js');
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	const server = require("../src/server.js");
 
-    const stdout = 'body\n\n<cross_review_peer_model>{"model_id":"gpt-4"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n';
-    const descriptor = {
-        agent: 'codex',
-        auth: 'cli-subscription',
-        endpoint_class: 'chatgpt-pro-backend',
-    };
+	const stdout =
+		'body\n\n<cross_review_peer_model>{"model_id":"gpt-4"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n';
+	const descriptor = {
+		agent: "codex",
+		auth: "cli-subscription",
+		endpoint_class: "chatgpt-pro-backend",
+	};
 
-    // Case 1: banner matches pin -> cli_banner_attested=true, skip audit retained
-    const parsedMatch = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, 'gpt-5.5');
-    assert(parsedMatch.cli_banner_attested === true, 'v4.10 Item E: cli_banner_attested true on match');
-    assert(
-        parsedMatch.model_check_skipped
-            && parsedMatch.model_check_skipped.cli_banner_attested === true,
-        'v4.10 Item E: model_check_skipped carries cli_banner_attested=true audit'
-    );
-    assert(parsedMatch.model_failure_class === null, 'v4.10 Item E: no failure class on banner match');
-    assert(parsedMatch.protocol_violation === false, 'v4.10 Item E: no protocol_violation on banner match');
-    results.push({ step: 'v4.10 Item E: banner match -> elevated audit (cli_banner_attested=true)', ok: true });
+	// Case 1: banner matches pin -> cli_banner_attested=true, skip audit retained
+	const parsedMatch = server.parsePeerOutputs(
+		stdout,
+		"gpt-5.5",
+		descriptor,
+		"gpt-5.5",
+	);
+	assert(
+		parsedMatch.cli_banner_attested === true,
+		"v4.10 Item E: cli_banner_attested true on match",
+	);
+	assert(
+		parsedMatch.model_check_skipped &&
+			parsedMatch.model_check_skipped.cli_banner_attested === true,
+		"v4.10 Item E: model_check_skipped carries cli_banner_attested=true audit",
+	);
+	assert(
+		parsedMatch.model_failure_class === null,
+		"v4.10 Item E: no failure class on banner match",
+	);
+	assert(
+		parsedMatch.protocol_violation === false,
+		"v4.10 Item E: no protocol_violation on banner match",
+	);
+	results.push({
+		step: "v4.10 Item E: banner match -> elevated audit (cli_banner_attested=true)",
+		ok: true,
+	});
 
-    // Case 2: banner mismatches pin -> hard gate + cli_banner_attestation_mismatch.
-    const parsedMismatch = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, 'gpt-4.5-deprecated');
-    assert(
-        parsedMismatch.model_failure_class === 'cli_banner_attestation_mismatch',
-        'v4.10 Item E: cli_banner_attestation_mismatch class on mismatch'
-    );
-    assert(parsedMismatch.protocol_violation === true, 'v4.10 Item E: protocol_violation true on banner mismatch');
-    assert(parsedMismatch.model_check_applicable === true, 'v4.10 Item E: check applicable under banner mismatch');
-    assert(parsedMismatch.cli_banner_attested === false, 'v4.10 Item E: cli_banner_attested false on mismatch');
-    assert(parsedMismatch.cli_attested_model === 'gpt-4.5-deprecated', 'v4.10 Item E: cli_attested_model surfaced raw');
-    results.push({ step: 'v4.10 Item E: banner mismatch -> cli_banner_attestation_mismatch hard gate', ok: true });
+	// Case 2: banner mismatches pin -> hard gate + cli_banner_attestation_mismatch.
+	const parsedMismatch = server.parsePeerOutputs(
+		stdout,
+		"gpt-5.5",
+		descriptor,
+		"gpt-4.5-deprecated",
+	);
+	assert(
+		parsedMismatch.model_failure_class === "cli_banner_attestation_mismatch",
+		"v4.10 Item E: cli_banner_attestation_mismatch class on mismatch",
+	);
+	assert(
+		parsedMismatch.protocol_violation === true,
+		"v4.10 Item E: protocol_violation true on banner mismatch",
+	);
+	assert(
+		parsedMismatch.model_check_applicable === true,
+		"v4.10 Item E: check applicable under banner mismatch",
+	);
+	assert(
+		parsedMismatch.cli_banner_attested === false,
+		"v4.10 Item E: cli_banner_attested false on mismatch",
+	);
+	assert(
+		parsedMismatch.cli_attested_model === "gpt-4.5-deprecated",
+		"v4.10 Item E: cli_attested_model surfaced raw",
+	);
+	results.push({
+		step: "v4.10 Item E: banner mismatch -> cli_banner_attestation_mismatch hard gate",
+		ok: true,
+	});
 
-    // Case 3: no banner present -> fall through to §6.11 skip.
-    const parsedNoBanner = server.parsePeerOutputs(stdout, 'gpt-5.5', descriptor, null);
-    assert(
-        parsedNoBanner.model_check_skipped
-            && parsedNoBanner.model_check_skipped.reason === 'unreliable_text_self_report_on_cli'
-            && !parsedNoBanner.model_check_skipped.cli_banner_attested,
-        'v4.10 Item E: no banner -> §6.11 skip applies unchanged'
-    );
-    assert(parsedNoBanner.cli_banner_attested === false, 'v4.10 Item E: cli_banner_attested false without banner');
-    results.push({ step: 'v4.10 Item E: no banner -> §6.11 skip path unchanged', ok: true });
+	// Case 3: no banner present -> fall through to §6.11 skip.
+	const parsedNoBanner = server.parsePeerOutputs(
+		stdout,
+		"gpt-5.5",
+		descriptor,
+		null,
+	);
+	assert(
+		parsedNoBanner.model_check_skipped &&
+			parsedNoBanner.model_check_skipped.reason ===
+				"unreliable_text_self_report_on_cli" &&
+			!parsedNoBanner.model_check_skipped.cli_banner_attested,
+		"v4.10 Item E: no banner -> §6.11 skip applies unchanged",
+	);
+	assert(
+		parsedNoBanner.cli_banner_attested === false,
+		"v4.10 Item E: cli_banner_attested false without banner",
+	);
+	results.push({
+		step: "v4.10 Item E: no banner -> §6.11 skip path unchanged",
+		ok: true,
+	});
 
-    // Case 4: oauth-personal transport ignores banner (banner is Codex-specific domain).
-    const geminiDesc = { agent: 'gemini', auth: 'oauth-personal', endpoint_class: 'v1internal' };
-    const parsedGemini = server.parsePeerOutputs(stdout, 'gemini-3.1-pro-preview', geminiDesc, 'gemini-banner-does-not-exist');
-    assert(
-        parsedGemini.model_check_skipped
-            && parsedGemini.model_check_skipped.reason === 'unreliable_text_self_report_on_cli',
-        'v4.10 Item E: oauth-personal takes §6.11 skip path regardless of banner'
-    );
-    assert(parsedGemini.cli_banner_attested === false, 'v4.10 Item E: banner promotion confined to cli-subscription');
-    results.push({ step: 'v4.10 Item E: banner promotion confined to cli-subscription (oauth-personal uses §6.11)', ok: true });
+	// Case 4: oauth-personal transport ignores banner (banner is Codex-specific domain).
+	const geminiDesc = {
+		agent: "gemini",
+		auth: "oauth-personal",
+		endpoint_class: "v1internal",
+	};
+	const parsedGemini = server.parsePeerOutputs(
+		stdout,
+		"gemini-3.1-pro-preview",
+		geminiDesc,
+		"gemini-banner-does-not-exist",
+	);
+	assert(
+		parsedGemini.model_check_skipped &&
+			parsedGemini.model_check_skipped.reason ===
+				"unreliable_text_self_report_on_cli",
+		"v4.10 Item E: oauth-personal takes §6.11 skip path regardless of banner",
+	);
+	assert(
+		parsedGemini.cli_banner_attested === false,
+		"v4.10 Item E: banner promotion confined to cli-subscription",
+	);
+	results.push({
+		step: "v4.10 Item E: banner promotion confined to cli-subscription (oauth-personal uses §6.11)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 async function driveV7EscalateToOperatorUnit() {
-    const results = [];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const store = require("../src/lib/session-store.js");
 
-    // Drive the MCP escalate_to_operator tool end-to-end via stdio JSON-RPC.
-    // Explicitly unset CROSS_REVIEW_TEST_IMPORT — earlier unit drivers set it
-    // in this process's env for direct require(), but it would otherwise
-    // propagate to the child and skip the stdio transport main().
-    const childEnv = { ...process.env, CROSS_REVIEW_CALLER: 'claude', CROSS_REVIEW_SKIP_PROBE: '1' };
-    delete childEnv.CROSS_REVIEW_TEST_IMPORT;
-    const proc = spawn('node', [SERVER], {
-        env: childEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    const notify = (method, params) => proc.stdin.write(notifLine(method, params));
+	// Drive the MCP escalate_to_operator tool end-to-end via stdio JSON-RPC.
+	// Explicitly unset CROSS_REVIEW_TEST_IMPORT — earlier unit drivers set it
+	// in this process's env for direct require(), but it would otherwise
+	// propagate to the child and skip the stdio transport main().
+	const childEnv = {
+		...process.env,
+		CROSS_REVIEW_CALLER: "claude",
+		CROSS_REVIEW_SKIP_PROBE: "1",
+	};
+	delete childEnv.CROSS_REVIEW_TEST_IMPORT;
+	const proc = spawn("node", [SERVER], {
+		env: childEnv,
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 15000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	const notify = (method, params) =>
+		proc.stdin.write(notifLine(method, params));
 
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-escalate', version: '0.1' } });
-        notify('notifications/initialized');
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-escalate", version: "0.1" },
+		});
+		notify("notifications/initialized");
 
-        const init = await call(2, 'tools/call', { name: 'session_init', arguments: { task: 'escalate smoke', artifacts: [] } });
-        const sid = JSON.parse(init.result.content[0].text).session_id;
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "escalate smoke", artifacts: [] },
+		});
+		const sid = JSON.parse(init.result.content[0].text).session_id;
 
-        const esc = await call(3, 'tools/call', {
-            name: 'escalate_to_operator',
-            arguments: {
-                session_id: sid,
-                question: 'Primary source X is unreachable; operator clarification needed',
-                context: 'tried docs/ + CLI --help + live probe; all three returned nothing',
-            },
-        });
-        const escPayload = JSON.parse(esc.result.content[0].text);
-        assert(typeof escPayload.escalation_id === 'string' && escPayload.escalation_id.length > 10, 'v4.10 Item D: escalation_id returned (uuid)');
-        assert(escPayload.from_agent === 'claude', 'v4.10 Item D: from_agent captured');
-        assert(escPayload.question.includes('Primary source X'), 'v4.10 Item D: question persisted');
-        assert(escPayload.round_index === 0, 'v4.10 Item D: round_index=0 for pre-round escalation');
-        results.push({ step: 'v4.10 Item D: escalate_to_operator returns escalation record with uuid', ok: true });
+		const esc = await call(3, "tools/call", {
+			name: "escalate_to_operator",
+			arguments: {
+				session_id: sid,
+				question:
+					"Primary source X is unreachable; operator clarification needed",
+				context:
+					"tried docs/ + CLI --help + live probe; all three returned nothing",
+			},
+		});
+		const escPayload = JSON.parse(esc.result.content[0].text);
+		assert(
+			typeof escPayload.escalation_id === "string" &&
+				escPayload.escalation_id.length > 10,
+			"v4.10 Item D: escalation_id returned (uuid)",
+		);
+		assert(
+			escPayload.from_agent === "claude",
+			"v4.10 Item D: from_agent captured",
+		);
+		assert(
+			escPayload.question.includes("Primary source X"),
+			"v4.10 Item D: question persisted",
+		);
+		assert(
+			escPayload.round_index === 0,
+			"v4.10 Item D: round_index=0 for pre-round escalation",
+		);
+		results.push({
+			step: "v4.10 Item D: escalate_to_operator returns escalation record with uuid",
+			ok: true,
+		});
 
-        // Invalid input (empty question) must error.
-        const bad = await call(4, 'tools/call', {
-            name: 'escalate_to_operator',
-            arguments: { session_id: sid, question: '   ' },
-        });
-        const badPayload = JSON.parse(bad.result.content[0].text);
-        assert(typeof badPayload.error === 'string' && badPayload.error.includes('non-empty'), 'v4.10 Item D: empty question rejected');
-        results.push({ step: 'v4.10 Item D: escalate_to_operator rejects empty question', ok: true });
+		// Invalid input (empty question) must error.
+		const bad = await call(4, "tools/call", {
+			name: "escalate_to_operator",
+			arguments: { session_id: sid, question: "   " },
+		});
+		const badPayload = JSON.parse(bad.result.content[0].text);
+		assert(
+			typeof badPayload.error === "string" &&
+				badPayload.error.includes("non-empty"),
+			"v4.10 Item D: empty question rejected",
+		);
+		results.push({
+			step: "v4.10 Item D: escalate_to_operator rejects empty question",
+			ok: true,
+		});
 
-        // Verify persistence via session_read.
-        const read = await call(5, 'tools/call', { name: 'session_read', arguments: { session_id: sid } });
-        const meta = JSON.parse(read.result.content[0].text);
-        assert(Array.isArray(meta.escalations) && meta.escalations.length === 1, 'v4.10 Item D: meta.escalations[] persisted exactly one entry');
-        assert(meta.escalations[0].escalation_id === escPayload.escalation_id, 'v4.10 Item D: persisted id matches returned id');
-        results.push({ step: 'v4.10 Item D: meta.escalations[] persisted and readable via session_read', ok: true });
+		// Verify persistence via session_read.
+		const read = await call(5, "tools/call", {
+			name: "session_read",
+			arguments: { session_id: sid },
+		});
+		const meta = JSON.parse(read.result.content[0].text);
+		assert(
+			Array.isArray(meta.escalations) && meta.escalations.length === 1,
+			"v4.10 Item D: meta.escalations[] persisted exactly one entry",
+		);
+		assert(
+			meta.escalations[0].escalation_id === escPayload.escalation_id,
+			"v4.10 Item D: persisted id matches returned id",
+		);
+		results.push({
+			step: "v4.10 Item D: meta.escalations[] persisted and readable via session_read",
+			ok: true,
+		});
 
-        // Cleanup
-        await call(6, 'tools/call', { name: 'session_finalize', arguments: { session_id: sid, outcome: 'aborted' } });
-        const sessPath = path.join(os.homedir(), '.cross-review', sid);
-        if (fs.existsSync(sessPath)) fs.rmSync(sessPath, { recursive: true, force: true });
-        results.push({ step: 'v4.10 Item D: escalate smoke cleanup', ok: true });
-    } finally {
-        proc.stdin.end();
-        proc.kill();
-    }
+		// Cleanup
+		await call(6, "tools/call", {
+			name: "session_finalize",
+			arguments: { session_id: sid, outcome: "aborted" },
+		});
+		const sessPath = path.join(os.homedir(), ".cross-review", sid);
+		if (fs.existsSync(sessPath))
+			fs.rmSync(sessPath, { recursive: true, force: true });
+		results.push({ step: "v4.10 Item D: escalate smoke cleanup", ok: true });
+	} finally {
+		proc.stdin.end();
+		proc.kill();
+	}
 
-    // Unit check on store.saveEscalation directly (test_import bypass).
-    const id = store.initSession({ task: 'unit', artifacts: [], callerAgent: 'claude', peers: ['codex', 'gemini'] });
-    const entry = store.saveEscalation(id, 'codex', 'another question', null);
-    assert(entry.from_agent === 'codex', 'v4.10 Item D: saveEscalation accepts arbitrary agent');
-    assert(entry.context === null, 'v4.10 Item D: saveEscalation accepts null context');
-    const cleanup = path.join(os.homedir(), '.cross-review', id);
-    if (fs.existsSync(cleanup)) fs.rmSync(cleanup, { recursive: true, force: true });
-    results.push({ step: 'v4.10 Item D: saveEscalation unit (null context + non-caller agent)', ok: true });
+	// Unit check on store.saveEscalation directly (test_import bypass).
+	const id = store.initSession({
+		task: "unit",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+	});
+	const entry = store.saveEscalation(id, "codex", "another question", null);
+	assert(
+		entry.from_agent === "codex",
+		"v4.10 Item D: saveEscalation accepts arbitrary agent",
+	);
+	assert(
+		entry.context === null,
+		"v4.10 Item D: saveEscalation accepts null context",
+	);
+	const cleanup = path.join(os.homedir(), ".cross-review", id);
+	if (fs.existsSync(cleanup))
+		fs.rmSync(cleanup, { recursive: true, force: true });
+	results.push({
+		step: "v4.10 Item D: saveEscalation unit (null context + non-caller agent)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // v0.6.0-alpha / spec v4.9 unit coverage. Three compact drivers exercising
@@ -2075,272 +3631,457 @@ async function driveV7EscalateToOperatorUnit() {
 // rate-limit detection + retry_after extraction, strict-only convergence
 // with persisted snapshot.
 async function driveV6TransportBypassUnit() {
-    const results = [];
-    const peerSpawn = require('../src/lib/peer-spawn.js');
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    const server = require('../src/server.js');
+	const results = [];
+	const peerSpawn = require("../src/lib/peer-spawn.js");
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	const server = require("../src/server.js");
 
-    // buildTransportDescriptor shape per agent.
-    const codexDesc = peerSpawn.buildTransportDescriptor('codex');
-    assert(
-        codexDesc.agent === 'codex' && codexDesc.auth === 'cli-subscription' && codexDesc.endpoint_class === 'chatgpt-pro-backend',
-        'v4.9 Item A: codex transport_descriptor shape'
-    );
-    results.push({ step: 'v4.9 Item A: buildTransportDescriptor(codex)', ok: true });
+	// buildTransportDescriptor shape per agent.
+	const codexDesc = peerSpawn.buildTransportDescriptor("codex");
+	assert(
+		codexDesc.agent === "codex" &&
+			codexDesc.auth === "cli-subscription" &&
+			codexDesc.endpoint_class === "chatgpt-pro-backend",
+		"v4.9 Item A: codex transport_descriptor shape",
+	);
+	results.push({
+		step: "v4.9 Item A: buildTransportDescriptor(codex)",
+		ok: true,
+	});
 
-    const claudeDesc = peerSpawn.buildTransportDescriptor('claude');
-    assert(
-        claudeDesc.auth === 'cli-subscription' && claudeDesc.endpoint_class === 'claude-pro-backend',
-        'v4.9 Item A: claude transport_descriptor shape'
-    );
-    results.push({ step: 'v4.9 Item A: buildTransportDescriptor(claude)', ok: true });
+	const claudeDesc = peerSpawn.buildTransportDescriptor("claude");
+	assert(
+		claudeDesc.auth === "cli-subscription" &&
+			claudeDesc.endpoint_class === "claude-pro-backend",
+		"v4.9 Item A: claude transport_descriptor shape",
+	);
+	results.push({
+		step: "v4.9 Item A: buildTransportDescriptor(claude)",
+		ok: true,
+	});
 
-    const geminiDesc = peerSpawn.buildTransportDescriptor('gemini');
-    assert(
-        geminiDesc.agent === 'gemini' && (geminiDesc.auth === 'oauth-personal' || geminiDesc.auth === 'api-key'),
-        'v4.9 Item A: gemini transport_descriptor auth valid'
-    );
-    results.push({ step: 'v4.9 Item A: buildTransportDescriptor(gemini)', ok: true });
+	const geminiDesc = peerSpawn.buildTransportDescriptor("gemini");
+	assert(
+		geminiDesc.agent === "gemini" &&
+			(geminiDesc.auth === "oauth-personal" || geminiDesc.auth === "api-key"),
+		"v4.9 Item A: gemini transport_descriptor auth valid",
+	);
+	results.push({
+		step: "v4.9 Item A: buildTransportDescriptor(gemini)",
+		ok: true,
+	});
 
-    // Gate semantics.
-    assert(
-        peerSpawn.authoritativeModelAttestationAvailable({ auth: 'api-key' }) === true,
-        'v4.9 Item A: gate TRUE for api-key'
-    );
-    assert(
-        peerSpawn.authoritativeModelAttestationAvailable({ auth: 'cli-subscription' }) === false,
-        'v4.9 Item A: gate FALSE for cli-subscription'
-    );
-    assert(
-        peerSpawn.authoritativeModelAttestationAvailable({ auth: 'oauth-personal' }) === false,
-        'v4.9 Item A: gate FALSE for oauth-personal'
-    );
-    results.push({ step: 'v4.9 Item A: authoritativeModelAttestationAvailable gate', ok: true });
+	// Gate semantics.
+	assert(
+		peerSpawn.authoritativeModelAttestationAvailable({ auth: "api-key" }) ===
+			true,
+		"v4.9 Item A: gate TRUE for api-key",
+	);
+	assert(
+		peerSpawn.authoritativeModelAttestationAvailable({
+			auth: "cli-subscription",
+		}) === false,
+		"v4.9 Item A: gate FALSE for cli-subscription",
+	);
+	assert(
+		peerSpawn.authoritativeModelAttestationAvailable({
+			auth: "oauth-personal",
+		}) === false,
+		"v4.9 Item A: gate FALSE for oauth-personal",
+	);
+	results.push({
+		step: "v4.9 Item A: authoritativeModelAttestationAvailable gate",
+		ok: true,
+	});
 
-    // parsePeerOutputs with non-api-key descriptor → SKIP set, no violation.
-    const stdout = 'some body\n\n<cross_review_peer_model>{"model_id":"gpt-4"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n';
-    const parsedSkip = server.parsePeerOutputs(stdout, 'gpt-5.5', {
-        agent: 'codex',
-        auth: 'cli-subscription',
-        endpoint_class: 'chatgpt-pro-backend',
-    });
-    assert(parsedSkip.peer_status === 'READY', 'v4.9 Item A: peer_status READY under bypass');
-    assert(parsedSkip.model_check_applicable === false, 'v4.9 Item A: model_check_applicable false under bypass');
-    assert(
-        parsedSkip.model_check_skipped
-            && parsedSkip.model_check_skipped.reason === 'unreliable_text_self_report_on_cli'
-            && parsedSkip.model_check_skipped.auth === 'cli-subscription',
-        'v4.9 Item A: model_check_skipped audit record set'
-    );
-    assert(parsedSkip.model_match === null, 'v4.9 Item A: model_match null under bypass (not false)');
-    assert(parsedSkip.model_failure_class === null, 'v4.9 Item A: model_failure_class null under bypass');
-    assert(parsedSkip.protocol_violation === false, 'v4.9 Item A: no protocol_violation from bypass');
-    results.push({ step: 'v4.9 Item A: parsePeerOutputs skip-path end-to-end', ok: true });
+	// parsePeerOutputs with non-api-key descriptor → SKIP set, no violation.
+	const stdout =
+		'some body\n\n<cross_review_peer_model>{"model_id":"gpt-4"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n';
+	const parsedSkip = server.parsePeerOutputs(stdout, "gpt-5.5", {
+		agent: "codex",
+		auth: "cli-subscription",
+		endpoint_class: "chatgpt-pro-backend",
+	});
+	assert(
+		parsedSkip.peer_status === "READY",
+		"v4.9 Item A: peer_status READY under bypass",
+	);
+	assert(
+		parsedSkip.model_check_applicable === false,
+		"v4.9 Item A: model_check_applicable false under bypass",
+	);
+	assert(
+		parsedSkip.model_check_skipped &&
+			parsedSkip.model_check_skipped.reason ===
+				"unreliable_text_self_report_on_cli" &&
+			parsedSkip.model_check_skipped.auth === "cli-subscription",
+		"v4.9 Item A: model_check_skipped audit record set",
+	);
+	assert(
+		parsedSkip.model_match === null,
+		"v4.9 Item A: model_match null under bypass (not false)",
+	);
+	assert(
+		parsedSkip.model_failure_class === null,
+		"v4.9 Item A: model_failure_class null under bypass",
+	);
+	assert(
+		parsedSkip.protocol_violation === false,
+		"v4.9 Item A: no protocol_violation from bypass",
+	);
+	results.push({
+		step: "v4.9 Item A: parsePeerOutputs skip-path end-to-end",
+		ok: true,
+	});
 
-    // parsePeerOutputs with api-key descriptor → check runs normally.
-    const parsedCheck = server.parsePeerOutputs(stdout, 'gpt-5.5', {
-        agent: 'codex',
-        auth: 'api-key',
-        endpoint_class: 'generativelanguage-v1beta',
-    });
-    assert(parsedCheck.model_check_applicable === true, 'v4.9 Item A: check applicable under api-key');
-    assert(parsedCheck.model_match === false, 'v4.9 Item A: check fires for real mismatch under api-key');
-    assert(parsedCheck.model_failure_class === 'silent_model_downgrade', 'v4.9 Item A: silent_model_downgrade preserved under api-key');
-    assert(parsedCheck.model_check_skipped === null, 'v4.9 Item A: no skip record under api-key');
-    results.push({ step: 'v4.9 Item A: parsePeerOutputs check-path under api-key', ok: true });
+	// parsePeerOutputs with api-key descriptor → check runs normally.
+	const parsedCheck = server.parsePeerOutputs(stdout, "gpt-5.5", {
+		agent: "codex",
+		auth: "api-key",
+		endpoint_class: "generativelanguage-v1beta",
+	});
+	assert(
+		parsedCheck.model_check_applicable === true,
+		"v4.9 Item A: check applicable under api-key",
+	);
+	assert(
+		parsedCheck.model_match === false,
+		"v4.9 Item A: check fires for real mismatch under api-key",
+	);
+	assert(
+		parsedCheck.model_failure_class === "silent_model_downgrade",
+		"v4.9 Item A: silent_model_downgrade preserved under api-key",
+	);
+	assert(
+		parsedCheck.model_check_skipped === null,
+		"v4.9 Item A: no skip record under api-key",
+	);
+	results.push({
+		step: "v4.9 Item A: parsePeerOutputs check-path under api-key",
+		ok: true,
+	});
 
-    // v4.13 §2.5 closure (session-audit-2026-04-26.md follow-up):
-    // The audit found 1 historical protocol_violation with
-    // transport_descriptor.endpoint_class = 'chatgpt-pro-backend' — under
-    // §6.11 that transport class MUST always trigger the bypass, so a
-    // protocol_violation can never be raised for it on a current runtime.
-    // The historical case is therefore pre-bypass legacy data (pre-v4.9
-    // runtime). This step asserts the invariant explicitly across all
-    // four model-mismatch shapes so a future regression surfaces here.
-    const chatgptProDescriptor = {
-        agent: 'codex',
-        auth: 'cli-subscription',
-        endpoint_class: 'chatgpt-pro-backend',
-    };
-    const cases = [
-        { reported: 'gpt-5.5', label: 'exact match' },
-        { reported: 'gpt-5', label: 'family alias' },
-        { reported: 'gpt-4.5-deprecated', label: 'mismatch' },
-        { reported: '', label: 'empty/no report' },
-    ];
-    for (const c of cases) {
-        const stdoutForCase = `body\n\n<cross_review_peer_model>{"model_id":"${c.reported}"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n`;
-        const parsed = server.parsePeerOutputs(stdoutForCase, 'gpt-5.5', chatgptProDescriptor);
-        assert(
-            parsed.protocol_violation === false,
-            `v4.13 §2.5 closure: chatgpt-pro-backend never raises protocol_violation (${c.label})`
-        );
-        assert(
-            parsed.model_check_skipped !== null,
-            `v4.13 §2.5 closure: chatgpt-pro-backend always carries model_check_skipped audit (${c.label})`
-        );
-    }
-    results.push({ step: 'v4.13 §2.5 closure: chatgpt-pro-backend bypass invariant across mismatch shapes', ok: true });
+	// v4.13 §2.5 closure (session-audit-2026-04-26.md follow-up):
+	// The audit found 1 historical protocol_violation with
+	// transport_descriptor.endpoint_class = 'chatgpt-pro-backend' — under
+	// §6.11 that transport class MUST always trigger the bypass, so a
+	// protocol_violation can never be raised for it on a current runtime.
+	// The historical case is therefore pre-bypass legacy data (pre-v4.9
+	// runtime). This step asserts the invariant explicitly across all
+	// four model-mismatch shapes so a future regression surfaces here.
+	const chatgptProDescriptor = {
+		agent: "codex",
+		auth: "cli-subscription",
+		endpoint_class: "chatgpt-pro-backend",
+	};
+	const cases = [
+		{ reported: "gpt-5.5", label: "exact match" },
+		{ reported: "gpt-5", label: "family alias" },
+		{ reported: "gpt-4.5-deprecated", label: "mismatch" },
+		{ reported: "", label: "empty/no report" },
+	];
+	for (const c of cases) {
+		const stdoutForCase = `body\n\n<cross_review_peer_model>{"model_id":"${c.reported}"}</cross_review_peer_model>\n<cross_review_status>{"status":"READY"}</cross_review_status>\n`;
+		const parsed = server.parsePeerOutputs(
+			stdoutForCase,
+			"gpt-5.5",
+			chatgptProDescriptor,
+		);
+		assert(
+			parsed.protocol_violation === false,
+			`v4.13 §2.5 closure: chatgpt-pro-backend never raises protocol_violation (${c.label})`,
+		);
+		assert(
+			parsed.model_check_skipped !== null,
+			`v4.13 §2.5 closure: chatgpt-pro-backend always carries model_check_skipped audit (${c.label})`,
+		);
+	}
+	results.push({
+		step: "v4.13 §2.5 closure: chatgpt-pro-backend bypass invariant across mismatch shapes",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 async function driveV6RateLimitUnit() {
-    const results = [];
-    const peerSpawn = require('../src/lib/peer-spawn.js');
-    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
-    const server = require('../src/server.js');
+	const results = [];
+	const peerSpawn = require("../src/lib/peer-spawn.js");
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	const server = require("../src/server.js");
 
-    // Provider-shaped lexeme matching.
-    assert(peerSpawn.matchRateLimitLexeme('HTTP 429 Too Many Requests') === '429', 'v4.9 Item C: 429 lexeme match');
-    assert(peerSpawn.matchRateLimitLexeme('RESOURCE_EXHAUSTED: quota') === 'RESOURCE_EXHAUSTED', 'v4.9 Item C: Gemini lexeme match');
-    assert(peerSpawn.matchRateLimitLexeme('hit usage limit on plan') === 'usage limit', 'v4.9 Item C: Claude lexeme match');
-    assert(peerSpawn.matchRateLimitLexeme('insufficient_quota for model') === 'insufficient_quota', 'v4.9 Item C: Codex lexeme match');
-    // Generic {rate, quota, limit} alone must NOT match.
-    assert(peerSpawn.matchRateLimitLexeme('discussion about rate of adoption') === null, 'v4.9 Item C: generic "rate" does not match');
-    assert(peerSpawn.matchRateLimitLexeme('set a limit for yourself') === null, 'v4.9 Item C: generic "limit" does not match');
-    assert(peerSpawn.matchRateLimitLexeme('their quota seems fine') === null, 'v4.9 Item C: generic "quota" does not match');
-    results.push({ step: 'v4.9 Item C: lexeme set excludes generic {rate,quota,limit}', ok: true });
+	// Provider-shaped lexeme matching.
+	assert(
+		peerSpawn.matchRateLimitLexeme("HTTP 429 Too Many Requests") === "429",
+		"v4.9 Item C: 429 lexeme match",
+	);
+	assert(
+		peerSpawn.matchRateLimitLexeme("RESOURCE_EXHAUSTED: quota") ===
+			"RESOURCE_EXHAUSTED",
+		"v4.9 Item C: Gemini lexeme match",
+	);
+	assert(
+		peerSpawn.matchRateLimitLexeme("hit usage limit on plan") === "usage limit",
+		"v4.9 Item C: Claude lexeme match",
+	);
+	assert(
+		peerSpawn.matchRateLimitLexeme("insufficient_quota for model") ===
+			"insufficient_quota",
+		"v4.9 Item C: Codex lexeme match",
+	);
+	// Generic {rate, quota, limit} alone must NOT match.
+	assert(
+		peerSpawn.matchRateLimitLexeme("discussion about rate of adoption") ===
+			null,
+		'v4.9 Item C: generic "rate" does not match',
+	);
+	assert(
+		peerSpawn.matchRateLimitLexeme("set a limit for yourself") === null,
+		'v4.9 Item C: generic "limit" does not match',
+	);
+	assert(
+		peerSpawn.matchRateLimitLexeme("their quota seems fine") === null,
+		'v4.9 Item C: generic "quota" does not match',
+	);
+	results.push({
+		step: "v4.9 Item C: lexeme set excludes generic {rate,quota,limit}",
+		ok: true,
+	});
 
-    // Retry-After extraction.
-    assert(peerSpawn.extractRetryAfterSeconds('Retry-After: 30\nOther header') === 30, 'v4.9 Item C: Retry-After extracted');
-    assert(peerSpawn.extractRetryAfterSeconds('retry_after: 15') === 15, 'v4.9 Item C: retry_after (snake) extracted');
-    assert(peerSpawn.extractRetryAfterSeconds('no retry info here') === null, 'v4.9 Item C: null when absent (never fabricated)');
-    results.push({ step: 'v4.9 Item C: extractRetryAfterSeconds', ok: true });
+	// Retry-After extraction.
+	assert(
+		peerSpawn.extractRetryAfterSeconds("Retry-After: 30\nOther header") === 30,
+		"v4.9 Item C: Retry-After extracted",
+	);
+	assert(
+		peerSpawn.extractRetryAfterSeconds("retry_after: 15") === 15,
+		"v4.9 Item C: retry_after (snake) extracted",
+	);
+	assert(
+		peerSpawn.extractRetryAfterSeconds("no retry info here") === null,
+		"v4.9 Item C: null when absent (never fabricated)",
+	);
+	results.push({ step: "v4.9 Item C: extractRetryAfterSeconds", ok: true });
 
-    // detectSpawnRateLimit.
-    const spawnRL = peerSpawn.detectSpawnRateLimit('HTTP 429\nRetry-After: 42\nGone');
-    assert(
-        spawnRL && spawnRL.detection_source === 'spawn' && spawnRL.retry_after_seconds === 42 && spawnRL.lexeme_matched === '429',
-        'v4.9 Item C: detectSpawnRateLimit composed shape'
-    );
-    assert(peerSpawn.detectSpawnRateLimit('benign error') === null, 'v4.9 Item C: no match on benign stderr');
-    results.push({ step: 'v4.9 Item C: detectSpawnRateLimit output shape + null paths', ok: true });
+	// detectSpawnRateLimit.
+	const spawnRL = peerSpawn.detectSpawnRateLimit(
+		"HTTP 429\nRetry-After: 42\nGone",
+	);
+	assert(
+		spawnRL &&
+			spawnRL.detection_source === "spawn" &&
+			spawnRL.retry_after_seconds === 42 &&
+			spawnRL.lexeme_matched === "429",
+		"v4.9 Item C: detectSpawnRateLimit composed shape",
+	);
+	assert(
+		peerSpawn.detectSpawnRateLimit("benign error") === null,
+		"v4.9 Item C: no match on benign stderr",
+	);
+	results.push({
+		step: "v4.9 Item C: detectSpawnRateLimit output shape + null paths",
+		ok: true,
+	});
 
-    // v4.12 §6.16: prompt moderation flag detection.
-    const flaggedStderr = 'peer codex exit 1: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting';
-    const promptFlag = peerSpawn.detectPromptModerationFlag(flaggedStderr);
-    assert(
-        promptFlag && promptFlag.detection_source === 'spawn' && promptFlag.docs_url.includes('platform.openai.com/docs/guides/reasoning'),
-        'v4.12 §6.16: detectPromptModerationFlag composed shape'
-    );
-    assert(
-        promptFlag.lexeme_matched === 'your prompt was flagged as potentially violating',
-        'v4.12 §6.16: lexeme_matched picks the canonical phrase'
-    );
-    assert(peerSpawn.detectPromptModerationFlag('benign error') === null, 'v4.12 §6.16: no match on benign stderr');
-    assert(peerSpawn.detectPromptModerationFlag('') === null, 'v4.12 §6.16: empty stderr → null');
-    assert(peerSpawn.detectPromptModerationFlag(null) === null, 'v4.12 §6.16: null stderr → null');
-    // Disjoint from rate-limit: same stderr should not match both.
-    assert(
-        peerSpawn.detectSpawnRateLimit(flaggedStderr) === null,
-        'v4.12 §6.16: moderation-flag stderr does not match rate-limit lexemes'
-    );
-    assert(
-        peerSpawn.detectPromptModerationFlag('HTTP 429 Too Many Requests') === null,
-        'v4.12 §6.16: rate-limit stderr does not match moderation lexemes'
-    );
-    // Lexeme set is exported for inspection / extension.
-    assert(
-        Array.isArray(peerSpawn.PROMPT_FLAG_LEXEMES) && peerSpawn.PROMPT_FLAG_LEXEMES.length >= 3,
-        'v4.12 §6.16: PROMPT_FLAG_LEXEMES exported and non-trivial'
-    );
-    results.push({ step: 'v4.12 §6.16: detectPromptModerationFlag detection + disjointness from rate-limit', ok: true });
+	// v4.12 §6.16: prompt moderation flag detection.
+	const flaggedStderr =
+		"peer codex exit 1: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting";
+	const promptFlag = peerSpawn.detectPromptModerationFlag(flaggedStderr);
+	assert(
+		promptFlag &&
+			promptFlag.detection_source === "spawn" &&
+			promptFlag.docs_url.includes("platform.openai.com/docs/guides/reasoning"),
+		"v4.12 §6.16: detectPromptModerationFlag composed shape",
+	);
+	assert(
+		promptFlag.lexeme_matched ===
+			"your prompt was flagged as potentially violating",
+		"v4.12 §6.16: lexeme_matched picks the canonical phrase",
+	);
+	assert(
+		peerSpawn.detectPromptModerationFlag("benign error") === null,
+		"v4.12 §6.16: no match on benign stderr",
+	);
+	assert(
+		peerSpawn.detectPromptModerationFlag("") === null,
+		"v4.12 §6.16: empty stderr → null",
+	);
+	assert(
+		peerSpawn.detectPromptModerationFlag(null) === null,
+		"v4.12 §6.16: null stderr → null",
+	);
+	// Disjoint from rate-limit: same stderr should not match both.
+	assert(
+		peerSpawn.detectSpawnRateLimit(flaggedStderr) === null,
+		"v4.12 §6.16: moderation-flag stderr does not match rate-limit lexemes",
+	);
+	assert(
+		peerSpawn.detectPromptModerationFlag("HTTP 429 Too Many Requests") === null,
+		"v4.12 §6.16: rate-limit stderr does not match moderation lexemes",
+	);
+	// Lexeme set is exported for inspection / extension.
+	assert(
+		Array.isArray(peerSpawn.PROMPT_FLAG_LEXEMES) &&
+			peerSpawn.PROMPT_FLAG_LEXEMES.length >= 3,
+		"v4.12 §6.16: PROMPT_FLAG_LEXEMES exported and non-trivial",
+	);
+	results.push({
+		step: "v4.12 §6.16: detectPromptModerationFlag detection + disjointness from rate-limit",
+		ok: true,
+	});
 
-    // Response-level guardrail via parsePeerOutputs: ALL THREE required.
-    // Case: short body + no status block + provider lexeme → detected.
-    const shortRL = 'HTTP 429 rate limit';
-    const parsedRL = server.parsePeerOutputs(shortRL, 'stub', null);
-    assert(
-        parsedRL.rate_limit && parsedRL.rate_limit.detection_source === 'response' && parsedRL.rate_limit.lexeme_matched === '429',
-        'v4.9 Item C: response-level detection fires on all-three-match'
-    );
-    results.push({ step: 'v4.9 Item C: response-level ALL-THREE match', ok: true });
+	// Response-level guardrail via parsePeerOutputs: ALL THREE required.
+	// Case: short body + no status block + provider lexeme → detected.
+	const shortRL = "HTTP 429 rate limit";
+	const parsedRL = server.parsePeerOutputs(shortRL, "stub", null);
+	assert(
+		parsedRL.rate_limit &&
+			parsedRL.rate_limit.detection_source === "response" &&
+			parsedRL.rate_limit.lexeme_matched === "429",
+		"v4.9 Item C: response-level detection fires on all-three-match",
+	);
+	results.push({
+		step: "v4.9 Item C: response-level ALL-THREE match",
+		ok: true,
+	});
 
-    // Case: status block present → no detection (guardrail 1).
-    const statusPresent = 'HTTP 429\n<cross_review_status>{"status":"READY"}</cross_review_status>';
-    const parsedNoRL1 = server.parsePeerOutputs(statusPresent, 'stub', null);
-    assert(parsedNoRL1.rate_limit === null, 'v4.9 Item C: response-level blocked by status block present');
-    results.push({ step: 'v4.9 Item C: response-level guardrail 1 (status block absent required)', ok: true });
+	// Case: status block present → no detection (guardrail 1).
+	const statusPresent =
+		'HTTP 429\n<cross_review_status>{"status":"READY"}</cross_review_status>';
+	const parsedNoRL1 = server.parsePeerOutputs(statusPresent, "stub", null);
+	assert(
+		parsedNoRL1.rate_limit === null,
+		"v4.9 Item C: response-level blocked by status block present",
+	);
+	results.push({
+		step: "v4.9 Item C: response-level guardrail 1 (status block absent required)",
+		ok: true,
+	});
 
-    // Case: body over threshold → no detection (guardrail 2).
-    const longBody = `HTTP 429 rate limit ${'x'.repeat(250)}`;
-    const parsedNoRL2 = server.parsePeerOutputs(longBody, 'stub', null);
-    assert(parsedNoRL2.rate_limit === null, 'v4.9 Item C: response-level blocked by body >= 200 chars');
-    results.push({ step: 'v4.9 Item C: response-level guardrail 2 (body < 200 chars required)', ok: true });
+	// Case: body over threshold → no detection (guardrail 2).
+	const longBody = `HTTP 429 rate limit ${"x".repeat(250)}`;
+	const parsedNoRL2 = server.parsePeerOutputs(longBody, "stub", null);
+	assert(
+		parsedNoRL2.rate_limit === null,
+		"v4.9 Item C: response-level blocked by body >= 200 chars",
+	);
+	results.push({
+		step: "v4.9 Item C: response-level guardrail 2 (body < 200 chars required)",
+		ok: true,
+	});
 
-    // Case: no provider lexeme → no detection (guardrail 3).
-    const noLexeme = 'short response, no indicator';
-    const parsedNoRL3 = server.parsePeerOutputs(noLexeme, 'stub', null);
-    assert(parsedNoRL3.rate_limit === null, 'v4.9 Item C: response-level blocked by missing provider lexeme');
-    results.push({ step: 'v4.9 Item C: response-level guardrail 3 (provider lexeme required)', ok: true });
+	// Case: no provider lexeme → no detection (guardrail 3).
+	const noLexeme = "short response, no indicator";
+	const parsedNoRL3 = server.parsePeerOutputs(noLexeme, "stub", null);
+	assert(
+		parsedNoRL3.rate_limit === null,
+		"v4.9 Item C: response-level blocked by missing provider lexeme",
+	);
+	results.push({
+		step: "v4.9 Item C: response-level guardrail 3 (provider lexeme required)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 async function driveV6ConvergenceSnapshotUnit() {
-    const results = [];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const store = require("../src/lib/session-store.js");
 
-    // computeConvergenceSnapshot shape — N-ary converged case.
-    const roundN = {
-        round: 1,
-        caller: 'claude',
-        caller_status: 'READY',
-        peers: [
-            { agent: 'codex', peer_status: 'READY' },
-            { agent: 'gemini', peer_status: 'READY' },
-        ],
-    };
-    const snapConverged = store.computeConvergenceSnapshot(1, roundN, {
-        excluded_probe: [],
-        excluded_runtime: [],
-    });
-    assert(snapConverged.spec_version === store.CONVERGENCE_SPEC_VERSION, 'v4.9 Item B: snapshot spec_version v4.9');
-    assert(snapConverged.denominator_mode === 'strict', 'v4.9 Item B: denominator_mode strict');
-    assert(snapConverged.converged === true, 'v4.9 Item B: converged when caller + all peers READY');
-    assert(snapConverged.ready_peers.length === 2, 'v4.9 Item B: ready_peers populated');
-    assert(snapConverged.blocking_peers.length === 0, 'v4.9 Item B: no blocking_peers when converged');
-    results.push({ step: 'v4.9 Item B: computeConvergenceSnapshot N-ary converged shape', ok: true });
+	// computeConvergenceSnapshot shape — N-ary converged case.
+	const roundN = {
+		round: 1,
+		caller: "claude",
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: "READY" },
+		],
+	};
+	const snapConverged = store.computeConvergenceSnapshot(1, roundN, {
+		excluded_probe: [],
+		excluded_runtime: [],
+	});
+	assert(
+		snapConverged.spec_version === store.CONVERGENCE_SPEC_VERSION,
+		"v4.9 Item B: snapshot spec_version v4.9",
+	);
+	assert(
+		snapConverged.denominator_mode === "strict",
+		"v4.9 Item B: denominator_mode strict",
+	);
+	assert(
+		snapConverged.converged === true,
+		"v4.9 Item B: converged when caller + all peers READY",
+	);
+	assert(
+		snapConverged.ready_peers.length === 2,
+		"v4.9 Item B: ready_peers populated",
+	);
+	assert(
+		snapConverged.blocking_peers.length === 0,
+		"v4.9 Item B: no blocking_peers when converged",
+	);
+	results.push({
+		step: "v4.9 Item B: computeConvergenceSnapshot N-ary converged shape",
+		ok: true,
+	});
 
-    // N-ary blocked by status_missing.
-    const roundBlocked = {
-        round: 2,
-        caller: 'claude',
-        caller_status: 'READY',
-        peers: [
-            { agent: 'codex', peer_status: 'READY' },
-            { agent: 'gemini', peer_status: null },
-        ],
-    };
-    const snapBlocked = store.computeConvergenceSnapshot(2, roundBlocked, {
-        excluded_probe: [],
-        excluded_runtime: [],
-    });
-    assert(snapBlocked.converged === false, 'v4.9 Item B: strict denominator — status_missing blocks');
-    assert(
-        snapBlocked.blocking_peers.length === 1 && snapBlocked.blocking_peers[0].reason === 'status_missing',
-        'v4.9 Item B: blocking_peers records status_missing'
-    );
-    results.push({ step: 'v4.9 Item B: strict denominator — status_missing counts AGAINST', ok: true });
+	// N-ary blocked by status_missing.
+	const roundBlocked = {
+		round: 2,
+		caller: "claude",
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: null },
+		],
+	};
+	const snapBlocked = store.computeConvergenceSnapshot(2, roundBlocked, {
+		excluded_probe: [],
+		excluded_runtime: [],
+	});
+	assert(
+		snapBlocked.converged === false,
+		"v4.9 Item B: strict denominator — status_missing blocks",
+	);
+	assert(
+		snapBlocked.blocking_peers.length === 1 &&
+			snapBlocked.blocking_peers[0].reason === "status_missing",
+		"v4.9 Item B: blocking_peers records status_missing",
+	);
+	results.push({
+		step: "v4.9 Item B: strict denominator — status_missing counts AGAINST",
+		ok: true,
+	});
 
-    // Legacy bilateral round shape still supported.
-    const roundLegacy = {
-        round: 1,
-        caller: 'claude',
-        caller_status: 'READY',
-        peer: 'codex',
-        peer_status: 'READY',
-    };
-    const snapLegacy = store.computeConvergenceSnapshot(1, roundLegacy, {
-        excluded_probe: [],
-        excluded_runtime: [],
-    });
-    assert(snapLegacy.converged === true, 'v4.9 Item B: legacy bilateral shape still converges');
-    assert(snapLegacy.responded_peers[0] === 'codex', 'v4.9 Item B: legacy bilateral responded_peers');
-    results.push({ step: 'v4.9 Item B: computeConvergenceSnapshot legacy bilateral shape', ok: true });
+	// Legacy bilateral round shape still supported.
+	const roundLegacy = {
+		round: 1,
+		caller: "claude",
+		caller_status: "READY",
+		peer: "codex",
+		peer_status: "READY",
+	};
+	const snapLegacy = store.computeConvergenceSnapshot(1, roundLegacy, {
+		excluded_probe: [],
+		excluded_runtime: [],
+	});
+	assert(
+		snapLegacy.converged === true,
+		"v4.9 Item B: legacy bilateral shape still converges",
+	);
+	assert(
+		snapLegacy.responded_peers[0] === "codex",
+		"v4.9 Item B: legacy bilateral responded_peers",
+	);
+	results.push({
+		step: "v4.9 Item B: computeConvergenceSnapshot legacy bilateral shape",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // W8: ask_peers N-ary flow end-to-end via MCP. Smoke uses the agent-
@@ -2349,504 +4090,812 @@ async function driveV6ConvergenceSnapshotUnit() {
 // Verifies the round carries peers[] with explicit identity and the
 // unanimity convergence path.
 async function driveAskPeersNAry() {
-    const results = [];
-    const proc = spawn('node', [SERVER], {
-        env: {
-            ...process.env,
-            CROSS_REVIEW_CALLER: 'claude',
-            CROSS_REVIEW_SKIP_PROBE: '1',
-            CROSS_REVIEW_PEER_STUB: 'STRUCTURED:READY',
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    let sessionId;
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-ask-peers', version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
-        const init = await call(2, 'tools/call', {
-            name: 'session_init',
-            arguments: { task: 'ask_peers N-ary smoke', artifacts: [] },
-        });
-        sessionId = JSON.parse(init.result.content[0].text).session_id;
-        const askResp = await call(3, 'tools/call', {
-            name: 'ask_peers',
-            arguments: { session_id: sessionId, prompt: 'trilateral stub probe', caller_status: 'READY' },
-        });
-        const askPayload = JSON.parse(askResp.result.content[0].text);
-        assert(Array.isArray(askPayload.peers), 'ask_peers: peers array returned');
-        assert(askPayload.peers.length === 2, 'ask_peers: 2 peers responded (codex+gemini)');
-        const agents = askPayload.peers.map((p) => p.agent).sort();
-        assert(JSON.stringify(agents) === JSON.stringify(['codex', 'gemini']), `peers are codex,gemini (got ${agents.join(',')})`);
-        for (const p of askPayload.peers) {
-            assert(p.status === 'fulfilled', `peer ${p.agent} status=fulfilled`);
-            assert(p.peer_status === 'READY', `peer ${p.agent} peer_status=READY`);
-        }
-        assert(askPayload.quorum.requested === 2 && askPayload.quorum.responded === 2 && askPayload.quorum.rejected === 0, 'quorum: 2/2/0');
-        assert(askPayload.protocol_violation === false, 'no protocol violation on stub READY');
-        results.push({ step: 'ask_peers: N-ary round with 2 stub peers, unanimity READY, quorum 2/2/0', ok: true });
+	const results = [];
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "claude",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: "STRUCTURED:READY",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	let sessionId;
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-ask-peers", version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "ask_peers N-ary smoke", artifacts: [] },
+		});
+		sessionId = JSON.parse(init.result.content[0].text).session_id;
+		const askResp = await call(3, "tools/call", {
+			name: "ask_peers",
+			arguments: {
+				session_id: sessionId,
+				prompt: "trilateral stub probe",
+				caller_status: "READY",
+			},
+		});
+		const askPayload = JSON.parse(askResp.result.content[0].text);
+		assert(Array.isArray(askPayload.peers), "ask_peers: peers array returned");
+		assert(
+			askPayload.peers.length === 2,
+			"ask_peers: 2 peers responded (codex+gemini)",
+		);
+		const agents = askPayload.peers.map((p) => p.agent).sort();
+		assert(
+			JSON.stringify(agents) === JSON.stringify(["codex", "gemini"]),
+			`peers are codex,gemini (got ${agents.join(",")})`,
+		);
+		for (const p of askPayload.peers) {
+			assert(p.status === "fulfilled", `peer ${p.agent} status=fulfilled`);
+			assert(p.peer_status === "READY", `peer ${p.agent} peer_status=READY`);
+		}
+		assert(
+			askPayload.quorum.requested === 2 &&
+				askPayload.quorum.responded === 2 &&
+				askPayload.quorum.rejected === 0,
+			"quorum: 2/2/0",
+		);
+		assert(
+			askPayload.protocol_violation === false,
+			"no protocol violation on stub READY",
+		);
+		results.push({
+			step: "ask_peers: N-ary round with 2 stub peers, unanimity READY, quorum 2/2/0",
+			ok: true,
+		});
 
-        const convResp = await call(4, 'tools/call', { name: 'session_check_convergence', arguments: { session_id: sessionId } });
-        const convPayload = JSON.parse(convResp.result.content[0].text);
-        assert(convPayload.converged === true, 'N-ary convergence: caller READY + all peers READY');
-        results.push({ step: 'session_check_convergence N-ary after ask_peers: converged=true', ok: true });
-    } finally {
-        proc.kill();
-        if (sessionId) cleanupSession(sessionId);
-    }
-    return { results };
+		const convResp = await call(4, "tools/call", {
+			name: "session_check_convergence",
+			arguments: { session_id: sessionId },
+		});
+		const convPayload = JSON.parse(convResp.result.content[0].text);
+		assert(
+			convPayload.converged === true,
+			"N-ary convergence: caller READY + all peers READY",
+		);
+		results.push({
+			step: "session_check_convergence N-ary after ask_peers: converged=true",
+			ok: true,
+		});
+	} finally {
+		proc.kill();
+		if (sessionId) cleanupSession(sessionId);
+	}
+	return { results };
 }
 
 // W8: ask_peer MUST reject gemini caller (R23, legacy bilateral
 // surface is claude<->codex only).
 async function driveAskPeerGeminiCallerRejected() {
-    const results = [];
-    const proc = spawn('node', [SERVER], {
-        env: {
-            ...process.env,
-            CROSS_REVIEW_CALLER: 'gemini',
-            CROSS_REVIEW_SKIP_PROBE: '1',
-            CROSS_REVIEW_PEER_STUB: 'STRUCTURED:READY',
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    let sessionId;
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-gemini-reject', version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
-        const init = await call(2, 'tools/call', {
-            name: 'session_init',
-            arguments: { task: 'gemini caller rejection smoke', artifacts: [] },
-        });
-        const initPayload = JSON.parse(init.result.content[0].text);
-        sessionId = initPayload.session_id;
-        assert(initPayload.caller === 'gemini', 'caller=gemini');
-        assert(Array.isArray(initPayload.peers) && initPayload.peers.includes('claude') && initPayload.peers.includes('codex'), 'peers=[claude,codex]');
-        const askResp = await call(3, 'tools/call', {
-            name: 'ask_peer',
-            arguments: { session_id: sessionId, prompt: 'should reject', caller_status: 'NOT_READY' },
-        });
-        const askPayload = JSON.parse(askResp.result.content[0].text);
-        assert(askResp.result.isError === true, 'ask_peer returned isError=true');
-        assert(/ask_peers|bilateral-only/.test(askPayload.error), `error message points operator at ask_peers (got: ${askPayload.error})`);
-        results.push({ step: 'ask_peer rejects gemini caller with pointer to ask_peers (R23)', ok: true });
-    } finally {
-        proc.kill();
-        if (sessionId) cleanupSession(sessionId);
-    }
-    return { results };
+	const results = [];
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: "gemini",
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: "STRUCTURED:READY",
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	let sessionId;
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-gemini-reject", version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "gemini caller rejection smoke", artifacts: [] },
+		});
+		const initPayload = JSON.parse(init.result.content[0].text);
+		sessionId = initPayload.session_id;
+		assert(initPayload.caller === "gemini", "caller=gemini");
+		assert(
+			Array.isArray(initPayload.peers) &&
+				initPayload.peers.includes("claude") &&
+				initPayload.peers.includes("codex"),
+			"peers=[claude,codex]",
+		);
+		const askResp = await call(3, "tools/call", {
+			name: "ask_peer",
+			arguments: {
+				session_id: sessionId,
+				prompt: "should reject",
+				caller_status: "NOT_READY",
+			},
+		});
+		const askPayload = JSON.parse(askResp.result.content[0].text);
+		assert(askResp.result.isError === true, "ask_peer returned isError=true");
+		assert(
+			/ask_peers|bilateral-only/.test(askPayload.error),
+			`error message points operator at ask_peers (got: ${askPayload.error})`,
+		);
+		results.push({
+			step: "ask_peer rejects gemini caller with pointer to ask_peers (R23)",
+			ok: true,
+		});
+	} finally {
+		proc.kill();
+		if (sessionId) cleanupSession(sessionId);
+	}
+	return { results };
 }
 
 // W8 model-check helpers: drive server ask_peer with the new REAL_*
 // stubs that return peer_model !== 'stub', activating the server-side
 // sibling model-parser + silent-downgrade defense.
-async function runServerAskPeer(stubValue, callerStatus, callerAgent = 'claude') {
-    const proc = spawn('node', [SERVER], {
-        env: {
-            ...process.env,
-            CROSS_REVIEW_CALLER: callerAgent,
-            CROSS_REVIEW_SKIP_PROBE: '1',
-            CROSS_REVIEW_PEER_STUB: stubValue,
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        shell: false,
-    });
-    const responses = new Map();
-    attachJsonRpcReader(proc.stdout, responses);
-    const call = (id, method, params) =>
-        new Promise((resolve, reject) => {
-            proc.stdin.write(requestLine(id, method, params));
-            const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
-            const poll = setInterval(() => {
-                if (responses.has(id)) {
-                    clearInterval(poll);
-                    clearTimeout(t);
-                    resolve(responses.get(id));
-                }
-            }, 25);
-        });
-    let sessionId;
-    try {
-        await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'smoke-model-check', version: '0.1' } });
-        proc.stdin.write(notifLine('notifications/initialized'));
-        const init = await call(2, 'tools/call', {
-            name: 'session_init',
-            arguments: { task: 'model-check smoke', artifacts: [] },
-        });
-        sessionId = JSON.parse(init.result.content[0].text).session_id;
-        const askResp = await call(3, 'tools/call', {
-            name: 'ask_peer',
-            arguments: { session_id: sessionId, prompt: 'trigger model check', caller_status: callerStatus },
-        });
-        const askPayload = JSON.parse(askResp.result.content[0].text);
-        return { sessionId, askPayload };
-    } finally {
-        proc.kill();
-    }
+async function runServerAskPeer(
+	stubValue,
+	callerStatus,
+	callerAgent = "claude",
+) {
+	const proc = spawn("node", [SERVER], {
+		env: {
+			...process.env,
+			CROSS_REVIEW_CALLER: callerAgent,
+			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_PEER_STUB: stubValue,
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+		shell: false,
+	});
+	const responses = new Map();
+	attachJsonRpcReader(proc.stdout, responses);
+	const call = (id, method, params) =>
+		new Promise((resolve, reject) => {
+			proc.stdin.write(requestLine(id, method, params));
+			const t = setTimeout(() => reject(new Error(`timeout id=${id}`)), 10000);
+			const poll = setInterval(() => {
+				if (responses.has(id)) {
+					clearInterval(poll);
+					clearTimeout(t);
+					resolve(responses.get(id));
+				}
+			}, 25);
+		});
+	let sessionId;
+	try {
+		await call(1, "initialize", {
+			protocolVersion: "2024-11-05",
+			capabilities: {},
+			clientInfo: { name: "smoke-model-check", version: "0.1" },
+		});
+		proc.stdin.write(notifLine("notifications/initialized"));
+		const init = await call(2, "tools/call", {
+			name: "session_init",
+			arguments: { task: "model-check smoke", artifacts: [] },
+		});
+		sessionId = JSON.parse(init.result.content[0].text).session_id;
+		const askResp = await call(3, "tools/call", {
+			name: "ask_peer",
+			arguments: {
+				session_id: sessionId,
+				prompt: "trigger model check",
+				caller_status: callerStatus,
+			},
+		});
+		const askPayload = JSON.parse(askResp.result.content[0].text);
+		return { sessionId, askPayload };
+	} finally {
+		proc.kill();
+	}
 }
 
 async function driveModelCheckMatchViaServer() {
-    const results = [];
-    const { sessionId, askPayload } = await runServerAskPeer('REAL_MATCH:gpt-5.5:READY', 'READY');
-    try {
-        assert(askPayload.peer_status === 'READY', 'match path: peer_status=READY');
-        assert(askPayload.model_requested === 'gpt-5.5', 'match path: model_requested=gpt-5.5');
-        assert(askPayload.model_reported === 'gpt-5.5', 'match path: model_reported=gpt-5.5');
-        assert(askPayload.model_match === true, 'match path: model_match=true');
-        assert(askPayload.model_failure_class == null, 'match path: failure_class null');
-        assert(askPayload.protocol_violation === false, 'match path: no protocol violation');
-        results.push({ step: 'ask_peer model-check MATCH via server (REAL_MATCH:gpt-5.5:READY) -> model_match=true, no violation', ok: true });
-    } finally {
-        if (sessionId) cleanupSession(sessionId);
-    }
-    return { results };
+	const results = [];
+	const { sessionId, askPayload } = await runServerAskPeer(
+		"REAL_MATCH:gpt-5.5:READY",
+		"READY",
+	);
+	try {
+		assert(askPayload.peer_status === "READY", "match path: peer_status=READY");
+		assert(
+			askPayload.model_requested === "gpt-5.5",
+			"match path: model_requested=gpt-5.5",
+		);
+		assert(
+			askPayload.model_reported === "gpt-5.5",
+			"match path: model_reported=gpt-5.5",
+		);
+		assert(askPayload.model_match === true, "match path: model_match=true");
+		assert(
+			askPayload.model_failure_class == null,
+			"match path: failure_class null",
+		);
+		assert(
+			askPayload.protocol_violation === false,
+			"match path: no protocol violation",
+		);
+		results.push({
+			step: "ask_peer model-check MATCH via server (REAL_MATCH:gpt-5.5:READY) -> model_match=true, no violation",
+			ok: true,
+		});
+	} finally {
+		if (sessionId) cleanupSession(sessionId);
+	}
+	return { results };
 }
 
 async function driveModelCheckDowngradeViaServer() {
-    const results = [];
-    const { sessionId, askPayload } = await runServerAskPeer('REAL_DOWNGRADE:gpt-5.5:gpt-3.5-legacy:READY', 'NOT_READY');
-    try {
-        assert(askPayload.peer_status === 'READY', 'downgrade path: status still parses');
-        assert(askPayload.model_requested === 'gpt-5.5', 'downgrade: model_requested=gpt-5.5');
-        assert(askPayload.model_reported === 'gpt-3.5-legacy', 'downgrade: model_reported=gpt-3.5-legacy');
-        assert(askPayload.model_match === false, 'downgrade: model_match=false');
-        assert(askPayload.model_failure_class === 'silent_model_downgrade', 'downgrade: failure_class=silent_model_downgrade');
-        assert(askPayload.protocol_violation === true, 'downgrade: protocol_violation=true');
-        results.push({ step: 'ask_peer model-check DOWNGRADE via server -> model_match=false, failure_class=silent_model_downgrade, protocol_violation=true', ok: true });
-    } finally {
-        if (sessionId) cleanupSession(sessionId);
-    }
-    return { results };
+	const results = [];
+	const { sessionId, askPayload } = await runServerAskPeer(
+		"REAL_DOWNGRADE:gpt-5.5:gpt-3.5-legacy:READY",
+		"NOT_READY",
+	);
+	try {
+		assert(
+			askPayload.peer_status === "READY",
+			"downgrade path: status still parses",
+		);
+		assert(
+			askPayload.model_requested === "gpt-5.5",
+			"downgrade: model_requested=gpt-5.5",
+		);
+		assert(
+			askPayload.model_reported === "gpt-3.5-legacy",
+			"downgrade: model_reported=gpt-3.5-legacy",
+		);
+		assert(askPayload.model_match === false, "downgrade: model_match=false");
+		assert(
+			askPayload.model_failure_class === "silent_model_downgrade",
+			"downgrade: failure_class=silent_model_downgrade",
+		);
+		assert(
+			askPayload.protocol_violation === true,
+			"downgrade: protocol_violation=true",
+		);
+		results.push({
+			step: "ask_peer model-check DOWNGRADE via server -> model_match=false, failure_class=silent_model_downgrade, protocol_violation=true",
+			ok: true,
+		});
+	} finally {
+		if (sessionId) cleanupSession(sessionId);
+	}
+	return { results };
 }
 
 async function driveModelCheckMissingViaServer() {
-    const results = [];
-    const { sessionId, askPayload } = await runServerAskPeer('REAL_MISSING_MODEL:gpt-5.5:READY', 'NOT_READY');
-    try {
-        assert(askPayload.peer_status === 'READY', 'missing-model path: status parses');
-        assert(askPayload.model_reported == null, 'missing: model_reported null');
-        assert(askPayload.model_match === false, 'missing: model_match=false');
-        assert(askPayload.model_failure_class === 'missing_model_report', 'missing: failure_class=missing_model_report');
-        assert(askPayload.protocol_violation === true, 'missing: protocol_violation=true');
-        results.push({ step: 'ask_peer model-check MISSING_MODEL_REPORT via server -> failure_class=missing_model_report, protocol_violation=true', ok: true });
-    } finally {
-        if (sessionId) cleanupSession(sessionId);
-    }
-    return { results };
+	const results = [];
+	const { sessionId, askPayload } = await runServerAskPeer(
+		"REAL_MISSING_MODEL:gpt-5.5:READY",
+		"NOT_READY",
+	);
+	try {
+		assert(
+			askPayload.peer_status === "READY",
+			"missing-model path: status parses",
+		);
+		assert(askPayload.model_reported == null, "missing: model_reported null");
+		assert(askPayload.model_match === false, "missing: model_match=false");
+		assert(
+			askPayload.model_failure_class === "missing_model_report",
+			"missing: failure_class=missing_model_report",
+		);
+		assert(
+			askPayload.protocol_violation === true,
+			"missing: protocol_violation=true",
+		);
+		results.push({
+			step: "ask_peer model-check MISSING_MODEL_REPORT via server -> failure_class=missing_model_report, protocol_violation=true",
+			ok: true,
+		});
+	} finally {
+		if (sessionId) cleanupSession(sessionId);
+	}
+	return { results };
 }
 
 // W6: session-store.js N-ary schema + redaction + normalization +
 // capability_snapshot + failed_attempts + N-ary convergence.
 async function driveSessionStoreUnit() {
-    const results = [];
-    const store = require('../src/lib/session-store.js');
+	const results = [];
+	const store = require("../src/lib/session-store.js");
 
-    // redactSensitive: known patterns. Fixture strings interpolate
-    // small string literals via template syntax so the static source
-    // never contains a contiguous payload that matches GitHub Secret
-    // Scanning regexes (Google API Key, GitHub PAT, JWT, Slack, etc.).
-    // The runtime values still exercise the redaction code paths
-    // identically — separation is purely syntactic.
-    const raw = [
-        `token=${'sk-'}abcdefghijklmnopqrstuv`,
-        `${'AI'}zaAbCdEfGhIjKlMnOpQrStUvWxYz012345678`,
-        `Authorization: Bearer ${'eyJ'}hbGciOiJIUzI1NiJ9.eyJzdWIifX0.sig-xyz`,
-        `gh_token=${'ghp'}_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123`,
-        `slack=${'xoxb'}-abc-def-ghi-jklmn`,
-        'PRIVATE_API_KEY=topsecret',
-        `https://alice:${'p4'}ssw0rd@internal.lcv.app.br/path`,
-    ].join('\n');
-    const redacted = store.redactSensitive(raw);
-    assert(!redacted.includes('sk-abcdefghij'), 'redact: sk- OpenAI');
-    assert(!redacted.includes('AIzaAbCdEfGhIj'), 'redact: Google AIza');
-    assert(!redacted.includes('eyJhbGciOi'), 'redact: JWT');
-    assert(!redacted.includes('ghp_ABCDE'), 'redact: GitHub gh');
-    assert(!redacted.includes('xoxb-abc-def'), 'redact: Slack xox');
-    assert(!redacted.includes('topsecret'), 'redact: env-style PRIVATE_API_KEY');
-    assert(!redacted.includes('alice:p4ssw0rd'), 'redact: URL userinfo');
-    results.push({ step: 'session-store.redactSensitive masks OpenAI/Google/JWT/GitHub/Slack/env-style/URL-userinfo (R14)', ok: true });
+	// redactSensitive: known patterns. Fixture strings interpolate
+	// small string literals via template syntax so the static source
+	// never contains a contiguous payload that matches GitHub Secret
+	// Scanning regexes (Google API Key, GitHub PAT, JWT, Slack, etc.).
+	// The runtime values still exercise the redaction code paths
+	// identically — separation is purely syntactic.
+	const raw = [
+		`token=${"sk-"}abcdefghijklmnopqrstuv`,
+		`${"AI"}zaAbCdEfGhIjKlMnOpQrStUvWxYz012345678`,
+		`Authorization: Bearer ${"eyJ"}hbGciOiJIUzI1NiJ9.eyJzdWIifX0.sig-xyz`,
+		`gh_token=${"ghp"}_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123`,
+		`slack=${"xoxb"}-abc-def-ghi-jklmn`,
+		"PRIVATE_API_KEY=topsecret",
+		`https://alice:${"p4"}ssw0rd@internal.lcv.app.br/path`,
+	].join("\n");
+	const redacted = store.redactSensitive(raw);
+	assert(!redacted.includes("sk-abcdefghij"), "redact: sk- OpenAI");
+	assert(!redacted.includes("AIzaAbCdEfGhIj"), "redact: Google AIza");
+	assert(!redacted.includes("eyJhbGciOi"), "redact: JWT");
+	assert(!redacted.includes("ghp_ABCDE"), "redact: GitHub gh");
+	assert(!redacted.includes("xoxb-abc-def"), "redact: Slack xox");
+	assert(!redacted.includes("topsecret"), "redact: env-style PRIVATE_API_KEY");
+	assert(!redacted.includes("alice:p4ssw0rd"), "redact: URL userinfo");
+	results.push({
+		step: "session-store.redactSensitive masks OpenAI/Google/JWT/GitHub/Slack/env-style/URL-userinfo (R14)",
+		ok: true,
+	});
 
-    // normalizePeers: idempotent on peers[], synthesizes from legacy peer.
-    const m1 = store.normalizePeers({ peer: 'codex', rounds: [] });
-    assert(Array.isArray(m1.peers) && m1.peers.length === 1 && m1.peers[0] === 'codex', 'legacy peer -> peers[codex]');
-    const m2 = store.normalizePeers({ peers: ['codex', 'gemini'], rounds: [] });
-    assert(m2.peers.length === 2 && m2.peers[1] === 'gemini', 'peers[] preserved when present');
-    const m3 = store.normalizePeers({ peer: 'codex', peers: ['claude'], rounds: [] });
-    assert(m3.peers[0] === 'claude', 'peers[] wins over scalar peer when both present');
-    results.push({ step: 'session-store.normalizePeers: idempotent + synthesizes from legacy peer + prefers peers[] over scalar', ok: true });
+	// normalizePeers: idempotent on peers[], synthesizes from legacy peer.
+	const m1 = store.normalizePeers({ peer: "codex", rounds: [] });
+	assert(
+		Array.isArray(m1.peers) && m1.peers.length === 1 && m1.peers[0] === "codex",
+		"legacy peer -> peers[codex]",
+	);
+	const m2 = store.normalizePeers({ peers: ["codex", "gemini"], rounds: [] });
+	assert(
+		m2.peers.length === 2 && m2.peers[1] === "gemini",
+		"peers[] preserved when present",
+	);
+	const m3 = store.normalizePeers({
+		peer: "codex",
+		peers: ["claude"],
+		rounds: [],
+	});
+	assert(
+		m3.peers[0] === "claude",
+		"peers[] wins over scalar peer when both present",
+	);
+	results.push({
+		step: "session-store.normalizePeers: idempotent + synthesizes from legacy peer + prefers peers[] over scalar",
+		ok: true,
+	});
 
-    // initSession N-ary path: write and read back.
-    const id = store.initSession({
-        task: 'W6 smoke N-ary',
-        artifacts: [],
-        callerAgent: 'claude',
-        peers: ['codex', 'gemini'],
-        capabilitySnapshot: { stub: true, peers: [{ agent: 'codex', tier: 'top' }, { agent: 'gemini', tier: 'top' }] },
-    });
-    const meta = store.readMeta(id);
-    assert(Array.isArray(meta.peers) && meta.peers.length === 2, 'initSession persisted peers[]');
-    assert(!('peer' in meta), 'N-ary session: no legacy peer scalar');
-    assert(meta.capability_snapshot && meta.capability_snapshot.stub === true, 'capability_snapshot persisted at init');
-    results.push({ step: 'session-store.initSession N-ary: peers[] + capability_snapshot persisted, no scalar peer', ok: true });
+	// initSession N-ary path: write and read back.
+	const id = store.initSession({
+		task: "W6 smoke N-ary",
+		artifacts: [],
+		callerAgent: "claude",
+		peers: ["codex", "gemini"],
+		capabilitySnapshot: {
+			stub: true,
+			peers: [
+				{ agent: "codex", tier: "top" },
+				{ agent: "gemini", tier: "top" },
+			],
+		},
+	});
+	const meta = store.readMeta(id);
+	assert(
+		Array.isArray(meta.peers) && meta.peers.length === 2,
+		"initSession persisted peers[]",
+	);
+	assert(!("peer" in meta), "N-ary session: no legacy peer scalar");
+	assert(
+		meta.capability_snapshot && meta.capability_snapshot.stub === true,
+		"capability_snapshot persisted at init",
+	);
+	results.push({
+		step: "session-store.initSession N-ary: peers[] + capability_snapshot persisted, no scalar peer",
+		ok: true,
+	});
 
-    // saveCapabilitySnapshot overwrites.
-    store.saveCapabilitySnapshot(id, { stub: true, version: 2 });
-    const meta2 = store.readMeta(id);
-    assert(meta2.capability_snapshot.version === 2, 'saveCapabilitySnapshot overwrites');
-    results.push({ step: 'session-store.saveCapabilitySnapshot: overwrites and updates last_updated_at', ok: true });
+	// saveCapabilitySnapshot overwrites.
+	store.saveCapabilitySnapshot(id, { stub: true, version: 2 });
+	const meta2 = store.readMeta(id);
+	assert(
+		meta2.capability_snapshot.version === 2,
+		"saveCapabilitySnapshot overwrites",
+	);
+	results.push({
+		step: "session-store.saveCapabilitySnapshot: overwrites and updates last_updated_at",
+		ok: true,
+	});
 
-    // saveFailedAttempt with secret in stderr_tail -> redacted.
-    store.saveFailedAttempt(id, 'gemini', 'rate_limit_exceeded', {
-        stderr_tail: 'Error: quota exceeded. token=sk-1234567890abcdefghij; retry later.',
-        failure_class: 'rate_limit_exceeded',
-        round: 1,
-        retry_attempt: 0,
-    });
-    const meta3 = store.readMeta(id);
-    assert(Array.isArray(meta3.failed_attempts) && meta3.failed_attempts.length === 1, 'failed_attempts recorded');
-    const attempt = meta3.failed_attempts[0];
-    assert(attempt.agent === 'gemini' && attempt.failure_class === 'rate_limit_exceeded', 'attempt carries agent + failure_class');
-    assert(!attempt.stderr_tail.includes('sk-1234567890'), 'stderr_tail redacted (R14)');
-    assert(attempt.stderr_tail.includes('[REDACTED]'), 'REDACTED marker present');
-    results.push({ step: 'session-store.saveFailedAttempt: entry persisted with clipped + redacted stderr_tail', ok: true });
+	// saveFailedAttempt with secret in stderr_tail -> redacted.
+	store.saveFailedAttempt(id, "gemini", "rate_limit_exceeded", {
+		stderr_tail:
+			"Error: quota exceeded. token=sk-1234567890abcdefghij; retry later.",
+		failure_class: "rate_limit_exceeded",
+		round: 1,
+		retry_attempt: 0,
+	});
+	const meta3 = store.readMeta(id);
+	assert(
+		Array.isArray(meta3.failed_attempts) && meta3.failed_attempts.length === 1,
+		"failed_attempts recorded",
+	);
+	const attempt = meta3.failed_attempts[0];
+	assert(
+		attempt.agent === "gemini" &&
+			attempt.failure_class === "rate_limit_exceeded",
+		"attempt carries agent + failure_class",
+	);
+	assert(
+		!attempt.stderr_tail.includes("sk-1234567890"),
+		"stderr_tail redacted (R14)",
+	);
+	assert(attempt.stderr_tail.includes("[REDACTED]"), "REDACTED marker present");
+	results.push({
+		step: "session-store.saveFailedAttempt: entry persisted with clipped + redacted stderr_tail",
+		ok: true,
+	});
 
-    // N-ary checkConvergence: all READY -> converged.
-    store.appendRound(id, {
-        round: 1,
-        caller: 'claude',
-        caller_status: 'READY',
-        peers: [
-            { agent: 'codex', peer_status: 'READY' },
-            { agent: 'gemini', peer_status: 'READY' },
-        ],
-    });
-    const conv1 = store.checkConvergence(id);
-    assert(conv1.converged === true, 'N-ary all READY -> converged');
-    results.push({ step: 'session-store.checkConvergence N-ary: caller + all peers READY -> converged', ok: true });
+	// N-ary checkConvergence: all READY -> converged.
+	store.appendRound(id, {
+		round: 1,
+		caller: "claude",
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: "READY" },
+		],
+	});
+	const conv1 = store.checkConvergence(id);
+	assert(conv1.converged === true, "N-ary all READY -> converged");
+	results.push({
+		step: "session-store.checkConvergence N-ary: caller + all peers READY -> converged",
+		ok: true,
+	});
 
-    // One peer NOT_READY -> not converged.
-    store.appendRound(id, {
-        round: 2,
-        caller: 'claude',
-        caller_status: 'READY',
-        peers: [
-            { agent: 'codex', peer_status: 'READY' },
-            { agent: 'gemini', peer_status: 'NOT_READY' },
-        ],
-    });
-    const conv2 = store.checkConvergence(id);
-    assert(conv2.converged === false, 'one peer NOT_READY -> not converged');
-    assert(/gemini/.test(conv2.reason), 'reason mentions the dissenting peer');
-    results.push({ step: 'session-store.checkConvergence N-ary: one peer NOT_READY -> not converged, reason names peer', ok: true });
+	// One peer NOT_READY -> not converged.
+	store.appendRound(id, {
+		round: 2,
+		caller: "claude",
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: "NOT_READY" },
+		],
+	});
+	const conv2 = store.checkConvergence(id);
+	assert(conv2.converged === false, "one peer NOT_READY -> not converged");
+	assert(/gemini/.test(conv2.reason), "reason mentions the dissenting peer");
+	results.push({
+		step: "session-store.checkConvergence N-ary: one peer NOT_READY -> not converged, reason names peer",
+		ok: true,
+	});
 
-    // cleanup
-    store.finalize(id, 'aborted');
-    fs.rmSync(store.sessionDir(id), { recursive: true, force: true });
+	// cleanup
+	store.finalize(id, "aborted");
+	fs.rmSync(store.sessionDir(id), { recursive: true, force: true });
 
-    return { results };
+	return { results };
 }
 
 // W5: parseDeclaredModel + classifyModelMatch unit coverage. Pure lib
 // tests (no server spawn): exercise well-formed, missing, malformed,
 // misplaced blocks and match classification.
 async function driveModelParserUnit() {
-    const results = [];
-    const { parseDeclaredModel, classifyModelMatch, MODEL_OPEN_TAG, MODEL_CLOSE_TAG } = require('../src/lib/model-parser.js');
+	const results = [];
+	const {
+		parseDeclaredModel,
+		classifyModelMatch,
+		MODEL_OPEN_TAG,
+		MODEL_CLOSE_TAG,
+	} = require("../src/lib/model-parser.js");
 
-    const statusBlock = '<cross_review_status>{"status":"READY"}</cross_review_status>';
+	const statusBlock =
+		'<cross_review_status>{"status":"READY"}</cross_review_status>';
 
-    // Well-formed: model block immediately before status block.
-    const r1 = parseDeclaredModel(
-        `body\n\n${MODEL_OPEN_TAG}{"model_id":"gemini-2.5-pro"}${MODEL_CLOSE_TAG}\n${statusBlock}\n`
-    );
-    assert(r1.model_id === 'gemini-2.5-pro' && r1.source === 'structured', 'parseDeclaredModel well-formed -> gemini-2.5-pro');
-    results.push({ step: 'parseDeclaredModel: well-formed tail -> model_id extracted, source=structured', ok: true });
+	// Well-formed: model block immediately before status block.
+	const r1 = parseDeclaredModel(
+		`body\n\n${MODEL_OPEN_TAG}{"model_id":"gemini-2.5-pro"}${MODEL_CLOSE_TAG}\n${statusBlock}\n`,
+	);
+	assert(
+		r1.model_id === "gemini-2.5-pro" && r1.source === "structured",
+		"parseDeclaredModel well-formed -> gemini-2.5-pro",
+	);
+	results.push({
+		step: "parseDeclaredModel: well-formed tail -> model_id extracted, source=structured",
+		ok: true,
+	});
 
-    // Missing: status block only.
-    const r2 = parseDeclaredModel(`body\n\n${statusBlock}\n`);
-    assert(r2.model_id === null && r2.parser_warnings.length > 0, 'parseDeclaredModel missing -> null + warning');
-    results.push({ step: 'parseDeclaredModel: missing model block -> null + warning', ok: true });
+	// Missing: status block only.
+	const r2 = parseDeclaredModel(`body\n\n${statusBlock}\n`);
+	assert(
+		r2.model_id === null && r2.parser_warnings.length > 0,
+		"parseDeclaredModel missing -> null + warning",
+	);
+	results.push({
+		step: "parseDeclaredModel: missing model block -> null + warning",
+		ok: true,
+	});
 
-    // Malformed JSON.
-    const r3 = parseDeclaredModel(
-        `body\n\n${MODEL_OPEN_TAG}{not json${MODEL_CLOSE_TAG}\n${statusBlock}\n`
-    );
-    assert(r3.model_id === null && r3.parser_warnings.some((w) => /not valid JSON/.test(w)), 'malformed JSON -> null + warning');
-    results.push({ step: 'parseDeclaredModel: malformed JSON payload -> null + parser warning', ok: true });
+	// Malformed JSON.
+	const r3 = parseDeclaredModel(
+		`body\n\n${MODEL_OPEN_TAG}{not json${MODEL_CLOSE_TAG}\n${statusBlock}\n`,
+	);
+	assert(
+		r3.model_id === null &&
+			r3.parser_warnings.some((w) => /not valid JSON/.test(w)),
+		"malformed JSON -> null + warning",
+	);
+	results.push({
+		step: "parseDeclaredModel: malformed JSON payload -> null + parser warning",
+		ok: true,
+	});
 
-    // Missing model_id field.
-    const r4 = parseDeclaredModel(
-        `body\n\n${MODEL_OPEN_TAG}{"foo":"bar"}${MODEL_CLOSE_TAG}\n${statusBlock}\n`
-    );
-    assert(r4.model_id === null, 'missing model_id field -> null');
-    results.push({ step: 'parseDeclaredModel: payload without model_id field -> null + warning', ok: true });
+	// Missing model_id field.
+	const r4 = parseDeclaredModel(
+		`body\n\n${MODEL_OPEN_TAG}{"foo":"bar"}${MODEL_CLOSE_TAG}\n${statusBlock}\n`,
+	);
+	assert(r4.model_id === null, "missing model_id field -> null");
+	results.push({
+		step: "parseDeclaredModel: payload without model_id field -> null + warning",
+		ok: true,
+	});
 
-    // Wrong position: status block first, then model block. Tail discipline
-    // requires model block IMMEDIATELY before status block; reversed order
-    // is a protocol violation.
-    const r5 = parseDeclaredModel(
-        `body\n\n${statusBlock}\n\n${MODEL_OPEN_TAG}{"model_id":"gemini-2.5-pro"}${MODEL_CLOSE_TAG}\n`
-    );
-    assert(r5.model_id === null, 'wrong position (status before model) -> null');
-    results.push({ step: 'parseDeclaredModel: wrong block order (status before model) -> null (tail discipline)', ok: true });
+	// Wrong position: status block first, then model block. Tail discipline
+	// requires model block IMMEDIATELY before status block; reversed order
+	// is a protocol violation.
+	const r5 = parseDeclaredModel(
+		`body\n\n${statusBlock}\n\n${MODEL_OPEN_TAG}{"model_id":"gemini-2.5-pro"}${MODEL_CLOSE_TAG}\n`,
+	);
+	assert(r5.model_id === null, "wrong position (status before model) -> null");
+	results.push({
+		step: "parseDeclaredModel: wrong block order (status before model) -> null (tail discipline)",
+		ok: true,
+	});
 
-    // Empty input.
-    const r6 = parseDeclaredModel('');
-    assert(r6.model_id === null, 'empty input -> null');
-    results.push({ step: 'parseDeclaredModel: empty input -> null', ok: true });
+	// Empty input.
+	const r6 = parseDeclaredModel("");
+	assert(r6.model_id === null, "empty input -> null");
+	results.push({ step: "parseDeclaredModel: empty input -> null", ok: true });
 
-    // classifyModelMatch cases.
-    assert(classifyModelMatch('gemini-2.5-pro', 'gemini-2.5-pro') === 'ok', 'match -> ok');
-    assert(
-        classifyModelMatch('gemini-3.1-pro-preview', 'gemini-2.5-pro') === 'silent_model_downgrade',
-        'mismatch -> silent_model_downgrade'
-    );
-    assert(classifyModelMatch('gemini-2.5-pro', null) === 'missing_model_report', 'null reported -> missing_model_report');
-    results.push({ step: 'classifyModelMatch: ok / silent_model_downgrade / missing_model_report', ok: true });
+	// classifyModelMatch cases.
+	assert(
+		classifyModelMatch("gemini-2.5-pro", "gemini-2.5-pro") === "ok",
+		"match -> ok",
+	);
+	assert(
+		classifyModelMatch("gemini-3.1-pro-preview", "gemini-2.5-pro") ===
+			"silent_model_downgrade",
+		"mismatch -> silent_model_downgrade",
+	);
+	assert(
+		classifyModelMatch("gemini-2.5-pro", null) === "missing_model_report",
+		"null reported -> missing_model_report",
+	);
+	results.push({
+		step: "classifyModelMatch: ok / silent_model_downgrade / missing_model_report",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // W3: buildGeminiArgs structural shape. Verifies the exact flag set
 // agreed in F2 round 2 (CLI 0.39.1 evidence packet).
 async function driveGeminiArgsShape() {
-    const results = [];
-    const { buildGeminiArgs, GEMINI_MODEL, GEMINI_ALLOWED_MCP_SERVERS } = require('../src/lib/peer-spawn.js');
-    const args = buildGeminiArgs();
+	const results = [];
+	const {
+		buildGeminiArgs,
+		GEMINI_MODEL,
+		GEMINI_ALLOWED_MCP_SERVERS,
+	} = require("../src/lib/peer-spawn.js");
+	const args = buildGeminiArgs();
 
-    assert(args.includes('-m'), 'buildGeminiArgs has -m flag');
-    assert(args[args.indexOf('-m') + 1] === GEMINI_MODEL, `-m value is GEMINI_MODEL (${GEMINI_MODEL})`);
-    assert(args.includes('--approval-mode'), 'has --approval-mode');
-    assert(args[args.indexOf('--approval-mode') + 1] === 'plan', '--approval-mode=plan (read-only)');
-    assert(args.includes('--output-format'), 'has --output-format');
-    assert(args[args.indexOf('--output-format') + 1] === 'text', '--output-format=text');
-    assert(!args.includes('--skip-trust'), '--skip-trust NOT present (R9: not a containment flag)');
-    assert(!args.includes('--allowed-tools'), '--allowed-tools NOT present (deprecated in 0.39.1)');
-    // each allowed MCP server must appear paired with the flag
-    const allowCount = args.filter((a) => a === '--allowed-mcp-server-names').length;
-    assert(allowCount === GEMINI_ALLOWED_MCP_SERVERS.length, `--allowed-mcp-server-names appears ${GEMINI_ALLOWED_MCP_SERVERS.length} times`);
-    for (const name of GEMINI_ALLOWED_MCP_SERVERS) {
-        assert(args.includes(name), `allowed MCP '${name}' in args`);
-    }
-    assert(!args.includes('cross-review-mcp'), 'cross-review-mcp NOT in allowed MCPs (recursion prevented)');
-    results.push({ step: 'buildGeminiArgs: -m GEMINI_MODEL + --approval-mode plan + --output-format text + --allowed-mcp-server-names x3 (memory, ultrathink, code-reasoning; cross-review-mcp excluded)', ok: true });
+	assert(args.includes("-m"), "buildGeminiArgs has -m flag");
+	assert(
+		args[args.indexOf("-m") + 1] === GEMINI_MODEL,
+		`-m value is GEMINI_MODEL (${GEMINI_MODEL})`,
+	);
+	assert(args.includes("--approval-mode"), "has --approval-mode");
+	assert(
+		args[args.indexOf("--approval-mode") + 1] === "plan",
+		"--approval-mode=plan (read-only)",
+	);
+	assert(args.includes("--output-format"), "has --output-format");
+	assert(
+		args[args.indexOf("--output-format") + 1] === "text",
+		"--output-format=text",
+	);
+	assert(
+		!args.includes("--skip-trust"),
+		"--skip-trust NOT present (R9: not a containment flag)",
+	);
+	assert(
+		!args.includes("--allowed-tools"),
+		"--allowed-tools NOT present (deprecated in 0.39.1)",
+	);
+	// each allowed MCP server must appear paired with the flag
+	const allowCount = args.filter(
+		(a) => a === "--allowed-mcp-server-names",
+	).length;
+	assert(
+		allowCount === GEMINI_ALLOWED_MCP_SERVERS.length,
+		`--allowed-mcp-server-names appears ${GEMINI_ALLOWED_MCP_SERVERS.length} times`,
+	);
+	for (const name of GEMINI_ALLOWED_MCP_SERVERS) {
+		assert(args.includes(name), `allowed MCP '${name}' in args`);
+	}
+	assert(
+		!args.includes("cross-review-mcp"),
+		"cross-review-mcp NOT in allowed MCPs (recursion prevented)",
+	);
+	results.push({
+		step: "buildGeminiArgs: -m GEMINI_MODEL + --approval-mode plan + --output-format text + --allowed-mcp-server-names x3 (memory, ultrathink, code-reasoning; cross-review-mcp excluded)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 // W4: spawnPeers explicit-identity contract (R12: never infer agent
 // from array index). Uses CROSS_REVIEW_PEER_STUB to avoid real CLI.
 async function driveSpawnPeersIdentityShape() {
-    const results = [];
-    const { spawnPeers } = require('../src/lib/peer-spawn.js');
+	const results = [];
+	const { spawnPeers } = require("../src/lib/peer-spawn.js");
 
-    // Set stub to a READY legacy status so spawnPeer resolves quickly.
-    const prevStub = process.env.CROSS_REVIEW_PEER_STUB;
-    process.env.CROSS_REVIEW_PEER_STUB = 'STRUCTURED:READY';
-    try {
-        const out = await spawnPeers(['codex', 'claude', 'gemini'], 'probe');
-        assert(Array.isArray(out) && out.length === 3, 'spawnPeers returns array of 3');
-        const agents = out.map((o) => o.agent);
-        assert(agents.includes('codex') && agents.includes('claude') && agents.includes('gemini'), 'all three agents present by identity');
-        for (const entry of out) {
-            assert(entry.status === 'fulfilled', `entry.status === fulfilled for ${entry.agent}`);
-            assert(typeof entry.value === 'object' && entry.value !== null, `entry.value is object for ${entry.agent}`);
-            assert(typeof entry.value.stdout === 'string', `entry.value.stdout is string for ${entry.agent}`);
-        }
-        results.push({ step: 'spawnPeers: 3 agents, Promise.all resolution, explicit agent identity per entry (R12)', ok: true });
-    } finally {
-        if (prevStub === undefined) delete process.env.CROSS_REVIEW_PEER_STUB;
-        else process.env.CROSS_REVIEW_PEER_STUB = prevStub;
-    }
+	// Set stub to a READY legacy status so spawnPeer resolves quickly.
+	const prevStub = process.env.CROSS_REVIEW_PEER_STUB;
+	process.env.CROSS_REVIEW_PEER_STUB = "STRUCTURED:READY";
+	try {
+		const out = await spawnPeers(["codex", "claude", "gemini"], "probe");
+		assert(
+			Array.isArray(out) && out.length === 3,
+			"spawnPeers returns array of 3",
+		);
+		const agents = out.map((o) => o.agent);
+		assert(
+			agents.includes("codex") &&
+				agents.includes("claude") &&
+				agents.includes("gemini"),
+			"all three agents present by identity",
+		);
+		for (const entry of out) {
+			assert(
+				entry.status === "fulfilled",
+				`entry.status === fulfilled for ${entry.agent}`,
+			);
+			assert(
+				typeof entry.value === "object" && entry.value !== null,
+				`entry.value is object for ${entry.agent}`,
+			);
+			assert(
+				typeof entry.value.stdout === "string",
+				`entry.value.stdout is string for ${entry.agent}`,
+			);
+		}
+		results.push({
+			step: "spawnPeers: 3 agents, Promise.all resolution, explicit agent identity per entry (R12)",
+			ok: true,
+		});
+	} finally {
+		if (prevStub === undefined) delete process.env.CROSS_REVIEW_PEER_STUB;
+		else process.env.CROSS_REVIEW_PEER_STUB = prevStub;
+	}
 
-    // Error path: one stub is ERROR, others are READY. Result: partial
-    // results preserved (no reject). CROSS_REVIEW_PEER_STUB is process-wide,
-    // so we exercise with ERROR alone and verify the rejection shape.
-    process.env.CROSS_REVIEW_PEER_STUB = 'ERROR';
-    try {
-        const out = await spawnPeers(['codex'], 'probe');
-        assert(out.length === 1 && out[0].agent === 'codex', 'single-agent spawn returns 1 entry');
-        assert(out[0].status === 'rejected', 'error stub -> status=rejected');
-        assert(out[0].reason instanceof Error, 'reason is Error instance');
-        results.push({ step: 'spawnPeers: rejected peer preserved with explicit agent identity + reason Error', ok: true });
-    } finally {
-        if (prevStub === undefined) delete process.env.CROSS_REVIEW_PEER_STUB;
-        else process.env.CROSS_REVIEW_PEER_STUB = prevStub;
-    }
+	// Error path: one stub is ERROR, others are READY. Result: partial
+	// results preserved (no reject). CROSS_REVIEW_PEER_STUB is process-wide,
+	// so we exercise with ERROR alone and verify the rejection shape.
+	process.env.CROSS_REVIEW_PEER_STUB = "ERROR";
+	try {
+		const out = await spawnPeers(["codex"], "probe");
+		assert(
+			out.length === 1 && out[0].agent === "codex",
+			"single-agent spawn returns 1 entry",
+		);
+		assert(out[0].status === "rejected", "error stub -> status=rejected");
+		assert(out[0].reason instanceof Error, "reason is Error instance");
+		results.push({
+			step: "spawnPeers: rejected peer preserved with explicit agent identity + reason Error",
+			ok: true,
+		});
+	} finally {
+		if (prevStub === undefined) delete process.env.CROSS_REVIEW_PEER_STUB;
+		else process.env.CROSS_REVIEW_PEER_STUB = prevStub;
+	}
 
-    return { results };
+	return { results };
 }
 
 // W4: probeStub short-circuits probeAgent. Verifies capability_snapshot
 // shape (F2 Q6 field set).
 async function driveProbeStubShape() {
-    const results = [];
-    const { probeChain } = require('../src/lib/peer-spawn.js');
+	const results = [];
+	const { probeChain } = require("../src/lib/peer-spawn.js");
 
-    const prev = process.env.CROSS_REVIEW_PROBE_STUB;
-    process.env.CROSS_REVIEW_PROBE_STUB = 'codex:top,claude:top,gemini:fallback:gemini-2.5-flash';
-    try {
-        const snap = await probeChain(['codex', 'claude', 'gemini'], { budgetMs: 5000 });
-        assert(Array.isArray(snap) && snap.length === 3, 'probeChain returns array of 3');
-        const byAgent = Object.fromEntries(snap.map((s) => [s.agent, s]));
-        assert(byAgent.codex.tier === 'top', 'codex tier=top');
-        assert(byAgent.claude.tier === 'top', 'claude tier=top');
-        assert(byAgent.gemini.tier === 'fallback', 'gemini tier=fallback');
-        assert(byAgent.gemini.model_reported === 'gemini-2.5-flash', 'gemini reported fallback model');
-        for (const entry of snap) {
-            for (const field of ['agent', 'tier', 'requested_model', 'model_reported', 'model_match', 'probe_latency_ms', 'probe_budget_ms', 'exit_code', 'failure_class', 'timestamp']) {
-                assert(field in entry, `probe entry has field ${field} for ${entry.agent}`);
-            }
-        }
-        results.push({ step: 'probeChain: stub mode returns 3 snapshots with full capability_snapshot field set (F2 Q6)', ok: true });
-    } finally {
-        if (prev === undefined) delete process.env.CROSS_REVIEW_PROBE_STUB;
-        else process.env.CROSS_REVIEW_PROBE_STUB = prev;
-    }
+	const prev = process.env.CROSS_REVIEW_PROBE_STUB;
+	process.env.CROSS_REVIEW_PROBE_STUB =
+		"codex:top,claude:top,gemini:fallback:gemini-2.5-flash";
+	try {
+		const snap = await probeChain(["codex", "claude", "gemini"], {
+			budgetMs: 5000,
+		});
+		assert(
+			Array.isArray(snap) && snap.length === 3,
+			"probeChain returns array of 3",
+		);
+		const byAgent = Object.fromEntries(snap.map((s) => [s.agent, s]));
+		assert(byAgent.codex.tier === "top", "codex tier=top");
+		assert(byAgent.claude.tier === "top", "claude tier=top");
+		assert(byAgent.gemini.tier === "fallback", "gemini tier=fallback");
+		assert(
+			byAgent.gemini.model_reported === "gemini-2.5-flash",
+			"gemini reported fallback model",
+		);
+		for (const entry of snap) {
+			for (const field of [
+				"agent",
+				"tier",
+				"requested_model",
+				"model_reported",
+				"model_match",
+				"probe_latency_ms",
+				"probe_budget_ms",
+				"exit_code",
+				"failure_class",
+				"timestamp",
+			]) {
+				assert(
+					field in entry,
+					`probe entry has field ${field} for ${entry.agent}`,
+				);
+			}
+		}
+		results.push({
+			step: "probeChain: stub mode returns 3 snapshots with full capability_snapshot field set (F2 Q6)",
+			ok: true,
+		});
+	} finally {
+		if (prev === undefined) delete process.env.CROSS_REVIEW_PROBE_STUB;
+		else process.env.CROSS_REVIEW_PROBE_STUB = prev;
+	}
 
-    // Excluded tier.
-    process.env.CROSS_REVIEW_PROBE_STUB = 'codex:excluded';
-    try {
-        const snap = await probeChain(['codex'], { budgetMs: 5000 });
-        assert(snap.length === 1, '1 snapshot');
-        assert(snap[0].tier === 'excluded', 'tier=excluded');
-        assert(snap[0].failure_class === 'probe_excluded_stub', 'failure_class populated');
-        results.push({ step: 'probeChain: stub excluded tier carries failure_class', ok: true });
-    } finally {
-        if (prev === undefined) delete process.env.CROSS_REVIEW_PROBE_STUB;
-        else process.env.CROSS_REVIEW_PROBE_STUB = prev;
-    }
+	// Excluded tier.
+	process.env.CROSS_REVIEW_PROBE_STUB = "codex:excluded";
+	try {
+		const snap = await probeChain(["codex"], { budgetMs: 5000 });
+		assert(snap.length === 1, "1 snapshot");
+		assert(snap[0].tier === "excluded", "tier=excluded");
+		assert(
+			snap[0].failure_class === "probe_excluded_stub",
+			"failure_class populated",
+		);
+		results.push({
+			step: "probeChain: stub excluded tier carries failure_class",
+			ok: true,
+		});
+	} finally {
+		if (prev === undefined) delete process.env.CROSS_REVIEW_PROBE_STUB;
+		else process.env.CROSS_REVIEW_PROBE_STUB = prev;
+	}
 
-    return { results };
+	return { results };
 }
 
 // Regression test for the peer review finding 2026-04-24 (HIGH): the real
@@ -2856,40 +4905,76 @@ async function driveProbeStubShape() {
 // peer-spawn.js contains peer_model in its real-path resolve block
 // (structural assertion, since we cannot actually spawn a CLI in smoke).
 async function drivePeerSpawnRealPathModel() {
-    const results = [];
-    const { modelForPeer, CODEX_MODEL, CLAUDE_MODEL } = require('../src/lib/peer-spawn.js');
+	const results = [];
+	const {
+		modelForPeer,
+		CODEX_MODEL,
+		CLAUDE_MODEL,
+	} = require("../src/lib/peer-spawn.js");
 
-    assert(typeof modelForPeer === 'function', 'modelForPeer exported from peer-spawn.js');
-    assert(modelForPeer('codex') === CODEX_MODEL, `modelForPeer('codex') === CODEX_MODEL (${CODEX_MODEL})`);
-    assert(modelForPeer('claude') === CLAUDE_MODEL, `modelForPeer('claude') === CLAUDE_MODEL (${CLAUDE_MODEL})`);
-    results.push({ step: `modelForPeer maps codex->${CODEX_MODEL}, claude->${CLAUDE_MODEL}`, ok: true });
+	assert(
+		typeof modelForPeer === "function",
+		"modelForPeer exported from peer-spawn.js",
+	);
+	assert(
+		modelForPeer("codex") === CODEX_MODEL,
+		`modelForPeer('codex') === CODEX_MODEL (${CODEX_MODEL})`,
+	);
+	assert(
+		modelForPeer("claude") === CLAUDE_MODEL,
+		`modelForPeer('claude') === CLAUDE_MODEL (${CLAUDE_MODEL})`,
+	);
+	results.push({
+		step: `modelForPeer maps codex->${CODEX_MODEL}, claude->${CLAUDE_MODEL}`,
+		ok: true,
+	});
 
-    // Structural: real-path resolve in peer-spawn.js must include peer_model.
-    // Prevents silent regression of the 2026-04-24 fix (see CHANGELOG).
-    const src = fs.readFileSync(require.resolve('../src/lib/peer-spawn.js'), 'utf8');
-    const closeBlockMatch = src.match(/proc\.on\('close'[\s\S]*?resolve\(\s*\{[^}]*\}/);
-    assert(closeBlockMatch, 'peer-spawn.js: proc.on(close) resolve block present');
-    const resolveBlock = closeBlockMatch[0];
-    assert(resolveBlock.includes('peer_model'), 'peer-spawn.js real-path resolve includes peer_model (spec section 6.9.2 auditability)');
-    assert(
-        resolveBlock.includes('modelForPeer(peerAgent)'),
-        'peer-spawn.js real-path resolve uses modelForPeer(peerAgent) to populate peer_model'
-    );
-    results.push({ step: 'peer-spawn.js real-path resolve contains peer_model: modelForPeer(peerAgent) (regression guard for 2026-04-24 peer review fix)', ok: true });
+	// Structural: real-path resolve in peer-spawn.js must include peer_model.
+	// Prevents silent regression of the 2026-04-24 fix (see CHANGELOG).
+	const src = fs.readFileSync(
+		require.resolve("../src/lib/peer-spawn.js"),
+		"utf8",
+	);
+	const closeBlockMatch = src.match(
+		/proc\.on\(['"]close['"][\s\S]*?resolve\(\s*\{[^}]*\}/,
+	);
+	assert(
+		closeBlockMatch,
+		"peer-spawn.js: proc.on(close) resolve block present",
+	);
+	const resolveBlock = closeBlockMatch[0];
+	assert(
+		resolveBlock.includes("peer_model"),
+		"peer-spawn.js real-path resolve includes peer_model (spec section 6.9.2 auditability)",
+	);
+	assert(
+		resolveBlock.includes("modelForPeer(peerAgent)"),
+		"peer-spawn.js real-path resolve uses modelForPeer(peerAgent) to populate peer_model",
+	);
+	results.push({
+		step: "peer-spawn.js real-path resolve contains peer_model: modelForPeer(peerAgent) (regression guard for 2026-04-24 peer review fix)",
+		ok: true,
+	});
 
-    return { results };
+	return { results };
 }
 
 runAll()
-    .then((results) => {
-        const allOk = results.every((r) => r.ok);
-        for (const r of results) {
-            console.log(`  [${r.ok ? 'ok' : 'FAIL'}] ${r.step}${r.tools ? ` (${r.tools.length} tools)` : ''}${r.session_id ? ` session=${r.session_id.slice(0, 8)}...` : ''}`);
-        }
-        console.log(`\n[functional-smoke] ${results.length} steps, all ${allOk ? 'GREEN' : 'HAD FAILURES'}`);
-        process.exit(allOk ? 0 : 1);
-    })
-    .catch((err) => {
-        console.error(`[functional-smoke] FATAL: ${err?.stack || err?.message || err}`);
-        process.exit(1);
-    });
+	.then((results) => {
+		const allOk = results.every((r) => r.ok);
+		for (const r of results) {
+			console.log(
+				`  [${r.ok ? "ok" : "FAIL"}] ${r.step}${r.tools ? ` (${r.tools.length} tools)` : ""}${r.session_id ? ` session=${r.session_id.slice(0, 8)}...` : ""}`,
+			);
+		}
+		console.log(
+			`\n[functional-smoke] ${results.length} steps, all ${allOk ? "GREEN" : "HAD FAILURES"}`,
+		);
+		process.exit(allOk ? 0 : 1);
+	})
+	.catch((err) => {
+		console.error(
+			`[functional-smoke] FATAL: ${err?.stack || err?.message || err}`,
+		);
+		process.exit(1);
+	});

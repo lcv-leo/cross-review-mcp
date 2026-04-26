@@ -15,6 +15,46 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.2.7] — 2026-04-26
+
+**External-audit round-5 closure: F3 stream listener detach + F4 Windows taskkill fallback + codex comment drift fix.** Round-5 (Gemini-orchestrated against v1.2.6, codex-corroborated in independent audit) found two real implementation gaps in the §6.18.3 RAM cap and §2 process-reaping paths. v1.2.6 was a CodeQL-only static-analysis fix; v1.2.7 closes the runtime semantics that codex initially went READY on but reversed when shown gemini's evidence (codex miss-profile note: 0 real bugs caught vs gemini's 2 — atypical for the rigor profile, recorded in audit doc).
+
+### Corrigido — §6.18.3 v1.2.7 amendment F3: listener detach before kill (DoS streams)
+- **Pre-v1.2.7 bug:** `proc.stdout` and `proc.stderr` `data` listeners stayed attached after `overflow()`/timeout while `killProcessTree` async'd. Windows `taskkill` is 50-200ms typical; POSIX `process.kill` returns before child fully exits. In-flight `data` events kept growing JS-side string buffers DURING the kill window — a hostile peer could push the soft cap from 4 MiB to 8-16+ MiB before the process actually died.
+- **Fix:** introduced `detachStreamListeners` (in `spawnPeer`) and `detachProbeListeners` (in `probeAgent`) helpers; both call `proc.stdout.removeAllListeners('data')` + `proc.stderr.removeAllListeners('data')` in try-catch. Each helper invoked BEFORE `killProcessTree(proc)` in BOTH the overflow handler AND the timeout handler — 4 leak paths closed.
+- **Why removeAllListeners and not destroy():** `destroy()` closes the JS-side stream end and may signal SIGPIPE-equivalent to the child via cmd.exe shim, racing with `taskkill` and producing spurious `'error'` events on Windows. `removeAllListeners('data')` is pure JS-land — stops accumulator growth without touching child process state. Stream auto-closes when child dies. Caveat: a single `data` event already in the microtask queue may still fire once after detach (single-chunk-bounded leak ≤64 KiB per event); acceptable.
+
+### Corrigido — §6.18.3 v1.2.7 amendment F4: Windows taskkill nonzero-exit fallback (process reaping)
+- **Pre-v1.2.7 bug:** `killer.on('close', code)` handler logged on `code !== 0` but had no recovery path. `taskkill` failures (AV interference, permission inheritance bugs, race with normal exit) leaked the child process — the parent's promise had already rejected, but the child kept running. The `killer.on('error', err)` path also only logged.
+- **Fix:** both handlers now invoke `proc.kill('SIGKILL')` in a try-catch (swallows ESRCH for already-dead processes) AFTER the log line. Strict improvement: harmless when child already exited; real reap when it didn't.
+
+### Corrigido — codex round-5 catch: stale comment at session-store.js:498-500
+- **Pre-v1.2.7 bug:** comment described the convergence predicate as "failed-spawn peers ... excluded from denominator," which was the pre-v1.2.3 semantics. v1.2.3 §6.18.1 strict-quorum closure changed it: failed-spawn peers ARE counted in `round.quorum.rejected` and DO count AGAINST convergence (predicate requires `round.quorum.rejected === 0`). The comment was 4 releases stale.
+- **Fix:** rewrote comment to match current spec §6.12 + §6.18.1 contract; added the v1.2.3 transition note so future readers understand why the comment looks different from the pre-v1.2.3 mental model.
+
+### Adicionado — tests (2 new structural anti-drift smoke steps)
+- `driveV414StreamListenerDetachUnit`: asserts both detach helpers exist with stdout+stderr `removeAllListeners('data')` body, and each helper is invoked at least twice (once per leak path in its closure scope). Quote-agnostic regex (biome formatter neutral).
+- `driveV414TaskkillFallbackUnit`: asserts `killer.on('close')` AND `killer.on('error')` handlers both contain the `proc.kill('SIGKILL')` fallback. Quote-agnostic.
+
+### Alterado — code style (proactive lint cleanup)
+- Per workspace `feedback_fix_preexisting_errors.md`: applied biome formatter to `src/server.js` + `src/lib/*.js` + `scripts/functional-smoke.js`. Quote style standardized; tab indentation enforced. Anti-drift smoke regex updated to be formatter-agnostic so future biome migrations don't break gates.
+- `src/lib/peer-spawn.js:417` — `!proc || !proc.pid` → `!proc?.pid` (optional chain; biome `lint/style/useOptionalChain`).
+- `src/server.js:463` — string-concatenation tool description in `session_init` switched to template literal (biome `lint/style/useTemplate`).
+- `scripts/functional-smoke.js:1537` — useless escape `'"\,'` → `'",'` (biome `lint/suspicious/noUselessEscapeInString`).
+- `scripts/functional-smoke.js:1675` — `Object.prototype.hasOwnProperty.call(...)` → `Object.hasOwn(...)` (biome `lint/suspicious/noPrototypeBuiltins`; safe under Node 20+ engine pin).
+
+### Items deferred to v1.3.x with explicit rationale (round-5 closure)
+- **Gemini R3: MCP request-boundary payload caps** for `task`/`prompt`/`artifacts`. Currently §6.18.2's 64 KiB cap only fires at the disk-write layer; an adversarial caller could ship 100 MiB in `prompt` consuming RAM before any write. Real gap; v1.3.x material because it requires threshold calibration + response-shape contract on oversized input. Codex independently corroborated this gap in round-5 (R5 #5).
+- **Gemini R4: behavioral peer-emulator harness** for stream overflow tests. Already deferred at v1.2.5 with same rationale; F3 closure does NOT change that (F3 ships structural anti-drift; behavioral coverage is independent).
+- **TOCTOU realpath-vs-I/O race** (gemini round-5 §2 residual). Accepted under §6.21 single-user trusted-host threat model. Eliminating it would require POSIX `O_NOFOLLOW`-style per-operation gates not currently in Node's stable fs surface.
+
+### Validação
+- `npm test` 179 GREEN (was 177 in v1.2.6; +2 for F3 + F4 anti-drift). All pre-existing biome warnings now clean.
+- `npm run check-models` GREEN.
+- Trilateral cross-review session (round-5 closure) — see audit doc for transcript.
+
+---
+
 ## [1.2.6] — 2026-04-26
 
 **CodeQL hardening: defensive regex-meta escape on the CHANGELOG anti-drift smoke.** GitHub Code Scanning surfaced `js/incomplete-sanitization` (high security_severity) on `scripts/functional-smoke.js:1121` minutes after the v1.2.5 publish. The regex builder for the v4.14 anti-drift step (`RELEASE_DATE constant matches CHANGELOG date for current VERSION`) used `server.VERSION.replace(/\./g, '\\.')` which only escapes dots — incomplete sanitization per CodeQL.
