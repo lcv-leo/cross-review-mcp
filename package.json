@@ -1,6 +1,6 @@
 {
   "name": "@lcv-leo/cross-review-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MCP server orchestrating trilateral cross-review between Claude Code, ChatGPT Codex, and Gemini CLI",
   "type": "commonjs",
   "main": "src/server.js",

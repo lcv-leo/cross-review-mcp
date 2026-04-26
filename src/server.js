@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -88,18 +88,77 @@ const LEGACY_BILATERAL_PEER = Object.freeze({
 });
 
 const TEST_IMPORT = process.env.CROSS_REVIEW_TEST_IMPORT === '1';
-const CALLER = TEST_IMPORT
+// CALLER_ENV is the operator-configured fallback. It seeds the `caller`
+// resolution chain (spec v4.14 §6.20) but is NOT the authoritative caller
+// per-session anymore: session_init resolves the caller dynamically with
+// precedence args.caller > clientInfo-derived > CALLER_ENV.
+const CALLER_ENV = TEST_IMPORT
     ? (process.env.CROSS_REVIEW_CALLER || 'claude').toLowerCase()
     : (process.env.CROSS_REVIEW_CALLER || '').toLowerCase();
-if (!TEST_IMPORT && !VALID_AGENTS.includes(CALLER)) {
+if (!TEST_IMPORT && !VALID_AGENTS.includes(CALLER_ENV)) {
     process.stderr.write(
-        `[cross-review-mcp] fatal: CROSS_REVIEW_CALLER must be one of ${VALID_AGENTS.join('|')} (got '${CALLER || '(unset)'}')\n`
+        `[cross-review-mcp] fatal: CROSS_REVIEW_CALLER must be one of ${VALID_AGENTS.join('|')} (got '${CALLER_ENV || '(unset)'}')\n`
     );
     process.exit(1);
 }
 
+// Backwards-compat: legacy code still references CALLER, PEERS, LEGACY_PEER
+// as module-level constants. They reflect the env-var resolution and remain
+// available for callers that do NOT pass an explicit `caller` arg. Per
+// spec v4.14 §6.20 the dynamic resolution at session_init time is canonical.
+const CALLER = CALLER_ENV;
 const PEERS = VALID_AGENTS.filter((a) => a !== CALLER);
 const LEGACY_PEER = LEGACY_BILATERAL_PEER[CALLER] || null;
+
+// v1.2.0 / spec v4.14 §6.20 — clientInfo → agent mapping for dynamic caller.
+// Maps the MCP `clientInfo.name` (sent by the host during initialize) to one
+// of VALID_AGENTS. Returns null if the name does not map cleanly. The mapping
+// is conservative: substring match on lowercased name. Unknown clients
+// (operator scripts, tests) fall through to env-var fallback.
+function resolveCallerFromClientInfo(clientInfo) {
+    const name = String(clientInfo?.name || '').toLowerCase();
+    if (!name) return null;
+    if (name.includes('claude')) return 'claude';
+    if (name.includes('gemini')) return 'gemini';
+    if (name.includes('codex')) return 'codex';
+    return null;
+}
+
+// Resolve caller per spec v4.14 §6.20 precedence:
+//   1. args.caller (explicit override) — wins if valid
+//   2. clientInfo-derived (server.getClientVersion() name → agent mapping)
+//   3. CALLER_ENV (operator-configured fallback)
+// Returns { caller, source: 'arg' | 'client_info' | 'env_var', client_info_name }.
+// Throws if all three resolution sources fail.
+function resolveCallerForSession(argsCaller, clientInfo) {
+    const argLower = String(argsCaller || '').toLowerCase();
+    if (argLower) {
+        if (!VALID_AGENTS.includes(argLower)) {
+            throw new Error(
+                `caller arg must be one of ${VALID_AGENTS.join('|')} (got '${argLower}')`
+            );
+        }
+        return { caller: argLower, source: 'arg', client_info_name: clientInfo?.name ?? null };
+    }
+    const fromClient = resolveCallerFromClientInfo(clientInfo);
+    if (fromClient && VALID_AGENTS.includes(fromClient)) {
+        return { caller: fromClient, source: 'client_info', client_info_name: clientInfo?.name ?? null };
+    }
+    if (CALLER_ENV && VALID_AGENTS.includes(CALLER_ENV)) {
+        return { caller: CALLER_ENV, source: 'env_var', client_info_name: clientInfo?.name ?? null };
+    }
+    throw new Error(
+        `cannot resolve caller: no caller arg passed, clientInfo.name='${clientInfo?.name || '(missing)'}' did not map to a known agent, and CROSS_REVIEW_CALLER env var is unset`
+    );
+}
+
+function peersForCaller(caller) {
+    return VALID_AGENTS.filter((a) => a !== caller);
+}
+
+function legacyPeerForCaller(caller) {
+    return LEGACY_BILATERAL_PEER[caller] || null;
+}
 
 // Probe behavior controls. In smoke tests the env-gated
 // CROSS_REVIEW_PROBE_STUB short-circuits per-agent probes inside
@@ -308,7 +367,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'session_init',
             description:
-                'Create a new cross-review session directory under ~/.cross-review/<uuid>/. Returns the session_id. Also runs a parallel capability probe (probeChain) against all peers (target 20-25s, hard ceiling 30s) and persists the result as meta.capability_snapshot -- spec v4.11 section 6.9.3.',
+                "Create a new cross-review session directory under ~/.cross-review/<uuid>/. Returns the session_id. Also runs a parallel capability probe (probeChain) against all peers (target 20-25s, hard ceiling 30s) and persists the result as meta.capability_snapshot -- spec v4.11 section 6.9.3.\n\nCALLER RESOLUTION (spec v4.14 §6.20). The session's caller is resolved dynamically per call with this precedence:\n  1. `caller` arg (explicit override) — wins if valid (must be one of " + VALID_AGENTS.join('|') + ").\n  2. clientInfo.name from MCP initialize — substring-mapped to agent ('claude'→claude, 'gemini'→gemini, 'codex'→codex).\n  3. CROSS_REVIEW_CALLER env var — operator-configured fallback.\nThe resolved caller is recorded in `meta.caller` and `meta.caller_resolution = { source, client_info_name }` for audit. Peers are computed dynamically as VALID_AGENTS minus the resolved caller. Pass `caller` explicitly when an agent shares an MCP server instance with another (mixed-host setups) or when the env var doesn't reflect reality.",
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -321,6 +380,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                         items: { type: 'string' },
                         description:
                             'Optional list of artifact paths relevant to the review (read by peer at its discretion).',
+                    },
+                    caller: {
+                        type: 'string',
+                        enum: VALID_AGENTS,
+                        description:
+                            "Explicit caller identity (spec v4.14 §6.20). Overrides clientInfo-derived and env-var resolution. Use this when the calling agent does not match what the MCP server's clientInfo would report, or to be explicit about identity in mixed-host setups.",
                     },
                 },
                 required: ['task'],
@@ -474,12 +539,16 @@ FAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): on spawn rejection, the res
     ],
 }));
 
-async function runSessionInitProbe() {
+// Spec v4.14 §6.20: probe runs against the dynamically-resolved peer set
+// for this session, not the env-var-derived global PEERS. peersList defaults
+// to global PEERS for backwards compatibility with code paths that have not
+// been updated to pass it.
+async function runSessionInitProbe(peersList = PEERS) {
     if (SKIP_PROBE) {
         return { skipped: true, reason: 'CROSS_REVIEW_SKIP_PROBE=1', peers: [] };
     }
     try {
-        const snapshot = await probeChain(PEERS, { budgetMs: PROBE_BUDGET_MS });
+        const snapshot = await probeChain(peersList, { budgetMs: PROBE_BUDGET_MS });
         return {
             skipped: false,
             started_at: new Date().toISOString(),
@@ -503,16 +572,30 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         switch (name) {
             case 'session_init': {
                 const t0 = Date.now();
-                const capabilitySnapshot = await runSessionInitProbe();
+                // Spec v4.14 §6.20: dynamic caller resolution per session.
+                const clientInfo = typeof server.getClientVersion === 'function'
+                    ? server.getClientVersion()
+                    : null;
+                const resolution = resolveCallerForSession(args.caller, clientInfo);
+                const callerForSession = resolution.caller;
+                const peersForSession = peersForCaller(callerForSession);
+                const capabilitySnapshot = await runSessionInitProbe(peersForSession);
                 const id = store.initSession({
                     task: args.task,
                     artifacts: args.artifacts || [],
-                    callerAgent: CALLER,
-                    peers: PEERS,
+                    callerAgent: callerForSession,
+                    peers: peersForSession,
                     capabilitySnapshot,
+                    callerResolution: {
+                        source: resolution.source,
+                        client_info_name: resolution.client_info_name,
+                    },
                 });
                 log('session_init created', {
                     session_id: id,
+                    caller: callerForSession,
+                    caller_source: resolution.source,
+                    client_info_name: resolution.client_info_name,
                     probe_duration_ms: Date.now() - t0,
                     probe_skipped: capabilitySnapshot.skipped === true,
                 });
@@ -523,8 +606,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                             text: JSON.stringify(
                                 {
                                     session_id: id,
-                                    caller: CALLER,
-                                    peers: PEERS,
+                                    caller: callerForSession,
+                                    caller_resolution: {
+                                        source: resolution.source,
+                                        client_info_name: resolution.client_info_name,
+                                    },
+                                    peers: peersForSession,
                                     capability_snapshot: capabilitySnapshot,
                                 },
                                 null,
@@ -623,11 +710,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 };
             }
             case 'ask_peer': {
-                if (LEGACY_PEER == null) {
-                    throw new Error(
-                        `ask_peer is a bilateral-only surface (claude<->codex). Caller=${CALLER} MUST use ask_peers instead (spec v4.11 §6.11 / triangular topology).`
-                    );
-                }
                 const sessionId = args.session_id;
                 const rawPrompt = args.prompt;
                 const callerStatus = args.caller_status;
@@ -643,10 +725,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 }
                 try {
                     const meta = store.readMeta(sessionId);
+                    // Spec v4.14 §6.20: caller is per-session (meta.caller),
+                    // not the global CALLER constant. ask_peer's bilateral
+                    // surface is available iff the SESSION'S caller has a
+                    // legacy bilateral pairing.
+                    const sessionCaller = String(meta.caller || CALLER).toLowerCase();
+                    const sessionLegacyPeer = legacyPeerForCaller(sessionCaller);
+                    if (sessionLegacyPeer == null) {
+                        throw new Error(
+                            `ask_peer is a bilateral-only surface (claude<->codex). Session caller='${sessionCaller}' MUST use ask_peers instead (spec v4.11 §6.11 / triangular topology).`
+                        );
+                    }
                     const roundNum = (meta.rounds?.length || 0) + 1;
                     const promptWithTail = attachPromptTailDirective(rawPrompt);
                     store.savePromptForRound(sessionId, roundNum, promptWithTail);
-                    log(`ask_peer: spawning ${LEGACY_PEER}`, {
+                    log(`ask_peer: spawning ${sessionLegacyPeer}`, {
                         session: sessionId,
                         round: roundNum,
                         caller_status: callerStatus,
@@ -655,7 +748,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     const t0 = Date.now();
                     let spawnResult;
                     try {
-                        spawnResult = await spawnPeer(LEGACY_PEER, promptWithTail);
+                        spawnResult = await spawnPeer(sessionLegacyPeer, promptWithTail);
                     } catch (spawnErr) {
                         // v1.0.5 / spec v4.12 §6.16: classify spawn-level
                         // failures with structured recovery_hint so the caller
@@ -674,7 +767,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                 ? 'wait_and_retry'
                                 : null;
                         const reasonMsg = String(spawnErr?.message || spawnErr || 'spawn rejected');
-                        store.saveFailedAttempt(sessionId, LEGACY_PEER, failureClass, {
+                        store.saveFailedAttempt(sessionId, sessionLegacyPeer, failureClass, {
                             stderr_tail: reasonMsg,
                             failure_class: failureClass,
                             round: roundNum,
@@ -692,7 +785,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                     type: 'text',
                                     text: JSON.stringify({
                                         ok: false,
-                                        agent: LEGACY_PEER,
+                                        agent: sessionLegacyPeer,
                                         failure_class: failureClass,
                                         recovery_hint: recoveryHint,
                                         retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
@@ -723,7 +816,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     const fname = store.savePeerResponse(
                         sessionId,
                         roundNum,
-                        LEGACY_PEER,
+                        sessionLegacyPeer,
                         stdout,
                         parsed.peer_status
                     );
@@ -734,7 +827,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     const rateLimitedPeers = [];
                     if (parsed.rate_limit) {
                         rateLimitedPeers.push({
-                            agent: LEGACY_PEER,
+                            agent: sessionLegacyPeer,
                             retry_after_seconds: parsed.rate_limit.retry_after_seconds,
                             detection_source: parsed.rate_limit.detection_source,
                             lexeme_matched: parsed.rate_limit.lexeme_matched,
@@ -743,9 +836,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     const convergenceHealth = computeConvergenceHealth(roundNum);
                     store.appendRound(sessionId, {
                         round: roundNum,
-                        caller: CALLER,
+                        caller: sessionCaller,
                         caller_status: callerStatus,
-                        peer: LEGACY_PEER,
+                        peer: sessionLegacyPeer,
                         peer_status: parsed.peer_status,
                         peer_structured: parsed.peer_structured,
                         status_source: parsed.status_source,
@@ -827,11 +920,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         `ask_peers requires caller_status = 'READY' or 'NOT_READY' (got '${callerStatus}')`
                     );
                 }
-                if (PEERS.length === 0) {
-                    throw new Error(
-                        `ask_peers has no peers to spawn (caller=${CALLER} is the only agent in VALID_AGENTS).`
-                    );
-                }
                 if (!store.acquireLock(sessionId)) {
                     throw new Error(
                         `session ${sessionId} is currently locked by another process (TTL 1h); retry shortly or clear ~/.cross-review/${sessionId}/.lock if stale`
@@ -839,17 +927,30 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 }
                 try {
                     const meta = store.readMeta(sessionId);
+                    // Spec v4.14 §6.20: caller + peers are per-session; read
+                    // from meta. Backwards-compat: pre-v4.14 sessions may
+                    // not have meta.peers populated as N-ary array — fall
+                    // back to env-derived PEERS only if meta is silent.
+                    const sessionCaller = String(meta.caller || CALLER).toLowerCase();
+                    const metaPeers = Array.isArray(meta.peers) && meta.peers.length > 0
+                        ? meta.peers
+                        : peersForCaller(sessionCaller);
+                    if (metaPeers.length === 0) {
+                        throw new Error(
+                            `ask_peers has no peers to spawn (session caller='${sessionCaller}' is the only agent in VALID_AGENTS).`
+                        );
+                    }
                     const roundNum = (meta.rounds?.length || 0) + 1;
                     const promptWithTail = attachPromptTailDirective(rawPrompt);
                     store.savePromptForRound(sessionId, roundNum, promptWithTail);
-                    log(`ask_peers: spawning ${PEERS.join(',')}`, {
+                    log(`ask_peers: spawning ${metaPeers.join(',')}`, {
                         session: sessionId,
                         round: roundNum,
                         caller_status: callerStatus,
                         prompt_bytes: Buffer.byteLength(promptWithTail, 'utf8'),
                     });
                     const t0 = Date.now();
-                    const peerResults = await spawnPeers(PEERS, promptWithTail);
+                    const peerResults = await spawnPeers(metaPeers, promptWithTail);
                     const durationMs = Date.now() - t0;
 
                     const roundPeers = [];
@@ -1001,13 +1102,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     const convergenceHealth = computeConvergenceHealth(roundNum);
                     store.appendRound(sessionId, {
                         round: roundNum,
-                        caller: CALLER,
+                        caller: sessionCaller,
                         caller_status: callerStatus,
                         peers: roundPeers,
                         quorum: {
-                            requested: PEERS.length,
+                            requested: metaPeers.length,
                             responded: roundPeers.length,
-                            rejected: PEERS.length - roundPeers.length,
+                            rejected: metaPeers.length - roundPeers.length,
                         },
                         rate_limited_peers: rateLimitedPeers,
                         protocol_violation: anyProtocolViolation,
@@ -1017,14 +1118,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     });
 
                     const allPeersReady =
-                        roundPeers.length === PEERS.length &&
+                        roundPeers.length === metaPeers.length &&
                         roundPeers.every((p) => p.peer_status === 'READY');
 
                     log('ask_peers: done', {
                         round: roundNum,
                         caller_status: callerStatus,
                         peers_responded: roundPeers.length,
-                        peers_requested: PEERS.length,
+                        peers_requested: metaPeers.length,
                         converged_this_round: callerStatus === 'READY' && allPeersReady,
                         duration_ms: durationMs,
                     });
@@ -1039,9 +1140,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         caller_status: callerStatus,
                                         peers: responsePeers,
                                         quorum: {
-                                            requested: PEERS.length,
+                                            requested: metaPeers.length,
                                             responded: roundPeers.length,
-                                            rejected: PEERS.length - roundPeers.length,
+                                            rejected: metaPeers.length - roundPeers.length,
                                         },
                                         rate_limited_peers: rateLimitedPeers,
                                         protocol_violation: anyProtocolViolation,
@@ -1107,4 +1208,9 @@ module.exports = {
     computeConvergenceHealth,
     CONVERGENCE_HEALTH_EXTENDED_AT,
     CONVERGENCE_HEALTH_CONCERNING_AT,
+    // v1.2.0 / spec v4.14 §6.20 exports for smoke / audit.
+    resolveCallerFromClientInfo,
+    resolveCallerForSession,
+    peersForCaller,
+    legacyPeerForCaller,
 };

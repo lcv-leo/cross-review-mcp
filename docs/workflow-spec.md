@@ -1,4 +1,4 @@
-# Cross-Review MCP Workflow Specification v4.13
+# Cross-Review MCP Workflow Specification v4.14
 
 **Status**: v4.11 is a SPEC-ONLY revision of v4.10 (no code change, no
 version bump). Shipped 2026-04-24 as a small amendment to §6.11 closing
@@ -24,6 +24,46 @@ Encoding: ASCII-only with transliteration of Portuguese accents where
 they appear (see section 6.4). Peer exchange and non-user-facing
 artifacts are authored in en-US (see section 6.10), trivially
 satisfying ASCII-only without transliteration.
+
+---
+
+## 0n. Delta v4.13 -> v4.14 (executive summary)
+
+**Single normative addition driven by field-evidence regression: §6.20
+dynamic caller resolution.** Operator observed that Gemini-initiated
+sessions on a cross-review-mcp instance configured with
+`CROSS_REVIEW_CALLER=claude` were recording `meta.caller: 'claude'` —
+the env-var was overriding actual caller identity. The audit
+distribution skew (claude 78% / codex 20% / gemini 2%) was therefore
+partially artificial: gemini-initiated sessions were being mis-attributed
+to claude.
+
+§6.20 (NEW): **Per-session caller resolution.** `session_init` resolves
+the caller dynamically with precedence:
+  1. `args.caller` (explicit override) — wins if valid.
+  2. MCP `clientInfo.name` from initialize, substring-mapped to agent
+     (`claude` → claude, `gemini` → gemini, `codex` → codex).
+  3. `CROSS_REVIEW_CALLER` env var (legacy fallback).
+
+The resolved caller is recorded in `meta.caller` and a new
+`meta.caller_resolution = { source, client_info_name }` audit field
+records HOW it was resolved. Peers are computed dynamically
+(`peersForCaller(meta.caller)`) and stored in `meta.peers`. `ask_peer`
+and `ask_peers` read caller and peers from meta (NOT global
+constants) — so a session opened by gemini against a server with env
+var `CROSS_REVIEW_CALLER=claude` correctly records gemini and spawns
+[claude, codex] peers.
+
+**Anti-drift smoke step.** v1.0.4/v1.0.5 shipped without README sync
+(operator noticed READMEs stuck at v1.0.3 while three releases had
+landed). v1.2.0 adds a smoke step that asserts README's
+"Current release: vX.Y.Z" line matches `server.VERSION`, and the
+spec banner version is mentioned in README. Future releases that
+forget to update README fail the smoke gate.
+
+The spec is otherwise unchanged. v4.13's §6.17/§6.18/§6.19 remain
+canonical. v4.12's §6.16 prompt-flag recovery contract remains
+canonical.
 
 ---
 
@@ -2276,6 +2316,82 @@ change is triggered by `convergence_health`.
 **Backwards compatibility.** Pre-v4.13 rounds lack
 `convergence_health` in persisted meta. Audit consumers MUST tolerate
 `undefined` for legacy rounds.
+
+---
+
+### 6.20 Dynamic caller resolution (NEW in v4.14)
+
+**Trigger.** A field-evidence session in 2026-04-26 surfaced that the
+runtime was treating `CROSS_REVIEW_CALLER` env var as the
+authoritative caller identity, even when the actual MCP host calling
+the tool was a different agent. Specifically: a cross-review-mcp
+instance configured with `CROSS_REVIEW_CALLER=claude` recorded
+`meta.caller: 'claude'` even on a session opened by Gemini. The
+operator's earlier directive (embryonic phase) was that the caller
+should be dynamic — reflect who is actually calling, not a default.
+
+**Audit consequence.** The 60-session audit's caller distribution
+(claude 78% / codex 20% / gemini 2%) was partially artificial. An
+unknown fraction of those 47 "claude-caller" sessions were
+gemini-initiated but mis-recorded.
+
+**Contract — resolution precedence.** `session_init` MUST resolve the
+caller per call with this strict precedence:
+
+1. **`args.caller`** (explicit override). If provided, it MUST be a
+   valid agent (one of `VALID_AGENTS`). Invalid values throw before
+   the session is created.
+2. **`clientInfo.name` mapping.** If no explicit arg is provided, the
+   server inspects the MCP `clientInfo.name` (captured during the
+   `initialize` request) and applies a conservative substring-match:
+   - contains `claude` → `claude`
+   - contains `gemini` → `gemini`
+   - contains `codex` → `codex`
+   Names that do not match cleanly fall through to the next step.
+3. **`CROSS_REVIEW_CALLER` env var** (legacy fallback). If set and
+   valid, used as last-resort caller identity. If unset or invalid AND
+   the previous two steps also failed, `session_init` MUST throw with
+   a message naming all three exhausted resolution sources.
+
+**Persisted audit field.** `meta.caller_resolution` MUST record:
+
+```
+{
+  "source": "arg" | "client_info" | "env_var",
+  "client_info_name": <the MCP clientInfo.name string, or null>
+}
+```
+
+This lets audit consumers distinguish explicit-override sessions from
+inferred-default sessions, and reconstruct WHY a given session was
+attributed to a specific caller.
+
+**Per-session peers.** Peers MUST be computed dynamically from the
+resolved caller via `peersForCaller(caller) = VALID_AGENTS - {caller}`
+and stored in `meta.peers`. Probes (capability_snapshot) MUST run
+against this dynamic peer set, not the env-var-derived global. Round
+spawning (`ask_peer` / `ask_peers`) MUST read caller and peers from
+`meta` (NOT global constants).
+
+**`ask_peer` legacy bilateral.** `ask_peer` is a legacy bilateral
+surface gated to caller=`claude` or `codex` (via `LEGACY_BILATERAL_PEER`
+table). Under v4.14, the gate is checked against `meta.caller`, not
+the global. A gemini-resolved session calling `ask_peer` MUST be
+rejected with the existing error message.
+
+**Backwards compatibility.** Pre-v4.14 sessions lack
+`meta.caller_resolution`; audit consumers MUST tolerate the absence
+and treat the implicit source as `env_var`. The global
+`CALLER`/`PEERS`/`LEGACY_PEER` constants remain available for code
+paths that have not been updated to read meta (logging, fallbacks);
+the dynamic resolution at session boundaries is canonical.
+
+**Anti-drift smoke (v1.2.0 release discipline).** A new functional
+smoke step asserts README.md's `Current release: **vX.Y.Z**` line
+matches `server.VERSION`, and that the spec banner version is
+mentioned in README at least once. This prevents the v1.0.4/v1.0.5
+recurrence (releases shipped while README stayed at v1.0.3). Future
+releases that forget README sync fail the gate.
 
 ---
 

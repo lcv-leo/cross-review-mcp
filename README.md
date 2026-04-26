@@ -4,13 +4,13 @@
 
 [![status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](#status)
 [![npm](https://img.shields.io/npm/v/@lcv-leo/cross-review-mcp.svg)](https://www.npmjs.com/package/@lcv-leo/cross-review-mcp)
-[![spec: v4.11](https://img.shields.io/badge/spec-v4.11-informational.svg)](./docs/workflow-spec.md)
+[![spec: v4.14](https://img.shields.io/badge/spec-v4.14-informational.svg)](./docs/workflow-spec.md)
 [![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io/)
 [![license: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-green.svg)](./LICENSE)
 
 **Install.** `npm install -g @lcv-leo/cross-review-mcp` (npmjs.com) or `npm install -g @lcv-leo/cross-review-mcp --registry=https://npm.pkg.github.com` (GitHub Packages mirror).
 
-**Status.** Stable. Current release: **v1.0.3** runtime paired with **spec v4.11**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
+**Status.** Stable. Current release: **v1.2.0** runtime paired with **spec v4.14**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
 
 The version history at a glance:
 
@@ -26,7 +26,11 @@ The version history at a glance:
 | `v1.0.0` | v4.11 | Stable cut. Frozen public surface: 7 MCP tools, structured peer-block contracts, `meta.json` semantics, strict-only convergence predicate, transport descriptor + audit fields/enums. v1.x follows the semver policy in CONTRIBUTING.md. Cut ratified by 10-session field-use validation gate (PRAGMATIC counting rule, 2026-04-24/25) + trilateral final approval session `fca13b80` (2026-04-25). |
 | `v1.0.1` | v4.11 | Doc-only patch: refresh user-visible MCP tool descriptions (`session_init` / `session_read` / `ask_peer` / `ask_peers` / `escalate_to_operator` / tail directive) to current spec head. Removed stale alpha labels (`v0.5.0-alpha` / `v0.7.0-alpha`) and outdated cites (`spec v4.7` / `v4.8` / `v4.10`). Zero behavioral change. |
 | `v1.0.2` | v4.11 | First npm publish. Renamed package to `@lcv-leo/cross-review-mcp`, published to both npmjs.com and GitHub Packages with provenance attestations. Added `files` whitelist (-58% tarball size, 13 files). Zero behavioral change. |
-| **`v1.0.3`** | v4.11 | **Security patch.** ReDoS hardening: replaced `/\s+$/` regex with `String.prototype.trimEnd()` in `model-parser.js` and `status-parser.js` (CodeQL `js/polynomial-redos` alerts #1 + #2 resolved). Zero observable change. |
+| `v1.0.3` | v4.11 | **Security patch.** ReDoS hardening: replaced `/\s+$/` regex with `String.prototype.trimEnd()` in `model-parser.js` and `status-parser.js` (CodeQL `js/polynomial-redos` alerts #1 + #2 resolved). Zero observable change. |
+| `v1.0.4` | v4.11 | Workspace parity sweep + Pages enablement. Added `THIRDPARTY.md` + `.github/CODEOWNERS`. `actions/configure-pages` declares `with: enablement: true` for idempotency on forks/clones. Zero behavioral change. |
+| `v1.0.5` | **v4.12** | **§6.16 prompt-flag recovery contract.** New `failure_class: 'prompt_flagged_by_moderation'` + `recovery_hint: 'reformulate_and_retry'` + embedded `reformulation_advice` text on rejected peers. Caller MUST reformulate (up to 5 attempts) and resubmit; aborting on a moderation flag is non-conforming. 60-session audit shipped at `docs/session-audit-2026-04-26.md`. |
+| `v1.1.0` | **v4.13** | Audit closure (FU-1..FU-4). §6.17 `meta.spec_version`; §6.18 `session_sweep` long-idle reconciliation + structured `outcome_reason`; §6.19 advisory `convergence_health` per round (`normal`/`extended`/`concerning`). 8th MCP tool: `session_sweep`. Validated by trilateral cross-review `483b2d1c` (READY in R2). |
+| **`v1.2.0`** | **v4.14** | **§6.20 dynamic caller resolution.** session_init now resolves the caller per call with precedence `args.caller` > MCP `clientInfo.name` mapping > `CROSS_REVIEW_CALLER` env var. Each session's peers are computed dynamically from the resolved caller. ask_peer / ask_peers read caller and peers from `meta.json` (not global constants), so a Gemini host calling a server originally configured with `CROSS_REVIEW_CALLER=claude` no longer mis-records as `caller: 'claude'`. New `meta.caller_resolution = { source, client_info_name }` audit field. README/spec/CHANGELOG anti-drift smoke step prevents recurrence of v1.0.4/v1.0.5-style doc lag. |
 
 ---
 
@@ -102,7 +106,7 @@ The only runtime dependency is `@modelcontextprotocol/sdk`.
 Before using the server or after any edit, confirm both gates pass:
 
 ```bash
-npm test             # 125 smoke steps (unit + end-to-end stdio JSON-RPC)
+npm test             # 147 smoke steps (unit + end-to-end stdio JSON-RPC)
 npm run check-models # model-drift audit against docs/top-models.json
 ```
 
@@ -241,7 +245,7 @@ cross-review-mcp/
 |       |-- status-parser.js         STATUS + v4/v4.10 structured block parser
 |       |-- model-parser.js          Sibling peer-model block parser (silent-downgrade defense)
 |-- scripts/
-|   |-- functional-smoke.js          JSON-RPC stdio smoke (125 steps at v1.0.0; count grows with each release)
+|   |-- functional-smoke.js          JSON-RPC stdio smoke (147 steps at v1.2.0; count grows with each release)
 |   |-- audit-model-drift.js         Advisory drift audit (check-models)
 |   |-- probe-reviewer-isolation.js  Legacy Commit-1 hard gate; retained for regression
 |-- docs/
@@ -278,7 +282,7 @@ cross-review-mcp/
 ### Make a change, verify gates
 
 ```bash
-npm test              # 125 smoke steps must stay GREEN (count may grow across releases; check the last line of output)
+npm test              # 147 smoke steps must stay GREEN (count may grow across releases; check the last line of output)
 npm run check-models  # advisory drift audit; must stay clean
 ```
 

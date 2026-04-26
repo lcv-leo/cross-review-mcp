@@ -11,7 +11,48 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — pattern-detection extension to convergence_health, content-aware session audits, time-to-converge wall-clock analysis. v1.1.0 closed all four follow-ups from `docs/session-audit-2026-04-26.md`.)
+- (em aberto — pattern-detection extension to convergence_health, content-aware session audits, time-to-converge wall-clock analysis.)
+
+---
+
+## [1.2.0] — 2026-04-26
+
+**Spec v4.14 + dynamic caller resolution + anti-drift smoke.** Operator observed a real bug post-v1.1.0 ship: a Gemini-initiated session against a cross-review-mcp instance configured with `CROSS_REVIEW_CALLER=claude` recorded `meta.caller: 'claude'`, mis-attributing identity. The audit's caller distribution skew (claude 78% / codex 20% / gemini 2%) was therefore partially artificial — an unknown fraction of "claude" sessions were actually gemini-initiated. Fix: dynamic per-session caller resolution + anti-drift discipline so README/docs stay in sync with shipped versions.
+
+### Adicionado — runtime
+- **§6.20 dynamic caller resolution.** New `resolveCallerForSession(argsCaller, clientInfo)` in `src/server.js` with precedence: (1) `args.caller` explicit override > (2) MCP `clientInfo.name` substring-mapped to agent > (3) `CROSS_REVIEW_CALLER` env var. Throws if all three fail.
+- **`session_init` accepts optional `caller` arg** (validated against `VALID_AGENTS`). Captures `clientInfo` via `server.getClientVersion()` at call time. Resolves caller, computes `peersForCaller(caller)` dynamically, runs the probe against the resolved peer set (not env-derived global PEERS).
+- **`meta.caller_resolution = { source, client_info_name }`** new audit field. Records HOW the caller was resolved (`'arg' | 'client_info' | 'env_var'`) so audit consumers distinguish explicit overrides from inferred defaults.
+- **`ask_peer` reads from meta.** The bilateral gate now checks `legacyPeerForCaller(meta.caller)` instead of the global `LEGACY_PEER`. A gemini-resolved session calling `ask_peer` is correctly rejected. All references to `LEGACY_PEER` and `caller: CALLER` inside the handler swapped to `sessionLegacyPeer` and `sessionCaller`.
+- **`ask_peers` reads from meta.** Spawns to `meta.peers` (or `peersForCaller(meta.caller)` as fallback for legacy meta). All references to global `PEERS`/`CALLER` inside the handler swapped to `metaPeers`/`sessionCaller`.
+- **`runSessionInitProbe(peersList)` accepts dynamic peer list.** Defaults to global `PEERS` for backwards compat, but `session_init` passes the resolved peer set.
+
+### Adicionado — spec v4.14
+- **§0n (NEW)**: executive summary of v4.13 → v4.14 delta.
+- **§6.20 (NEW)**: dynamic caller resolution contract. Strict precedence (arg > client_info > env_var). Throws when all three fail. `meta.caller_resolution` audit field. Per-session peers via `peersForCaller`. `ask_peer` + `ask_peers` read from meta. Backwards-compat: pre-v4.14 sessions tolerated.
+- **Spec banner** bumped from v4.13 to v4.14.
+
+### Adicionado — anti-drift smoke (operator-noticed regression)
+- **Smoke step**: asserts `README.md` "Current release: **vX.Y.Z**" line matches `server.VERSION`. Prevents recurrence of v1.0.4/v1.0.5-style doc lag where releases shipped but READMEs stayed at v1.0.3 (operator-noticed 2026-04-26).
+- **Smoke step**: asserts `README.md` mentions current spec version (e.g., `spec v4.14`) at least once.
+
+### Adicionado — caller-resolution smoke (4 new steps)
+- `clientInfo→agent mapping (claude/gemini/codex/unknown/null)` — substring match correctness.
+- `resolveCallerForSession precedence (arg > client_info > env_var)` — full chain.
+- `invalid caller throws + audit fields preserved` — error path + client_info_name preserved when arg wins.
+- `peer-set derivation invariant under env-var caller` — global PEERS still correct under env-var caller.
+
+### Atualizado — operator docs (catching up)
+- **`README.md`**: spec badge v4.11 → v4.14; "Current release" v1.0.3 → v1.2.0; smoke count 125 → 143; release history table extended with v1.0.4/v1.0.5/v1.1.0/v1.2.0 entries.
+- **`AGENTS.md`**: runtime line refreshed to v1.2.0 / spec v4.14; smoke count line refreshed to 143; spec range bumped.
+- README/AGENTS drift was a real regression (operator-noticed 2026-04-26). Anti-drift smoke step prevents recurrence.
+
+### Validação
+- `npm test` 147 GREEN (was 141 in v1.1.0; +4 caller-resolution + +2 README anti-drift; the 141 pre-existing steps also exercise the dynamic caller wiring end-to-end).
+- `npm run check-models` GREEN.
+
+### Recovery (operator-noticed missing publish)
+- The v1.0.4 and v1.0.5 GitHub Releases were missing because their commits were pushed to main without tags so the publish workflow never fired. Tags created retroactively on 2026-04-26; publish workflow ran successfully for both; npm packages + GitHub Packages now live; releases created via gh CLI manually (one-time recovery). v1.1.0's commit added a `create-github-release` job to `publish.yml` so future tag pushes auto-create releases — exercised successfully on v1.1.0's own tag push (release author: `github-actions[bot]`).
 
 ---
 

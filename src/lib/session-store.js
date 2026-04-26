@@ -132,7 +132,7 @@ function normalizePeers(meta) {
     return meta;
 }
 
-function initSession({ task, artifacts, callerAgent, peerAgent, peers, capabilitySnapshot }) {
+function initSession({ task, artifacts, callerAgent, peerAgent, peers, capabilitySnapshot, callerResolution }) {
     ensureStateDir();
     const id = crypto.randomUUID();
     fs.mkdirSync(sessionDir(id), { recursive: true });
@@ -169,6 +169,21 @@ function initSession({ task, artifacts, callerAgent, peerAgent, peers, capabilit
 
     if (capabilitySnapshot && typeof capabilitySnapshot === 'object') {
         meta.capability_snapshot = capabilitySnapshot;
+    }
+
+    // v1.2.0 / spec v4.14 §6.20: caller_resolution audit field. When the
+    // caller is provided by the dynamic resolver, record HOW it was resolved
+    // (arg | client_info | env_var) so audit consumers can distinguish
+    // explicit overrides from inferred defaults. Optional — sessions opened
+    // by code paths that don't pass it will have meta.caller_resolution
+    // omitted (treated as 'env_var' by audit tools per backwards compat).
+    if (callerResolution && typeof callerResolution === 'object') {
+        meta.caller_resolution = {
+            source: String(callerResolution.source || 'unknown'),
+            client_info_name: callerResolution.client_info_name == null
+                ? null
+                : String(callerResolution.client_info_name),
+        };
     }
 
     atomicWriteFile(
@@ -208,7 +223,7 @@ const CONVERGENCE_SPEC_VERSION = 'v4.9';
 // convergence-snapshot semantic) so they can evolve at different cadences.
 // Bumped per spec evolution: v4.13 adds §6.17 spec_version field, §6.18
 // session_sweep + outcome_reason, §6.19 convergence_health.
-const SESSION_SPEC_VERSION = 'v4.13';
+const SESSION_SPEC_VERSION = 'v4.14';
 
 function computeConvergenceSnapshot(roundIndex, round, context = {}) {
     const excludedProbe = Array.isArray(context.excluded_probe)

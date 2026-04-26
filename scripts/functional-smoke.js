@@ -819,7 +819,106 @@ async function runAll() {
     all.push(...s45.results);
     const s46 = await driveV413ConvergenceHealthUnit();
     all.push(...s46.results);
+    // v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution + anti-drift.
+    const s47 = await driveV414CallerResolutionUnit();
+    all.push(...s47.results);
+    const s48 = await driveV414ReadmeVersionDriftUnit();
+    all.push(...s48.results);
     return all;
+}
+
+// v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution.
+async function driveV414CallerResolutionUnit() {
+    const results = [];
+    // The resolver helpers are exported from server.js but server.js boots
+    // an MCP server when required without TEST_IMPORT. Reuse the test guard.
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    // Re-require with cleared cache so env-var changes take effect.
+    delete require.cache[require.resolve('../src/server.js')];
+    const server = require('../src/server.js');
+
+    // Direct unit: clientInfo → agent mapping.
+    assert(server.resolveCallerFromClientInfo({ name: 'claude-code' }) === 'claude', '§6.20: claude-code → claude');
+    assert(server.resolveCallerFromClientInfo({ name: 'gemini-cli' }) === 'gemini', '§6.20: gemini-cli → gemini');
+    assert(server.resolveCallerFromClientInfo({ name: 'codex' }) === 'codex', '§6.20: codex → codex');
+    assert(server.resolveCallerFromClientInfo({ name: 'Claude Code v2.1' }) === 'claude', '§6.20: substring match case-insensitive');
+    assert(server.resolveCallerFromClientInfo({ name: 'unknown-tool' }) === null, '§6.20: unknown client → null');
+    assert(server.resolveCallerFromClientInfo(null) === null, '§6.20: null clientInfo → null');
+    assert(server.resolveCallerFromClientInfo({}) === null, '§6.20: clientInfo without name → null');
+    results.push({ step: 'v4.14 §6.20: clientInfo→agent mapping (claude/gemini/codex/unknown/null)', ok: true });
+
+    // Resolver precedence: args.caller > clientInfo > env var.
+    const r1 = server.resolveCallerForSession('gemini', { name: 'claude-code' });
+    assert(r1.caller === 'gemini' && r1.source === 'arg', '§6.20: args.caller wins over clientInfo');
+    const r2 = server.resolveCallerForSession(null, { name: 'gemini-cli' });
+    assert(r2.caller === 'gemini' && r2.source === 'client_info', '§6.20: clientInfo used when args.caller absent');
+    const r3 = server.resolveCallerForSession(null, { name: 'unknown' });
+    assert(r3.caller === 'claude' && r3.source === 'env_var', '§6.20: env var used when args + clientInfo both fail');
+    const r4 = server.resolveCallerForSession(null, null);
+    assert(r4.caller === 'claude' && r4.source === 'env_var', '§6.20: env var used when no clientInfo at all');
+    results.push({ step: 'v4.14 §6.20: resolveCallerForSession precedence (arg > client_info > env_var)', ok: true });
+
+    // Invalid args.caller → throws.
+    let threw = false;
+    try { server.resolveCallerForSession('not-a-real-agent', null); } catch { threw = true; }
+    assert(threw, '§6.20: invalid args.caller throws');
+
+    // Resolution carries client_info_name for audit even when arg wins.
+    const r5 = server.resolveCallerForSession('codex', { name: 'gemini-cli' });
+    assert(r5.caller === 'codex' && r5.source === 'arg' && r5.client_info_name === 'gemini-cli', '§6.20: client_info_name preserved in resolution audit');
+    results.push({ step: 'v4.14 §6.20: invalid caller throws + audit fields preserved', ok: true });
+
+    // peersForCaller derives complement of VALID_AGENTS.
+    const peersClaude = server.PEERS;
+    // Re-derive via peersForCaller and compare. Note: peersForCaller is not
+    // exported; we test it indirectly via resolveCallerForSession + observed
+    // behavior. The list we expect for caller=gemini is [claude, codex].
+    // (Peer-set derivation is also exercised end-to-end by smoke session_init
+    // calls when the runtime is fully booted.)
+    assert(peersClaude.length === 2 && peersClaude.includes('codex') && peersClaude.includes('gemini'), '§6.20: env-derived PEERS for caller=claude is [codex, gemini]');
+    results.push({ step: 'v4.14 §6.20: peer-set derivation invariant under env-var caller', ok: true });
+
+    return { results };
+}
+
+// v1.2.0 / spec v4.14 anti-drift — assert README.md "Current release" matches code VERSION.
+// Prevents the v1.0.4/v1.0.5 doc-drift recurrence (operator noticed READMEs were stuck at v1.0.3
+// while three releases had shipped).
+async function driveV414ReadmeVersionDriftUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const server = require('../src/server.js');
+
+    const readme = fs.readFileSync(path.resolve(__dirname, '..', 'README.md'), 'utf8');
+    // Looks for line shape: "Current release: **vX.Y.Z**"
+    const m = readme.match(/Current release:\s*\*\*v(\d+\.\d+\.\d+)\*\*/);
+    assert(m !== null, 'v4.14 anti-drift: README.md contains "Current release: **vX.Y.Z**" line');
+    const readmeVersion = m[1];
+    assert(
+        readmeVersion === server.VERSION,
+        `v4.14 anti-drift: README.md "Current release" (${readmeVersion}) === server.VERSION (${server.VERSION})`
+    );
+    results.push({ step: 'v4.14 anti-drift: README.md "Current release" matches server.VERSION', ok: true });
+
+    // Same check for spec banner: README mentions current spec version.
+    const specPath = path.resolve(__dirname, '..', 'docs', 'workflow-spec.md');
+    const spec = fs.readFileSync(specPath, 'utf8');
+    const specBanner = spec.match(/^# Cross-Review MCP Workflow Specification (v\d+\.\d+)/m);
+    assert(specBanner !== null, 'v4.14 anti-drift: spec doc has banner with version');
+    const specVersion = specBanner[1];
+    const readmeMentionsSpec = readme.includes(`spec ${specVersion}`)
+        || readme.includes(`spec: ${specVersion}`)
+        || readme.includes(`**${specVersion}**`)
+        || readme.includes(`**spec ${specVersion}**`);
+    assert(
+        readmeMentionsSpec,
+        `v4.14 anti-drift: README.md mentions current spec version (${specVersion}) at least once`
+    );
+    results.push({ step: 'v4.14 anti-drift: README.md mentions current spec version', ok: true });
+
+    return { results };
 }
 
 // v1.1.0 / spec v4.13 §6.17 — spec_version persistence in meta.json (FU-1).
@@ -841,7 +940,7 @@ async function driveV413SpecVersionUnit() {
             fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8')
         );
         assert(meta.spec_version === store.SESSION_SPEC_VERSION, 'v4.13 §6.17: meta.spec_version equals SESSION_SPEC_VERSION constant');
-        assert(meta.spec_version === 'v4.13', 'v4.13 §6.17: SESSION_SPEC_VERSION literal v4.13 in this release');
+        assert(meta.spec_version === 'v4.14', 'v4.13 §6.17: SESSION_SPEC_VERSION literal v4.14 in this release');
         assert(Object.prototype.hasOwnProperty.call(meta, 'outcome_reason') && meta.outcome_reason === null, 'v4.13 §6.17: outcome_reason initialized to null');
         results.push({ step: 'v4.13 §6.17: spec_version + outcome_reason persisted on session_init', ok: true });
 
