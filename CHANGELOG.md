@@ -11,7 +11,52 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — F1/F3/F5/F6/F7 from external audits deferred for v1.3+: caller capability tokens, shell:false migration, StdioServerTransport buffer cap (upstream SDK), per-stream byte cap, transactional teardown of timed-out spawns. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+- (em aberto — F1 caller capability tokens, F3 shell:false migration, F5 StdioServerTransport buffer cap (upstream SDK), F7 detached-spawn for orphan grandchild containment. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+
+---
+
+## [1.2.5] — 2026-04-26
+
+**External-audit round-4 closure: 4 hardening fixes + spec §6.21 retiring `shell:true` repeats.** Round-4 (Gemini-orchestrated against v1.2.4) had high yield: 1 four-time repeat (RCE/shell:true — closed via spec note), 4 new shippable items. Trilateral cross-review session `53d0d785` (caller + codex + gemini) iterated R1→R2→R3 to address peer-flagged residuals, including a **critical POSIX kill bug** gemini caught in my R2 design (process.kill(-pid) always throws ESRCH on non-detached spawns → my ESRCH-return short-circuited the fallback → guaranteed zombies on Linux/macOS).
+
+### Corrigido — §2 taskkill telemetry (Windows process reaping)
+- **Pre-v1.2.5 bug:** `killProcessTree(proc)` was fire-and-forget; if `taskkill` failed (sandbox/AV/permissions), zombie peer process leaked silently.
+- **Fix:** Windows path now captures `taskkill` stderr_tail (capped at 2000 chars matching `MAX_STDERR_TAIL_CHARS`) and exit code; logs to host stderr on non-zero exit + spawn-error path. POSIX path simplified to direct `process.kill(proc.pid, 'SIGKILL')` — the previous `process.kill(-proc.pid, 'SIGKILL')` group-kill was dead code (children aren't process group leaders without `detached: true`, so `-pid` always threw ESRCH and the swallowing catch returned before the fallback fired). New guards: `!proc.pid` (executable failed to spawn), `proc.signalCode != null` (already killed by signal). `windowsHide: true` set on the killer spawn.
+- **R2 critical catch (gemini):** the dead-code POSIX group-kill was a real zombie-guarantee that v1.2.4 carried over from earlier; v1.2.5 closes it.
+
+### Corrigido — §3 strict UUIDv4 + symlink resistance
+- **Strict UUIDv4 regex** (gemini R1 ask): `UUID_RE` now enforces version bit (third group MUST start with `4`) + variant bit (fourth group MUST start with `[89ab]`). Cheap; rejects 8-4-4-4-12 hex that's not real v4.
+- **`isPathContained(child, root)` helper**: replaces `startsWith` containment with `path.relative` semantics. On Windows, this gives correct case-insensitive comparison; on POSIX, equivalent. Used by both lexical and realpath gates in `sessionDir`.
+- **Symlink-traversal resistance**: `sessionDir(sessionId)` now applies `fs.realpathSync` to BOTH the candidate dir AND `STATE_DIR` (so junctions on Windows compare apples-to-apples). Pre-v1.2.5 used `path.resolve` only (lexical); a local attacker who could plant a UUID-named symlink under `~/.cross-review/` pointing to e.g. `~/.ssh` would have escaped containment. ENOENT swallowed (new sessions don't exist yet); ELOOP/EACCES bubble up naturally and reject the call. `ensureStateDir()` called before realpath comparison so realStateRoot is authoritative.
+
+### Adicionado — §4.1 per-stream RAM cap with kill-on-overflow (spec §6.18.3 NEW)
+- **`PEER_STREAM_MAX_BYTES = 4 MiB`** on `spawnPeer.stdout` AND `spawnPeer.stderr` (independently). On overflow, kills process tree + rejects with `err.stream_overflow = { stream, max_bytes, tail }`.
+- **`PROBE_STREAM_MAX_BYTES = 256 KiB`** on `probeAgent.stdout` AND `probeAgent.stderr` (probes are short by design). On overflow, finishes with `tier: 'offline'` + `failure_class: 'probe_stream_overflow'`.
+- **Server-side classification**: `failure_class: 'stream_overflow'` added to BOTH `ask_peer` and `ask_peers` rejection chains (codex inferred R1 ask). `recovery_hint: null` — volumetric (not semantic) failure; caller MAY retry as transient, escalate if persistent.
+- **Threshold rationale**: peers output O(10 KiB) typical, O(100 KiB) verbose; 4 MiB is 40x typical → no false positives. Probes output ~5 KiB; 256 KiB is 50x typical.
+- **Closes audit gap from v1.2.4 §F8**: F8 capped on-disk persistence; v1.2.5 caps RAM accumulation independently. Both layers needed.
+
+### Adicionado — §4.2 session_sweep delete_files mode (spec §6.18.4 NEW)
+- New `delete_files: boolean` arg on `session_sweep` tool (default `false` preserves audit trail = pre-v1.2.5 behavior).
+- When `delete_files === true && dry_run === false`: after `finalizeIfUnset` succeeds, `fs.rmSync(sessionDir, { recursive: true, force: true })` physically removes the session directory. Successfully purged sessions appear in new `purged: [{ session_id, deleted_path }]` array of response.
+- **Failure semantics**: purge failure (EBUSY on Windows AV scan, EACCES, etc.) logs to host stderr but does NOT undo finalize — `outcome='aborted'` is canonical state; on-disk artifacts are best-effort cleanup.
+
+### Adicionado — spec §6.21 NEW: shell-spawn architecture decision (audit-noise retirement)
+- Rounds 1/2/3/4 of the external Gemini audit ALL flagged `shell: true` as a theoretical RCE risk — same defer with same rationale every time. v1.2.5 codifies the decision normatively in spec so future audits engage the rationale instead of repeating.
+- Three-pillar rationale: (1) Windows `.cmd` shim path resolution requires shell semantics; (2) cmd-line provenance is exclusively pinned constants + repo-tracked configs (not request-surface; prompt flows via stdin); (3) threat model is single-user trusted-host (perimeter ≠ open-source distribution). Migration to `shell: false` deferred to future major release with PATHEXT lookup.
+- **Audit guidance directive**: "Reports flagging shell:true SHOULD reference §6.21 and engage the rationale specifically. Repeating the finding without engaging the rationale is non-yielding under §6.14 evidence-rigor discipline."
+
+### Adicionado — tests (8 new smoke step assertions; 177 GREEN total)
+- §3 strict UUIDv4: accepts valid v4, rejects loose-hex non-v4.
+- §3 `isPathContained` helper: same/descendant/sibling/ancestor cases.
+- §4.1 stream cap constants: `PEER_STREAM_MAX_BYTES` + `PROBE_STREAM_MAX_BYTES` exported with correct ordering; classification chain wired in BOTH server handlers (anti-drift assertion).
+- §4.2 sweep dry-run preserves files + wet-run-no-delete preserves files + wet-run-with-delete physically removes.
+- §6.21 spec section + audit-guidance directive present (anti-drift).
+
+### Validação
+- `npm test` 177 GREEN (was 169 in v1.2.4; +8 for §3 + §4.1 + §4.2 + §6.21).
+- `npm run check-models` GREEN.
+- Trilateral cross-review session `53d0d785` (claude caller + codex + gemini), 5 rounds: R1 NOT_READY (gemini 4 caller_requests + codex protocol_violation due to CLI session corruption); R2 NOT_READY (codex caught caller-side missing apply-to-tree action; gemini caught critical POSIX kill regression in R2 design); R3 NOT_READY (codex 4 doc-drift blockers: package-lock version, smoke count "+6/175" vs actual "+8/177", §6.18.3 spec wording vs structural smoke, session_sweep description spec ref); R4 NOT_READY (codex held line on §6.18.3 doc-drift); R5 READY trilateral convergence after spec §6.18.3 "Test coverage" paragraph rewritten to accurately describe structural anti-drift coverage with v1.3.x deferral of behavioral end-to-end harness.
 
 ---
 

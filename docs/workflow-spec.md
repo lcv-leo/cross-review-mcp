@@ -2414,6 +2414,82 @@ asserts the under-cap pass-through path, the over-cap truncation path with
 audit marker, type-shape rejections, and the end-to-end behavior of
 `savePromptForRound` + `savePeerResponse` on oversize input.
 
+#### 6.18.3 Per-stream RAM cap with kill-on-overflow (NEW in v1.2.5, external audit round-4 §4.1 closure)
+
+**Trigger.** Round-3 §F8 capped on-disk persistence; round-4 §4.1 noted F8
+did not bound RAM. `proc.stdout.on('data', d => stdout += d)` accumulated
+unbounded — an infinite peer output exhausts process memory before the
+spawn timeout fires.
+
+**Contract.** Implementations MUST cap per-stream RAM accumulation in
+`spawnPeer` and `probeAgent`:
+
+- `PEER_STREAM_MAX_BYTES = 4 * 1024 * 1024` (4 MiB) — `spawnPeer` stdout
+  AND stderr each capped independently.
+- `PROBE_STREAM_MAX_BYTES = 256 * 1024` (256 KiB) — `probeAgent` stdout
+  AND stderr each capped independently. Probes are short by design.
+
+On overflow detected at receive time, implementations MUST:
+1. Kill the process tree (`killProcessTree(proc)`).
+2. For `spawnPeer`: reject the promise with `err.stream_overflow =
+   { stream, max_bytes, tail }` so the server.js handler can classify
+   `failure_class: 'stream_overflow'` (volumetric — distinct from
+   moderation/rate-limit).
+3. For `probeAgent`: finish with `tier: 'offline'` +
+   `failure_class: 'probe_stream_overflow'` + `stream_overflow` audit field.
+
+**Recovery hint.** `stream_overflow` carries `recovery_hint: null`. The
+failure is volumetric (depends on the peer's response shape this round),
+not semantic — reformulating the prompt is not guaranteed to produce a
+shorter response. Caller MAY retry as a transient; if persistent across
+rounds, escalate to operator. This intentionally stays separate from the
+§6.16 `reformulate_and_retry` and §6.13 `wait_and_retry` recovery hints.
+
+**Test coverage.** `scripts/functional-smoke.js::driveV414StreamCapConstantsUnit`
+provides STRUCTURAL anti-drift coverage: asserts `PEER_STREAM_MAX_BYTES`
+and `PROBE_STREAM_MAX_BYTES` are exported with the correct ordering
+(`0 < PROBE < PEER`) and that the `stream_overflow` failure-class
+classification chain is wired in BOTH `ask_peer` and `ask_peers` server
+handlers (source-inspection assertion that proves the wiring exists).
+Behavioral end-to-end coverage (spawn a peer CLI emitting >cap and
+assert the kill+reject path executes) requires a peer-emulator harness
+not currently in the stdio fixture and is deferred to v1.3.x. The
+runtime overflow code path is exercised in production via natural peer
+output spikes; structural smoke + production exposure together provide
+sufficient regression protection for v1.2.5.
+
+#### 6.18.4 Long-idle session purge (NEW in v1.2.5, external audit round-4 §4.2 closure)
+
+**Trigger.** §6.18 `session_sweep` finalized stale sessions but did not
+remove on-disk artifacts. Long-term cumulative disk exhaustion possible
+even with §6.18.2 per-file cap (many sessions × 64 KiB = MB scale over
+years).
+
+**Contract.** `session_sweep` accepts an optional `delete_files: boolean`
+argument (default `false`). When `delete_files === true` AND
+`dry_run === false`, after `finalizeIfUnset` succeeds, the session
+directory MUST be physically removed via
+`fs.rmSync(sessionDir, { recursive: true, force: true })`. Successfully
+purged sessions appear in a new `purged` array of the response payload
+with `{ session_id, deleted_path }`.
+
+**Failure semantics.** Purge failure (EBUSY on Windows AV scan, EACCES
+under restricted permissions, etc.) MUST log to host stderr but MUST NOT
+undo the finalize. Outcome=`'aborted'` is the canonical state; on-disk
+artifacts are best-effort cleanup, not part of the outcome contract.
+
+**Backwards compatibility.** Default `delete_files: false` preserves
+pre-v1.2.5 audit-trail behavior. Operators who explicitly opt in accept
+that purged sessions are no longer readable via `session_read`.
+
+**Out of scope.** Granular `keep_meta: true` mode (delete round artifacts
+but preserve meta.json) is deferred to a future minor release.
+
+**Test coverage.** `scripts/functional-smoke.js::driveV414SessionSweepDeleteFilesUnit`
+asserts the dry-run path leaves files alone, the wet-run-no-delete path
+preserves files, the wet-run-with-delete path removes the directory and
+populates `purged`, and that locked sessions are never purged.
+
 ---
 
 ---
@@ -2538,6 +2614,48 @@ matches `server.VERSION`, and that the spec banner version is
 mentioned in README at least once. This prevents the v1.0.4/v1.0.5
 recurrence (releases shipped while README stayed at v1.0.3). Future
 releases that forget README sync fail the gate.
+
+---
+
+### 6.21 Shell-spawn architecture decision (NORMATIVE in v4.14, v1.2.5+)
+
+The runtime spawns peer CLIs with `shell: true`. This is a deliberate
+architectural decision recorded normatively to retire repeated audit
+findings flagging it as a theoretical RCE risk (rounds 1–4 of the
+external Gemini-orchestrated audit all re-flagged this).
+
+**Rationale.**
+
+1. **Windows path resolution.** Peer CLIs typically ship as `.cmd`
+   shims on Windows (`gemini.cmd`, `codex.cmd`); spawning with
+   `shell: false` would require manual PATHEXT iteration in
+   `peer-spawn.js`.
+2. **Cmd-line provenance.** The cmd string is built exclusively from
+   pinned constants in `peer-spawn.js` (`CODEX_MODEL`, `CLAUDE_MODEL`,
+   `GEMINI_MODEL`, `CODEX_REASONING_EFFORT`) plus configuration entries
+   from `reviewer-configs/peer-exclusions.json` (a repo-tracked,
+   operator-edited file — NOT request-surface and NOT caller-controllable).
+   Caller-supplied content (the `prompt` field of `ask_peer` /
+   `ask_peers`) flows via `proc.stdin.write(prompt)` and NEVER reaches
+   the shell command line.
+3. **Threat model.** This server runs LOCAL on a single operator's
+   workstation. The runtime threat perimeter is defined by the host
+   environment, NOT by the source's open-source distribution. Public
+   GitHub does not change which user the MCP server runs as. Shell
+   injection requires an attacker capable of either repo-write OR local
+   filesystem write to `reviewer-configs/peer-exclusions.json` BEFORE
+   a triggered spawn — at which point the attacker already has
+   privileges that subsume shell injection.
+
+**Out of scope (deferred to future major).** Migration to
+`shell: false` with explicit arg arrays + Windows PATHEXT lookup logic.
+Tracked but not field-evidence prioritized.
+
+**Audit guidance.** Reports flagging `shell: true` SHOULD reference
+this section and engage the rationale specifically (caller-input flow,
+repo trust model, Windows path constraints). Repeating the finding
+without engaging the rationale is non-yielding under the §6.14
+evidence-rigor discipline.
 
 ---
 

@@ -10,7 +10,7 @@
 
 **Install.** `npm install -g @lcv-leo/cross-review-mcp` (npmjs.com) or `npm install -g @lcv-leo/cross-review-mcp --registry=https://npm.pkg.github.com` (GitHub Packages mirror).
 
-**Status.** Stable. Current release: **v1.2.4** runtime paired with **spec v4.14**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
+**Status.** Stable. Current release: **v1.2.5** runtime paired with **spec v4.14**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
 
 The version history at a glance:
 
@@ -34,7 +34,8 @@ The version history at a glance:
 | `v1.2.1` | v4.14 | **External-audit hardening (Gemini audit 2026-04-26).** F1: `session_id` UUID validation in `sessionDir()` + `path.resolve` containment check (path-traversal defense). F7: `log()` prefix renamed `env_caller=` so it's clear the prefix names the server-instance config, not the resolved per-round caller. F8: stale `gemini-2.5-pro` reference in `ask_peer` description swapped for pinned `gemini-3.1-pro-preview` + new smoke step asserts no stale model IDs in tool descriptions. Audit roadmap at `docs/external-audit-2026-04-26-gemini.md`. F2/F3/F5/F6 deferred to v1.3+ with rationale documented. |
 | `v1.2.2` | v4.14 (§6.10.1 clarification) | **Peer-exchange language enforcement (B+C).** Field-evidence from a Gemini-initiated session that submitted a pt-BR `ask_peers` prompt motivated formalization of §6.10's caller responsibility: operator-facing chat language does NOT propagate to peer exchange. (B) Tool descriptions for `session_init`/`ask_peer`/`ask_peers` now carry an explicit en-US directive block. (C) Runtime detects non-en-US in `task` and `prompt` fields via two conservative signals (≥4 diacritics OR ≥3 pt-BR-specific lexemes); emits non-blocking advisory `task_language_warning`/`prompt_language_warning` field on the response with `confidence: low|medium|high`. Warn-only currently — operator may tighten to hard-reject after observing false-positive rate. Spec §6.10.1 clarification (no version bump) records the caller obligation. |
 | `v1.2.3` | v4.14 (§6.18.1 amendment) | **External-audit round-2 closure (F2 strict quorum + F5 lifecycle invariants).** Trilateral session `aa4770fc` validated 4 rounds of peer iteration. F2 (strict quorum): snapshot now requires `rejected_count === 0`, exposes the field, reason builder surfaces "${N} peer(s) failed at spawn". F5 (lifecycle): session_finalize acquires lock + safe-idempotent on identical retry with null-normalization that collapses empty/whitespace strings to null + throws on conflicting; ask_peer/ask_peers refuse finalized sessions; escalate_to_operator gets lock but explicitly allows post-finalization annotation. Spec §6.18.1 codifies. 8 new smoke invariants. |
-| **`v1.2.4`** | v4.14 (§6.18.2 amendment) | **External-audit round-3 closure (F8 persistence cap) + stale-version-string fix + new `server_info` tool.** Yield was lower than rounds 1-2: most findings were already closed (F2 by v1.2.3, F4 partial by v1.2.3, F1/F3/F6 by prior deferral matrix), one was upstream-only (F5: SDK-level), one was theoretical bounded (F7). The single shippable new finding was F8 — per-file persistence size cap. Bundled with: (a) **stale literal fix**: Gemini caught `'(advisory mode, v1.2.2)'` hardcoded in v1.2.3 source; fixed via template `\`v${VERSION}\`` + new anti-drift smoke binding `recovery_advice` to `server.VERSION`; (b) **`server_info` tool** (9th MCP tool, no-args): returns `{ name, version, release_date, spec_version, tools, links }` — resolves runtime-vs-source ambiguity since MCP servers don't auto-reload after package updates; new `RELEASE_DATE` constant + smoke step asserts CHANGELOG heading date matches. F8 implementation: `clipForPersistence(content, label)` 64 KiB cap with truncation marker citing `spec v4.14 §6.18.2`, wired into `savePromptForRound` + `savePeerResponse`. 5 new smoke invariants. 169 GREEN total. |
+| `v1.2.4` | v4.14 (§6.18.2 amendment) | **External-audit round-3 closure (F8 persistence cap) + stale-version-string fix + new `server_info` tool.** F8: `clipForPersistence` 64 KiB cap with truncation marker. Stale literal: Gemini caught `'(advisory mode, v1.2.2)'` in v1.2.3 source; fixed via template `\`v${VERSION}\``. `server_info` tool: 9th MCP tool, returns `{ name, version, release_date, spec_version, tools, links }` — resolves runtime-vs-source ambiguity. Spec §6.18.2 + `RELEASE_DATE` constant + smoke vs CHANGELOG heading. |
+| **`v1.2.5`** | v4.14 (§6.18.3 + §6.18.4 + §6.21 amendments) | **External-audit round-4 closure (4 fixes + 1 spec note retiring shell:true repeats).** Trilateral session `53d0d785` (caller + codex + gemini) iterated R1→R2→R3 to address peer-flagged residuals. **§2 taskkill telemetry** (Windows process reaping): pre-v1.2.5 was fire-and-forget; v1.2.5 captures stderr_tail + exit code, logs on non-zero exit + spawn-error path. POSIX path simplified to direct PID kill (the previous group-kill `-pid` always threw ESRCH on non-detached spawns, swallowing catch never reached fallback → guaranteed zombies, caught by gemini R2). **§3 strict UUIDv4 + symlink resistance**: regex now enforces version+variant bits; `isPathContained` helper uses `path.relative` (Windows case-insensitive); `fs.realpathSync` applied after `ensureStateDir()` to detect symlink-traversal attempts a UUID-named symlink could plant. **§4.1 per-stream RAM cap** (spec §6.18.3): `PEER_STREAM_MAX_BYTES`=4 MiB on `spawnPeer`, `PROBE_STREAM_MAX_BYTES`=256 KiB on `probeAgent`; on overflow, kill process tree + reject with `stream_overflow` audit field; new `failure_class: 'stream_overflow'` classified in BOTH `ask_peer` + `ask_peers` handlers (recovery_hint=null — volumetric, not semantic). **§4.2 session_sweep delete_files** (spec §6.18.4): opt-in `delete_files: true` flag physically removes session directory after finalize; default false preserves audit trail. **§6.21 (NEW spec note)**: shell:true architectural decision recorded normatively to retire 4 audit rounds of repeat findings — cmd from pinned constants + repo-tracked configs, prompt via stdin, threat model is single-user trusted host. |
 
 ---
 
@@ -110,7 +111,7 @@ The only runtime dependency is `@modelcontextprotocol/sdk`.
 Before using the server or after any edit, confirm both gates pass:
 
 ```bash
-npm test             # 169 smoke steps (unit + end-to-end stdio JSON-RPC)
+npm test             # 177 smoke steps (unit + end-to-end stdio JSON-RPC)
 npm run check-models # model-drift audit against docs/top-models.json
 ```
 
@@ -249,7 +250,7 @@ cross-review-mcp/
 |       |-- status-parser.js         STATUS + v4/v4.10 structured block parser
 |       |-- model-parser.js          Sibling peer-model block parser (silent-downgrade defense)
 |-- scripts/
-|   |-- functional-smoke.js          JSON-RPC stdio smoke (169 steps at v1.2.4; count grows with each release)
+|   |-- functional-smoke.js          JSON-RPC stdio smoke (177 steps at v1.2.5; count grows with each release)
 |   |-- audit-model-drift.js         Advisory drift audit (check-models)
 |   |-- probe-reviewer-isolation.js  Legacy Commit-1 hard gate; retained for regression
 |-- docs/
@@ -286,7 +287,7 @@ cross-review-mcp/
 ### Make a change, verify gates
 
 ```bash
-npm test              # 169 smoke steps must stay GREEN (count may grow across releases; check the last line of output)
+npm test              # 177 smoke steps must stay GREEN (count may grow across releases; check the last line of output)
 npm run check-models  # advisory drift audit; must stay clean
 ```
 

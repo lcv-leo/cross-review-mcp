@@ -188,6 +188,24 @@ function authoritativeModelAttestationAvailable(descriptor) {
 
 // Provider-shaped rate-limit lexemes. Generic {rate, quota, limit} explicitly
 // excluded to avoid false-positives on legitimate meta-discussion.
+// v1.2.5 / external-audit round-4 §4.1: per-stream byte caps. F8 (v1.2.4)
+// capped on-disk persistence (savePromptForRound + savePeerResponse) but
+// did NOT cap RAM accumulation in stdout/stderr buffers — an infinite peer
+// output would exhaust process memory before the spawn timeout fired.
+// These caps detect overflow at receive time, kill the offending process
+// tree, and reject with `err.stream_overflow = { stream, max_bytes, tail }`.
+//
+// Threshold rationale:
+//   PEER_STREAM_MAX_BYTES = 4 MiB. Peers output O(10kb) typical, O(100kb)
+//   verbose; 4 MiB is ~40x typical so no false positives on legitimate
+//   long responses, but firmly bounds runaway output.
+//   PROBE_STREAM_MAX_BYTES = 256 KiB. Probes are short by design (one-line
+//   model self-report); a 256 KiB cap is still ~50x the canonical probe
+//   response size of ~5 KiB and still well below the typical timeout budget
+//   for a runaway probe.
+const PEER_STREAM_MAX_BYTES = 4 * 1024 * 1024;
+const PROBE_STREAM_MAX_BYTES = 256 * 1024;
+
 const RATE_LIMIT_LEXEMES = Object.freeze([
     '429',
     'rate limit',
@@ -382,23 +400,73 @@ function modelForPeer(peerAgent) {
 // On Unix we negate the pid to target the process group.
 // R11 (Codex peer review F2 round 2): Windows spawn trees must be reaped
 // on timeout and on retry; leaving orphans breaks wallclock budgets.
+// v1.2.5 / external-audit round-4 §2 + R2 gemini fix: taskkill telemetry on
+// Windows + simplified POSIX direct-PID kill. Pre-v1.2.5 behavior was
+// fire-and-forget on Windows (silent failure if taskkill itself fails) and
+// a process-group kill on POSIX that ALWAYS threw ESRCH (because we don't
+// spawn detached, so -pid is not a valid PGID), with the swallowing catch
+// preventing the fallback from ever running — guaranteed zombies on POSIX.
+//
+// This pass: Windows path captures taskkill stderr + exit code and emits
+// telemetry to host stderr on failures. POSIX path skips the futile group
+// kill and goes directly to PID kill (the only thing that works on
+// non-detached spawns; orphaned grandchildren are a separate concern that
+// requires `detached: true` work, deferred to v1.3+).
 function killProcessTree(proc) {
-    if (!proc || proc.killed || proc.exitCode != null) return;
+    // R2 gemini ask: also guard !proc.pid (executable failed to spawn → pid undefined).
+    if (!proc || !proc.pid || proc.killed || proc.exitCode != null || proc.signalCode != null) return;
     if (process.platform === 'win32') {
+        let killer;
         try {
-            spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
-                stdio: 'ignore',
+            killer = spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
+                stdio: ['ignore', 'pipe', 'pipe'],
                 windowsHide: true,
             });
-        } catch {
+        } catch (err) {
+            // taskkill itself unavailable on PATH. Fall back to direct kill,
+            // log the cleanup-tooling problem so the operator can investigate.
+            process.stderr.write(
+                `[cross-review-mcp] taskkill spawn error PID=${proc.pid}: ${err.message}; falling back to proc.kill\n`
+            );
             try { proc.kill('SIGKILL'); } catch {}
+            return;
         }
+        let stderrTail = '';
+        killer.stderr.on('data', (d) => {
+            stderrTail += d.toString('utf8');
+            // Inline cap matches session-store.MAX_STDERR_TAIL_CHARS (2000).
+            // Inlined to avoid a circular import between peer-spawn and
+            // session-store; the constant is documented in session-store.js.
+            if (stderrTail.length > 2000) {
+                stderrTail = stderrTail.slice(-2000);
+            }
+        });
+        killer.on('close', (code) => {
+            if (code !== 0) {
+                process.stderr.write(
+                    `[cross-review-mcp] taskkill PID=${proc.pid} exit=${code}: ${stderrTail.slice(-400)}\n`
+                );
+            }
+        });
+        killer.on('error', (err) => {
+            process.stderr.write(
+                `[cross-review-mcp] taskkill PID=${proc.pid} runtime error: ${err.message}\n`
+            );
+        });
         return;
     }
+    // POSIX: direct PID kill. The previous group-kill (-pid) attempt was
+    // dead code because non-detached children aren't process group leaders,
+    // so kill(-pid) always threw ESRCH and the swallowing catch returned
+    // before the fallback fired (gemini R2 catch).
     try {
-        process.kill(-proc.pid, 'SIGKILL');
-    } catch {
-        try { proc.kill('SIGKILL'); } catch {}
+        process.kill(proc.pid, 'SIGKILL');
+    } catch (err) {
+        // ESRCH = already dead, success-when-already-dead. Other errors
+        // are unexpected and worth surfacing.
+        if (err.code !== 'ESRCH') {
+            process.stderr.write(`[cross-review-mcp] kill PID=${proc.pid}: ${err.message}\n`);
+        }
     }
 }
 
@@ -556,8 +624,42 @@ function probeAgent(agent, options = {}) {
             });
         }, budgetMs);
 
-        proc.stdout.on('data', (d) => (stdout += d.toString('utf8')));
-        proc.stderr.on('data', (d) => (stderr += d.toString('utf8')));
+        // v1.2.5 / external-audit round-4 §4.1: per-stream byte cap on probes.
+        let stdoutBytes = 0;
+        let stderrBytes = 0;
+        const probeOverflow = (stream) => {
+            if (resolved) return;
+            clearTimeout(timer);
+            killProcessTree(proc);
+            finish({
+                agent,
+                tier: 'offline',
+                requested_model: requested,
+                model_reported: null,
+                model_match: false,
+                probe_latency_ms: Date.now() - started,
+                probe_budget_ms: budgetMs,
+                exit_code: -1,
+                failure_class: 'probe_stream_overflow',
+                cli_version: null,
+                timestamp: new Date().toISOString(),
+                stderr_tail: (stream === 'stderr' ? stderr : stderr).slice(-400),
+                transport_descriptor: buildTransportDescriptor(agent),
+                model_check_skipped: null,
+                cli_attested_model_raw: null,
+                stream_overflow: { stream, max_bytes: PROBE_STREAM_MAX_BYTES },
+            });
+        };
+        proc.stdout.on('data', (d) => {
+            stdoutBytes += d.length;
+            stdout += d.toString('utf8');
+            if (stdoutBytes > PROBE_STREAM_MAX_BYTES) probeOverflow('stdout');
+        });
+        proc.stderr.on('data', (d) => {
+            stderrBytes += d.length;
+            stderr += d.toString('utf8');
+            if (stderrBytes > PROBE_STREAM_MAX_BYTES) probeOverflow('stderr');
+        });
         proc.on('error', (err) => {
             clearTimeout(timer);
             finish({
@@ -1044,6 +1146,8 @@ function spawnPeer(peerAgent, prompt, options = {}) {
         });
         let stdout = '';
         let stderr = '';
+        let stdoutBytes = 0;
+        let stderrBytes = 0;
         let finished = false;
 
         const timer = setTimeout(() => {
@@ -1052,8 +1156,37 @@ function spawnPeer(peerAgent, prompt, options = {}) {
             reject(new Error(`peer ${peerAgent} timed out after ${timeoutMs / 1000}s`));
         }, timeoutMs);
 
-        proc.stdout.on('data', (d) => (stdout += d.toString('utf8')));
-        proc.stderr.on('data', (d) => (stderr += d.toString('utf8')));
+        // v1.2.5 / external-audit round-4 §4.1: per-stream byte cap.
+        // Bounds RAM accumulation independently of the disk cap (F8 in
+        // v1.2.4). On overflow: kill the process tree + reject with a
+        // structured `err.stream_overflow = { stream, max_bytes, tail }`
+        // so the server.js handler can classify failure_class='stream_overflow'.
+        const overflow = (stream) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            killProcessTree(proc);
+            const err = new Error(
+                `peer ${peerAgent} ${stream} overflow: exceeded ${PEER_STREAM_MAX_BYTES} bytes`
+            );
+            err.stream_overflow = {
+                stream,
+                max_bytes: PEER_STREAM_MAX_BYTES,
+                tail: (stream === 'stdout' ? stdout : stderr).slice(-400),
+            };
+            reject(err);
+        };
+
+        proc.stdout.on('data', (d) => {
+            stdoutBytes += d.length;
+            stdout += d.toString('utf8');
+            if (stdoutBytes > PEER_STREAM_MAX_BYTES) overflow('stdout');
+        });
+        proc.stderr.on('data', (d) => {
+            stderrBytes += d.length;
+            stderr += d.toString('utf8');
+            if (stderrBytes > PEER_STREAM_MAX_BYTES) overflow('stderr');
+        });
         proc.on('error', (err) => {
             finished = true;
             clearTimeout(timer);
@@ -1153,4 +1286,7 @@ module.exports = {
     PROMPT_FLAG_LEXEMES,
     matchPromptFlagLexeme,
     detectPromptModerationFlag,
+    // v1.2.5 / external-audit round-4 §4.1: per-stream byte cap thresholds.
+    PEER_STREAM_MAX_BYTES,
+    PROBE_STREAM_MAX_BYTES,
 };

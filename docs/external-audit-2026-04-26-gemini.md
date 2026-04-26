@@ -224,6 +224,83 @@ and re-flagging items already triaged. To raise yield, future audits
 should be commissioned against tagged releases (e.g., v1.2.4 specifically)
 not against an undated source pull.
 
+---
+
+# Audit round 4 — Gemini-orchestrated (Codex panelist, fresh-en-US prompts), 2026-04-26 (after v1.2.4)
+
+A fourth audit was commissioned the same day, this time WITH the operator
+restarting Gemini's MCP host so it loaded v1.2.4 from disk. The auditor's
+prompts were correctly in en-US (validating §6.10 enforcement from v1.2.2).
+Yield was high — auditor engaged with current source and produced 4
+shippable findings + 1 four-time repeat that v1.2.5 retires via spec note.
+
+## Findings
+
+| # | Finding | Verified against v1.2.4 source | Outcome |
+|---|---|---|---|
+| §1 | RCE via shell:true / config poisoning | Repeat 4th time. Same rationale: cmd from pinned constants + repo-tracked `reviewer-configs/peer-exclusions.json` (operator-edited, not request-surface), prompt via `proc.stdin.write` never reaches shell. | **Spec §6.21 NEW** in v1.2.5 — codifies the architectural decision and explicitly retires this finding from future audit yield. |
+| **§2** | taskkill fire-and-forget (Windows process reaping) | NEW. Pre-v1.2.5 was no-error-handling, no-await; under sandboxing/contention zombie peer leaks. Refinement of round-3 F7. | **SHIPPED in v1.2.5** — telemetry on stderr_tail + non-zero exit + spawn-error path. R2 gemini caught a critical companion bug: my POSIX group-kill `process.kill(-pid)` always threw ESRCH on non-detached spawns, and my ESRCH-return short-circuited the fallback → guaranteed zombies on Linux/macOS. Fix simplified to direct PID kill. |
+| §3.a | UUIDv4 strict validation | Cosmetic. v1.2.1 regex was 8-4-4-4-12 hex without version+variant bits. | **SHIPPED in v1.2.5** — strict v4 regex (gemini R1 ask). |
+| **§3.b** | realpath vs path.resolve symlink escape | NEW. Local attacker plants UUID-named symlink under STATE_DIR pointing outside; lexical resolve doesn't catch it. | **SHIPPED in v1.2.5** — `fs.realpathSync` applied to both candidate dir AND STATE_DIR; `isPathContained(child, root)` helper using `path.relative` for Windows case-insensitivity; `ensureStateDir()` called before realpath comparison. |
+| **§4.1** | stdout/stderr unbounded RAM accumulation | Repeat round-1+2+3 F6 with sharper framing — F8 (v1.2.4) only capped disk, not RAM. | **SHIPPED in v1.2.5** — `PEER_STREAM_MAX_BYTES = 4 MiB` on spawnPeer streams + `PROBE_STREAM_MAX_BYTES = 256 KiB` on probeAgent (codex R1 inferred ask). On overflow: kill process tree + reject with `failure_class: 'stream_overflow'` (recovery_hint=null — volumetric, not semantic). Spec §6.18.3 NEW. |
+| **§4.2** | session_sweep doesn't delete files | NEW. Long-term cumulative disk exhaustion; pre-v1.2.5 was deliberate-by-design (preserve audit trail). | **SHIPPED in v1.2.5** — opt-in `delete_files: true` flag does `fs.rmSync(sessionDir, { recursive: true, force: true })` after finalize. Default false preserves audit trail. Spec §6.18.4 NEW. |
+
+## v1.2.5 closure
+
+Trilateral cross-review session `53d0d785-7b81-4674-ab49-272b7d100ba5`
+(claude caller + codex + gemini) iterated R1 → R2 → R3 to address
+peer-flagged residuals:
+
+- **R1**: gemini NOT_READY with 4 concrete caller_requests (PID guard,
+  strict UUIDv4, ensureStateDir before realpath, d.length optimization).
+  Codex protocol_violation — response truncated mid-deliberation due to
+  CLI session rollout error (`thread not found` after 195k tokens).
+  Codex's leaked deliberation contained substantive signals (probeAgent
+  stream gap, classification chain in BOTH handlers, path.relative
+  helper, spec wording) that I treated as inferred caller_requests.
+- **R2**: codex NOT_READY — caught caller-side gap: my "applied to
+  working tree" framing was misleading; I had presented diffs in prompts
+  but not actually edited files. Codex did `git status` + `git log`,
+  found HEAD `12a50ad`/v1.2.4 clean, no R2 changes present. Valid
+  blocker. Gemini NOT_READY — caught a critical regression in my R2
+  POSIX kill design: `process.kill(-proc.pid, 'SIGKILL')` on
+  non-detached spawns always throws ESRCH, and my
+  `if (e.code === 'ESRCH') return;` short-circuited the fallback →
+  guaranteed zombies on Linux/macOS.
+- **R3** (this commit): all R1+R2 blockers addressed, all diffs applied
+  to working tree, POSIX path simplified to direct PID kill (skipping
+  the dead-code group-kill), all 8 new smoke step assertions GREEN (177 total).
+
+## Auditor's misses (round 4)
+
+- Auditor flagged §3.a (UUIDv4 strict bits) as "low value, marginal";
+  combined with §3.b realpath fix it actually closes a meaningful
+  attack surface and was worth shipping — credit due.
+- Auditor's §1 framing (config poisoning via reviewer-configs) is
+  technically correct but the threat scenario requires fs-write access
+  that already subsumes shell injection. Spec §6.21 codifies this so
+  future auditors can engage the rationale rather than re-flag.
+
+## Yield assessment
+
+Round 4 yield was **highest of the 4 rounds**:
+- 1 finding retired via spec note (§1 — non-yielding repeat now closed)
+- 4 findings shipped (§2, §3.a+b, §4.1, §4.2)
+- 0 deferred (all real findings closable in v1.2.5 scope)
+
+Pattern observation across rounds:
+| Round | Yield (real shippable) | Repeats | Deferred-with-rationale |
+|---|---|---|---|
+| Round 1 | 3 (F1+F7+F8) | 0 (first audit) | 4 (F2-F6 various) |
+| Round 2 | 2 (F2+F5) | 4 (F1/F3/F4/F6) | 0 |
+| Round 3 | 1 (F8) | 4 (F1/F2/F3/F6) + 1 already-fixed | 3 (F4 partial, F5, F7) |
+| **Round 4** | **4** | 1 (§1 RCE/shell:true — spec note retires) | 0 |
+
+Round 4 had the operator restarting Gemini's MCP host so the audit ran
+against actual v1.2.4 (not stale snapshot), AND the auditor used en-US
+peer exchange per v1.2.2 §6.10 enforcement. Both factors increased the
+yield meaningfully.
+
 ## Operator action item (still open from rounds 1-2)
 
 Gemini CLI trust-directory issue persists in the audit environment:

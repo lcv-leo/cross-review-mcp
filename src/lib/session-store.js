@@ -39,31 +39,69 @@ function ensureStateDir() {
     fs.mkdirSync(STATE_DIR, { recursive: true });
 }
 
-// v1.2.1 / spec v4.14 hardening: validate session_id is a well-formed UUID
-// before any filesystem path operation. Defense in depth — the threat model
-// is "trusted MCP host" but a malicious or buggy caller passing a
-// session_id like "../foo" would escape STATE_DIR via path.join. UUIDv4
-// pattern is strict enough to reject every traversal sequence.
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+// v1.2.1: validate session_id is a well-formed UUID before any filesystem
+// path op. v1.2.5 / external-audit round-4 §3 (gemini ask): tightened to
+// strict UUIDv4 — version bit (third group MUST start with '4') + variant
+// bit (fourth group MUST start with [89ab]). Cheap to enforce; rejects
+// malformed UUIDs that match 8-4-4-4-12 hex but aren't valid v4.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function assertValidSessionId(sessionId) {
     if (typeof sessionId !== 'string' || !UUID_RE.test(sessionId)) {
         throw new Error(
-            `invalid session_id: must be a UUID (8-4-4-4-12 hex, dash-separated); got '${String(sessionId).slice(0, 64)}'`
+            `invalid session_id: must be a UUIDv4 (8-4-4-4-12 hex with version+variant bits); got '${String(sessionId).slice(0, 64)}'`
         );
     }
 }
 
+// v1.2.5 / external-audit round-4 §3.b: cross-platform path containment
+// check. path.relative is case-insensitive on Windows (uses path.win32
+// semantics), more correct than startsWith for symlink-resolved
+// comparisons. Returns true iff child === root or child is a strict
+// descendant of root.
+function isPathContained(child, root) {
+    const rel = path.relative(root, child);
+    if (rel === '') return true;
+    if (rel.startsWith('..')) return false;
+    if (path.isAbsolute(rel)) return false;
+    return true;
+}
+
+// v1.2.5 / external-audit round-4 §3.b: symlink-resistant containment
+// check. Pre-v1.2.5 used `path.resolve` (lexical only); a local attacker
+// who could plant a UUID-named symlink under STATE_DIR pointing to e.g.
+// ~/.ssh would escape via filesystem-level redirection that lexical
+// resolve doesn't see. fs.realpathSync follows symlinks and exposes the
+// true target — both sides realpath'd because STATE_DIR itself may be a
+// junction on Windows.
 function sessionDir(sessionId) {
     assertValidSessionId(sessionId);
     const dir = path.join(STATE_DIR, sessionId);
-    // Belt + braces: even with UUID validation, ensure the resolved path
-    // stays under STATE_DIR. Containment check defends against future
-    // changes to UUID_RE that might inadvertently relax it.
     const resolved = path.resolve(dir);
     const stateRoot = path.resolve(STATE_DIR);
-    if (!resolved.startsWith(stateRoot + path.sep) && resolved !== stateRoot) {
+    // First gate: lexical containment (catches the obvious '../' case
+    // even without UUID validation; defense in depth).
+    if (!isPathContained(resolved, stateRoot)) {
         throw new Error(`path traversal attempt blocked: ${sessionId}`);
+    }
+    // Second gate: realpath-based symlink resistance. Ensure STATE_DIR
+    // exists so realStateRoot is authoritative on both sides of the
+    // comparison (gemini R1 ask). For a brand-new session, dir doesn't
+    // exist yet — realpathSync(dir) throws ENOENT, which we silently
+    // swallow because the lexical gate above is the per-call check; the
+    // realpath gate fires on subsequent reads when the path will exist.
+    ensureStateDir();
+    try {
+        const realResolved = fs.realpathSync(dir);
+        const realStateRoot = fs.realpathSync(STATE_DIR);
+        if (!isPathContained(realResolved, realStateRoot)) {
+            throw new Error(`symlink traversal blocked: ${sessionId} -> ${realResolved}`);
+        }
+    } catch (e) {
+        // ENOENT = path doesn't exist yet (new session). ELOOP / EACCES
+        // / other errors bubble up naturally and reject the call —
+        // correct posture (gemini R1 confirmed).
+        if (e.code !== 'ENOENT') throw e;
     }
     return dir;
 }
@@ -715,17 +753,27 @@ function finalizeIfUnset(sessionId, outcome, reason = null) {
 }
 
 // sweepStaleSessions({ staleDays, dryRun, reason, now }):
-// Wraps listStaleSessions + finalize. Returns { candidates, finalized }.
-// finalized is empty when dryRun=true. would_finalize=false rows are never
-// finalized. Uses finalizeIfUnset to guarantee re-read-before-write semantics.
+// Wraps listStaleSessions + finalize. Returns { candidates, finalized, purged }.
+// finalized + purged are empty when dryRun=true. would_finalize=false rows are
+// never finalized. Uses finalizeIfUnset to guarantee re-read-before-write
+// semantics.
+//
+// v1.2.5 / external-audit round-4 §4.2: optional `deleteFiles` mode. When
+// true AND dryRun=false, after finalize, also `fs.rmSync` the session
+// directory (recursive + force). Default false preserves audit trail (the
+// pre-v1.2.5 behavior). Purge failure logs to host stderr but does NOT undo
+// the finalize — outcome='aborted' is the canonical state; the on-disk
+// artifacts are best-effort cleanup, not part of the outcome contract.
 function sweepStaleSessions({
     staleDays = SWEEP_DEFAULT_STALE_DAYS,
     dryRun = true,
     reason = 'stale',
+    deleteFiles = false,
     now = Date.now(),
 } = {}) {
     const candidates = listStaleSessions({ staleDays, now });
     const finalized = [];
+    const purged = [];
     if (!dryRun) {
         for (const row of candidates) {
             if (!row.would_finalize) continue;
@@ -736,10 +784,27 @@ function sweepStaleSessions({
                     outcome: 'aborted',
                     outcome_reason: reason,
                 });
+                if (deleteFiles) {
+                    try {
+                        const dir = sessionDir(row.session_id);
+                        fs.rmSync(dir, { recursive: true, force: true });
+                        purged.push({
+                            session_id: row.session_id,
+                            deleted_path: dir,
+                        });
+                    } catch (err) {
+                        // EBUSY (Windows AV scan), EACCES, etc. — best-effort.
+                        // outcome already marked finalized; cleanup failure
+                        // is non-fatal.
+                        process.stderr.write(
+                            `[cross-review-mcp] session_sweep purge failed for ${row.session_id}: ${err.message}\n`
+                        );
+                    }
+                }
             }
         }
     }
-    return { candidates, finalized };
+    return { candidates, finalized, purged };
 }
 
 // v0.7.0-alpha / spec v4.10 Item D: operator escalation record.
@@ -802,4 +867,8 @@ module.exports = {
     // v1.2.4 / spec v4.14 §6.18.2 additions.
     PERSISTENCE_MAX_BYTES,
     clipForPersistence,
+    // v1.2.5 / external-audit round-4 additions.
+    UUID_RE,
+    isPathContained,
+    assertValidSessionId,
 };

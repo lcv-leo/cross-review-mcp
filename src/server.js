@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.2.4';
+const VERSION = '1.2.5';
 
 // v1.2.4: release date for `server_info`. Updated alongside VERSION on each
 // ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
@@ -528,7 +528,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'session_sweep',
             description:
-                'Long-idle session reconciliation (spec v4.13 §6.18). Walks ~/.cross-review/<id>/meta.json and lists sessions whose last activity (max of started_at, rounds[].started_at, rounds[].completed_at) is older than `stale_days`, EXCLUDING (a) sessions younger than 24h from last activity (hard non-overridable footgun guard) and (b) already finalized sessions. Returns { candidates, finalized }. With `dry_run: true` (default), the call is read-only — `finalized` is empty and no meta.json is touched. With `dry_run: false`, every candidate row with `would_finalize: true` is finalized via re-read-before-write semantics: if `meta.outcome` was set by a concurrent process between enumeration and write, the session is left untouched. Finalize sets `outcome: "aborted"` + `outcome_reason: <reason>` (default "stale"). Locked sessions (.lock present) appear in candidates with `would_finalize: false, skip_reason: "locked"` so the operator audits them. Sessions with malformed timestamps appear with `skip_reason: "malformed_timestamp"` and are never auto-finalized.',
+                'Long-idle session reconciliation (spec v4.13 §6.18 + v4.14 §6.18.4 v1.2.5 delete_files amendment). Walks ~/.cross-review/<id>/meta.json and lists sessions whose last activity (max of started_at, rounds[].started_at, rounds[].completed_at) is older than `stale_days`, EXCLUDING (a) sessions younger than 24h from last activity (hard non-overridable footgun guard) and (b) already finalized sessions. Returns { candidates, finalized, purged }. With `dry_run: true` (default), the call is read-only — `finalized` and `purged` are empty and no meta.json is touched. With `dry_run: false`, every candidate row with `would_finalize: true` is finalized via re-read-before-write semantics: if `meta.outcome` was set by a concurrent process between enumeration and write, the session is left untouched. Finalize sets `outcome: "aborted"` + `outcome_reason: <reason>` (default "stale"). Locked sessions (.lock present) appear in candidates with `would_finalize: false, skip_reason: "locked"` so the operator audits them. Sessions with malformed timestamps appear with `skip_reason: "malformed_timestamp"` and are never auto-finalized. With `delete_files: true` AND `dry_run: false` (spec §6.18.4), after finalize the session directory is physically removed via `fs.rmSync(dir, { recursive: true, force: true })` and a `purged` entry is added; default `delete_files: false` preserves the audit trail (pre-v1.2.5 behavior). Purge failure (EBUSY on Windows AV scan, EACCES, etc.) logs to host stderr but does NOT undo finalize — outcome="aborted" is canonical state, on-disk artifacts are best-effort cleanup.',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -540,7 +540,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                     dry_run: {
                         type: 'boolean',
                         description:
-                            'When true (default), the call is read-only and `finalized` is empty. Set false to finalize candidates with would_finalize=true.',
+                            'When true (default), the call is read-only and `finalized`/`purged` are empty. Set false to finalize candidates with would_finalize=true.',
+                    },
+                    delete_files: {
+                        type: 'boolean',
+                        description:
+                            'When true AND dry_run=false, physically remove each finalized session directory (`fs.rmSync` recursive). Default false preserves the audit trail. Purge failure does NOT undo finalize.',
                     },
                     reason: {
                         type: 'string',
@@ -861,20 +866,25 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
             }
             case 'session_sweep': {
                 // v1.1.0 / spec v4.13 §6.18 long-idle session reconciliation.
+                // v1.2.5 / external-audit round-4 §4.2: optional delete_files
+                // mode physically removes the session directory after finalize.
                 const staleDays = typeof args.stale_days === 'number' && args.stale_days >= 0
                     ? args.stale_days
                     : store.SWEEP_DEFAULT_STALE_DAYS;
                 const dryRun = args.dry_run !== false;  // default true — read-only by default
+                const deleteFiles = args.delete_files === true;  // default false — preserve audit trail
                 const reason = (typeof args.reason === 'string' && args.reason.trim().length > 0)
                     ? args.reason.trim()
                     : 'stale';
-                const result = store.sweepStaleSessions({ staleDays, dryRun, reason });
+                const result = store.sweepStaleSessions({ staleDays, dryRun, reason, deleteFiles });
                 log('session_sweep', {
                     stale_days: staleDays,
                     dry_run: dryRun,
+                    delete_files: deleteFiles,
                     reason,
                     candidates: result.candidates.length,
                     finalized: result.finalized.length,
+                    purged: result.purged.length,
                     locked: result.candidates.filter((c) => c.locked).length,
                 });
                 return {
@@ -885,6 +895,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                 ok: true,
                                 stale_days: staleDays,
                                 dry_run: dryRun,
+                                delete_files: deleteFiles,
                                 reason,
                                 ...result,
                             }, null, 2),
@@ -997,13 +1008,21 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         // failures with structured recovery_hint so the caller
                         // can act (reformulate vs wait vs escalate). Mirrors
                         // ask_peers semantics for bilateral surface.
+                        // v1.2.5 / external-audit round-4 §4.1: also classify
+                        // stream_overflow as a distinct failure_class. It's
+                        // volumetric (not semantic), so recovery_hint=null:
+                        // caller MAY retry as transient (peer might respond
+                        // shorter); if persistent, escalate to operator.
                         const spawnRateLimit = spawnErr?.spawn_rate_limit || null;
                         const promptFlagged = spawnErr?.prompt_flagged || null;
+                        const streamOverflow = spawnErr?.stream_overflow || null;
                         const failureClass = promptFlagged
                             ? 'prompt_flagged_by_moderation'
-                            : spawnRateLimit
-                                ? 'rate_limit_induced_response'
-                                : 'spawn_rejected';
+                            : streamOverflow
+                                ? 'stream_overflow'
+                                : spawnRateLimit
+                                    ? 'rate_limit_induced_response'
+                                    : 'spawn_rejected';
                         const recoveryHint = promptFlagged
                             ? 'reformulate_and_retry'
                             : spawnRateLimit
@@ -1235,11 +1254,18 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                             // failure_class so the caller knows which path to
                             // take.
                             const promptFlagged = reason?.prompt_flagged || null;
+                            // v1.2.5 / external-audit round-4 §4.1:
+                            // stream_overflow as distinct failure_class.
+                            // Volumetric (not semantic) → recovery_hint=null
+                            // (caller MAY retry as transient).
+                            const streamOverflow = reason?.stream_overflow || null;
                             const failureClass = promptFlagged
                                 ? 'prompt_flagged_by_moderation'
-                                : spawnRateLimit
-                                    ? 'rate_limit_induced_response'
-                                    : 'spawn_rejected';
+                                : streamOverflow
+                                    ? 'stream_overflow'
+                                    : spawnRateLimit
+                                        ? 'rate_limit_induced_response'
+                                        : 'spawn_rejected';
                             const recoveryHint = promptFlagged
                                 ? 'reformulate_and_retry'
                                 : spawnRateLimit

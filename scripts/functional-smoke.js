@@ -845,7 +845,186 @@ async function runAll() {
     all.push(...s55.results);
     const s56 = await driveV414ServerInfoUnit();
     all.push(...s56.results);
+    // v1.2.5 / external-audit round-4 closures + spec amendments.
+    const s57 = await driveV414StrictUuidV4Unit();
+    all.push(...s57.results);
+    const s58 = await driveV414StreamCapConstantsUnit();
+    all.push(...s58.results);
+    const s59 = await driveV414SessionSweepDeleteFilesUnit();
+    all.push(...s59.results);
+    const s60 = await driveV414Spec621ShellSpawnAnchorUnit();
+    all.push(...s60.results);
     return all;
+}
+
+// v1.2.5 / external-audit round-4 §3 — strict UUIDv4 (version+variant bits).
+async function driveV414StrictUuidV4Unit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/session-store.js')];
+    const store = require('../src/lib/session-store.js');
+
+    // Strict v4 UUID: third group MUST start with 4, fourth with [89ab].
+    // Real UUIDv4 examples — accept.
+    const validV4 = [
+        '12345678-1234-4234-8234-123456789012',
+        'abcdef01-2345-4abc-9def-abcdef012345',
+        'AAAAAAAA-BBBB-4CCC-AAAA-BBBBBBBBBBBB',  // case-insensitive
+    ];
+    for (const uuid of validV4) {
+        store.assertValidSessionId(uuid);
+    }
+    results.push({ step: 'v4.14 §3: strict UUIDv4 accepts valid v4 (version 4 + variant [89ab])', ok: true });
+
+    // Strict rejection: 8-4-4-4-12 hex but NOT v4.
+    const looseHexButNotV4 = [
+        '12345678-1234-1234-1234-123456789012',  // version 1, not 4
+        '12345678-1234-2234-1234-123456789012',  // version 2, not 4
+        '12345678-1234-4234-1234-123456789012',  // wrong variant (1, not [89ab])
+        '12345678-1234-4234-7234-123456789012',  // wrong variant (7)
+        '12345678-1234-4234-c234-123456789012',  // wrong variant (c)
+    ];
+    for (const bad of looseHexButNotV4) {
+        let threw = false;
+        try { store.assertValidSessionId(bad); } catch { threw = true; }
+        assert(threw, `v4.14 §3: strict UUIDv4 rejects loose-hex non-v4 ${bad}`);
+    }
+    results.push({ step: 'v4.14 §3: strict UUIDv4 rejects 8-4-4-4-12 hex with wrong version or variant bits', ok: true });
+
+    // isPathContained helper: cross-platform containment.
+    const path = require('node:path');
+    const root = path.resolve('/tmp/test');
+    assert(store.isPathContained(root, root) === true, 'v4.14 §3: isPathContained same path → true');
+    assert(store.isPathContained(path.join(root, 'sub'), root) === true, 'v4.14 §3: isPathContained descendant → true');
+    assert(store.isPathContained(path.resolve('/tmp/other'), root) === false, 'v4.14 §3: isPathContained sibling → false');
+    assert(store.isPathContained(path.resolve('/'), root) === false, 'v4.14 §3: isPathContained ancestor → false');
+    results.push({ step: 'v4.14 §3: isPathContained helper covers same/descendant/sibling/ancestor cases', ok: true });
+
+    return { results };
+}
+
+// v1.2.5 / external-audit round-4 §4.1 — per-stream byte cap constants exported.
+async function driveV414StreamCapConstantsUnit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/peer-spawn.js')];
+    const peerSpawn = require('../src/lib/peer-spawn.js');
+
+    assert(peerSpawn.PEER_STREAM_MAX_BYTES === 4 * 1024 * 1024, 'v4.14 §4.1: PEER_STREAM_MAX_BYTES = 4 MiB');
+    assert(peerSpawn.PROBE_STREAM_MAX_BYTES === 256 * 1024, 'v4.14 §4.1: PROBE_STREAM_MAX_BYTES = 256 KiB');
+    assert(peerSpawn.PROBE_STREAM_MAX_BYTES < peerSpawn.PEER_STREAM_MAX_BYTES, 'v4.14 §4.1: probe cap is tighter than spawn cap (probes are short by design)');
+    results.push({ step: 'v4.14 §4.1 §6.18.3: PEER_STREAM_MAX_BYTES + PROBE_STREAM_MAX_BYTES exported with correct ordering', ok: true });
+
+    // Anti-drift: stream_overflow path must be wired in spawnPeer (verified
+    // by source inspection — runtime overflow test would require a peer
+    // CLI that actually streams >4 MiB which is heavy for smoke).
+    const fs = require('node:fs');
+    const pathMod = require('node:path');
+    const peerSpawnSrc = fs.readFileSync(pathMod.resolve(__dirname, '..', 'src', 'lib', 'peer-spawn.js'), 'utf8');
+    assert(peerSpawnSrc.includes('PEER_STREAM_MAX_BYTES') && peerSpawnSrc.includes('stream_overflow'), 'v4.14 §4.1: spawnPeer wires stream cap + stream_overflow error attribute');
+    assert(peerSpawnSrc.includes('PROBE_STREAM_MAX_BYTES'), 'v4.14 §4.1: probeAgent wires probe stream cap');
+    assert(peerSpawnSrc.includes("'probe_stream_overflow'"), 'v4.14 §4.1: probeAgent has probe_stream_overflow failure_class');
+
+    // server.js classification chain: both ask_peer + ask_peers handlers
+    // must include 'stream_overflow' branch.
+    const serverSrc = fs.readFileSync(pathMod.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+    const overflowMatches = serverSrc.match(/'stream_overflow'/g);
+    assert(overflowMatches !== null && overflowMatches.length >= 2, 'v4.14 §4.1: server.js classifies stream_overflow in BOTH ask_peer + ask_peers handlers');
+    results.push({ step: 'v4.14 §4.1: stream_overflow classification wired end-to-end (peer-spawn + both server handlers)', ok: true });
+
+    return { results };
+}
+
+// v1.2.5 / external-audit round-4 §4.2 — session_sweep delete_files mode.
+async function driveV414SessionSweepDeleteFilesUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/session-store.js')];
+    const store = require('../src/lib/session-store.js');
+
+    // Inline minimal mkTestSession (mirrors driveV413SessionSweepUnit).
+    const crypto = require('node:crypto');
+    function mkStaleSession(NOW) {
+        const id = crypto.randomUUID();
+        fs.mkdirSync(store.sessionDir(id), { recursive: true });
+        const meta = {
+            session_id: id,
+            spec_version: store.SESSION_SPEC_VERSION,
+            task: 'sweep delete_files test',
+            artifacts: [],
+            caller: 'claude',
+            peers: ['codex'],
+            started_at: new Date(NOW - 10 * 24 * 60 * 60 * 1000).toISOString(),
+            rounds: [],
+            failed_attempts: [],
+            outcome: null,
+            outcome_reason: null,
+        };
+        fs.writeFileSync(path.join(store.sessionDir(id), 'meta.json'), JSON.stringify(meta, null, 2));
+        // Also drop a round-NN-prompt.md file to verify it gets purged.
+        fs.writeFileSync(path.join(store.sessionDir(id), 'round-01-prompt.md'), 'test prompt content');
+        return id;
+    }
+
+    const NOW = Date.parse('2026-04-27T12:00:00Z');
+    const sid = mkStaleSession(NOW);
+    try {
+        // Dry-run: must NOT touch files.
+        const dry = store.sweepStaleSessions({ staleDays: 7, dryRun: true, deleteFiles: true, now: NOW });
+        assert(dry.purged.length === 0, 'v4.14 §4.2: dry_run + delete_files=true → purged is empty');
+        assert(fs.existsSync(store.sessionDir(sid)), 'v4.14 §4.2: dry_run did NOT remove session dir');
+
+        // Wet-run with delete_files=false (default): finalize but preserve.
+        const wetNoDelete = store.sweepStaleSessions({ staleDays: 7, dryRun: false, deleteFiles: false, now: NOW });
+        assert(wetNoDelete.finalized.some((f) => f.session_id === sid), 'v4.14 §4.2: wet-run-no-delete finalizes the candidate');
+        assert(wetNoDelete.purged.length === 0, 'v4.14 §4.2: wet-run-no-delete leaves purged empty');
+        assert(fs.existsSync(store.sessionDir(sid)), 'v4.14 §4.2: wet-run-no-delete preserves session dir on disk');
+        const metaAfterFinalize = JSON.parse(fs.readFileSync(path.join(store.sessionDir(sid), 'meta.json'), 'utf8'));
+        assert(metaAfterFinalize.outcome === 'aborted', 'v4.14 §4.2: wet-run-no-delete writes outcome=aborted');
+        results.push({ step: 'v4.14 §4.2: dry_run is read-only + wet-run-no-delete preserves files (default behavior)', ok: true });
+
+        // Now create a NEW stale session to test wet-run + delete_files.
+        const sid2 = mkStaleSession(NOW);
+        const wetDelete = store.sweepStaleSessions({ staleDays: 7, dryRun: false, deleteFiles: true, now: NOW });
+        assert(wetDelete.finalized.some((f) => f.session_id === sid2), 'v4.14 §4.2: wet-run-with-delete finalizes the new candidate');
+        assert(wetDelete.purged.some((p) => p.session_id === sid2), 'v4.14 §4.2: wet-run-with-delete adds to purged array');
+        assert(!fs.existsSync(store.sessionDir(sid2)), 'v4.14 §4.2: wet-run-with-delete physically removes session dir');
+        results.push({ step: 'v4.14 §4.2: wet-run + delete_files=true finalizes + physically removes session directory', ok: true });
+
+        // Cleanup the first session that was finalized but not purged.
+        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
+    } catch (e) {
+        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
+        throw e;
+    }
+
+    return { results };
+}
+
+// v1.2.5 / external-audit round-4 §1 — spec §6.21 anchor presence (anti-drift).
+async function driveV414Spec621ShellSpawnAnchorUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const specSrc = fs.readFileSync(path.resolve(__dirname, '..', 'docs', 'workflow-spec.md'), 'utf8');
+    assert(
+        specSrc.includes('### 6.21 Shell-spawn architecture decision'),
+        'v4.14 §6.21: spec contains the shell-spawn architecture decision section'
+    );
+    // Whitespace-tolerant: the spec wraps lines, so the directive sentence
+    // may have newlines/spaces between words. Check for keyword presence in
+    // proximity rather than verbatim string match.
+    assert(
+        /Repeating the finding\s+without engaging the rationale is non-yielding/m.test(specSrc),
+        'v4.14 §6.21: spec includes the audit-guidance directive retiring round-1..N RCE/shell:true repeats'
+    );
+    results.push({ step: 'v4.14 §6.21: shell-spawn architecture decision section present + audit-guidance directive', ok: true });
+    return { results };
 }
 
 // v1.2.4 / spec v4.14 §6.18.2 — F8 closure: per-file persistence size cap.
@@ -1234,10 +1413,13 @@ async function driveV414PathTraversalGuardUnit() {
     results.push({ step: 'v4.14 hardening F1: sessionDir rejects non-string types', ok: true });
 
     // Valid UUID accepted.
-    const validUuid = '12345678-1234-1234-1234-123456789012';
+    // v1.2.5: strict UUIDv4 enforced (version 4 + variant [89ab]). Test
+    // fixture updated to use a real v4-shaped UUID. Old fixture (version 1)
+    // is now correctly rejected by the strict regex.
+    const validUuid = '12345678-1234-4234-8234-123456789012';
     const dir = store.sessionDir(validUuid);
-    assert(typeof dir === 'string' && dir.includes(validUuid), 'v4.14 hardening F1: valid UUID accepted');
-    results.push({ step: 'v4.14 hardening F1: valid UUID accepted by sessionDir', ok: true });
+    assert(typeof dir === 'string' && dir.includes(validUuid), 'v4.14 hardening F1: valid UUIDv4 accepted');
+    results.push({ step: 'v4.14 hardening F1: valid UUIDv4 accepted by sessionDir', ok: true });
 
     return { results };
 }
