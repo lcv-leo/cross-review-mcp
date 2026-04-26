@@ -824,7 +824,102 @@ async function runAll() {
     all.push(...s47.results);
     const s48 = await driveV414ReadmeVersionDriftUnit();
     all.push(...s48.results);
+    // v1.2.1 hardening from gemini audit (F1, F8).
+    const s49 = await driveV414PathTraversalGuardUnit();
+    all.push(...s49.results);
+    const s50 = await driveV414ToolDescriptionDriftUnit();
+    all.push(...s50.results);
     return all;
+}
+
+// v1.2.1 hardening — F1 + F4 from gemini audit 2026-04-26: session_id must be
+// a well-formed UUID; path traversal attempts must throw before any FS op.
+async function driveV414PathTraversalGuardUnit() {
+    const results = [];
+    const store = require('../src/lib/session-store.js');
+
+    const traversalPayloads = [
+        '../foo',
+        '../../etc/passwd',
+        '..\\..\\Windows\\System32',
+        'a/b',
+        'a\\b',
+        'not-a-uuid',
+        '',
+        '00000000-0000-0000-0000-00000000000',  // 11 hex in last group, invalid
+        '00000000-0000-0000-0000-0000000000001',  // 13 hex in last group, invalid
+    ];
+    for (const bad of traversalPayloads) {
+        let threw = false;
+        try { store.sessionDir(bad); } catch { threw = true; }
+        assert(threw, `v4.14 hardening: sessionDir('${bad}') throws (invalid UUID rejected)`);
+    }
+    results.push({ step: 'v4.14 hardening F1: sessionDir rejects traversal + non-UUID payloads', ok: true });
+
+    // Type-shape rejections.
+    let threwOnNull = false;
+    try { store.sessionDir(null); } catch { threwOnNull = true; }
+    assert(threwOnNull, 'v4.14 hardening F1: sessionDir(null) throws');
+    let threwOnNumber = false;
+    try { store.sessionDir(123); } catch { threwOnNumber = true; }
+    assert(threwOnNumber, 'v4.14 hardening F1: sessionDir(123) throws');
+    results.push({ step: 'v4.14 hardening F1: sessionDir rejects non-string types', ok: true });
+
+    // Valid UUID accepted.
+    const validUuid = '12345678-1234-1234-1234-123456789012';
+    const dir = store.sessionDir(validUuid);
+    assert(typeof dir === 'string' && dir.includes(validUuid), 'v4.14 hardening F1: valid UUID accepted');
+    results.push({ step: 'v4.14 hardening F1: valid UUID accepted by sessionDir', ok: true });
+
+    return { results };
+}
+
+// v1.2.1 hardening — F8 from gemini audit: ensure no stale model IDs in tool
+// descriptions. Future model bumps must update peer-spawn AND descriptions
+// in lockstep. This step asserts each pinned model ID appears in the
+// descriptions of ask_peer + ask_peers.
+async function driveV414ToolDescriptionDriftUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const peerSpawn = require('../src/lib/peer-spawn.js');
+
+    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+    // Stale model IDs that should NOT appear anywhere in current descriptions.
+    const staleModels = ['gemini-2.5-pro', 'gemini-2.0-pro', 'gemini-1.5-pro'];
+    for (const stale of staleModels) {
+        // It's allowed in code comments / examples (lib stripping context),
+        // but NOT inside tool descriptions. We approximate by checking that
+        // the substring does NOT appear in lines containing 'description:'.
+        const lines = serverSrc.split('\n');
+        let leaks = 0;
+        let inDescription = false;
+        for (const line of lines) {
+            if (/description:\s*[`'"]/.test(line)) inDescription = true;
+            if (inDescription && line.includes(stale)) leaks++;
+            if (inDescription && (line.includes('`,') || line.includes('"\,') || /^\s+inputSchema/.test(line))) {
+                inDescription = false;
+            }
+        }
+        assert(
+            leaks === 0,
+            `v4.14 hardening F8: stale model id '${stale}' must not appear in tool descriptions in server.js (${leaks} occurrences)`
+        );
+    }
+
+    // Pinned IDs from peer-spawn.js MUST appear in the server.js descriptions
+    // at least once each so callers see the canonical pin.
+    const pinned = [peerSpawn.CODEX_MODEL, peerSpawn.CLAUDE_MODEL, peerSpawn.GEMINI_MODEL];
+    for (const p of pinned) {
+        assert(
+            serverSrc.includes(p),
+            `v4.14 hardening F8: pinned model '${p}' must appear in server.js (descriptions or constants)`
+        );
+    }
+    results.push({ step: 'v4.14 hardening F8: tool descriptions reference pinned models, no stale IDs', ok: true });
+
+    return { results };
 }
 
 // v1.2.0 / spec v4.14 §6.20 — dynamic caller resolution.

@@ -30,7 +30,7 @@ Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando
 ## Gates obrigatórios
 
 ```bash
-npm test              # 147 smoke steps at v1.2.0 (count grows with each release; check the last line)
+npm test              # 151 smoke steps at v1.2.0 (count grows with each release; check the last line)
 npm run check-models  # OK: no drift, fallback_chain invariant holds, no staleness
 ```
 

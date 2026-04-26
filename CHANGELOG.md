@@ -11,7 +11,45 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — pattern-detection extension to convergence_health, content-aware session audits, time-to-converge wall-clock analysis.)
+- (em aberto — F2/F3/F5/F6 from `docs/external-audit-2026-04-26-gemini.md` deferred for v1.3+: success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification.)
+
+---
+
+## [1.2.1] — 2026-04-26
+
+**External-audit hardening from Gemini audit 2026-04-26.** Three concrete findings shipped (F1, F7, F8 from `docs/external-audit-2026-04-26-gemini.md`); four defense-in-depth follow-ups deferred to v1.3+ with rationale documented.
+
+### Corrigido — F1 path-traversal defense in `sessionDir`
+- **`src/lib/session-store.js`**: `sessionDir(sessionId)` now calls `assertValidSessionId` (UUID 8-4-4-4-12 hex regex) before any filesystem op + applies `path.resolve` containment check (resolved path must start with resolved STATE_DIR + sep). Defense in depth — threat model is "trusted MCP host" but a malicious or buggy caller passing `session_id: '../../foo'` would have escaped via `path.join`.
+- New `UUID_RE` constant + `assertValidSessionId` exported helper.
+- **5 new smoke invariants** in `driveV414PathTraversalGuardUnit`:
+  - traversal payloads (`../foo`, `../../etc/passwd`, `..\\..\\Windows\\System32`, `a/b`, `a\\b`) all throw.
+  - non-UUID strings (empty, partial-length groups) throw.
+  - non-string types (null, number) throw.
+  - valid UUID (`12345678-1234-1234-1234-123456789012`) is accepted.
+
+### Corrigido — F7 log prefix semantic clarity
+- **`src/server.js`**: `log()` prefix changed from `caller=${CALLER}` to `env_caller=${CALLER}` to make explicit that the prefix names the SERVER INSTANCE'S env-var-configured caller, not the round's session-resolved caller. Per-round logs already pass session-specific context via the `meta` arg of `log()`. Closes the gap left over from v1.2.0 §6.20 where `meta.caller` became dynamic but the log prefix still showed env-var.
+
+### Corrigido — F8 stale model ID in tool description
+- **`src/server.js` line 482** (`ask_peer` description): `gemini=gemini-2.5-pro` → `gemini=gemini-3.1-pro-preview` to match `peer-spawn.js` `GEMINI_MODEL` constant.
+- **New smoke step** (`driveV414ToolDescriptionDriftUnit`):
+  - asserts no stale gemini model IDs (`gemini-2.5-pro`, `gemini-2.0-pro`, `gemini-1.5-pro`) appear in any tool description block.
+  - asserts each pinned model ID (`CODEX_MODEL`, `CLAUDE_MODEL`, `GEMINI_MODEL`) appears in `server.js` at least once.
+
+### Adicionado — audit response document
+- **`docs/external-audit-2026-04-26-gemini.md`** (NEW): full validation matrix for the Gemini audit — every finding mapped to "verified against v1.2.0 source", "shipped in v1.2.1", or "deferred / why". Includes operator action item (Gemini CLI trust-directory configuration) noted in the audit's environment.
+
+### Deferred to v1.3+ (P2/P3 from external audit)
+- **F3** success-path output redaction (medium effort, P2)
+- **F4** full Zod runtime validation (medium effort, P2 — F1 closes the highest-value subcase)
+- **F5** per-stream byte cap (medium effort, P2 — `session_sweep` already addresses disk side)
+- **F6** lock token verification (small effort, P3 — bounded race, no field evidence)
+- **F2** `shell:false` + arg arrays (medium effort, P3 — no real attack surface; track if dynamic-arg use case emerges)
+
+### Validação
+- `npm test` 151 GREEN (was 147 in v1.2.0; +3 hardening invariants for F1 + F8).
+- `npm run check-models` GREEN.
 
 ---
 

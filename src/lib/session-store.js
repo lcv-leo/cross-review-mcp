@@ -39,8 +39,33 @@ function ensureStateDir() {
     fs.mkdirSync(STATE_DIR, { recursive: true });
 }
 
+// v1.2.1 / spec v4.14 hardening: validate session_id is a well-formed UUID
+// before any filesystem path operation. Defense in depth — the threat model
+// is "trusted MCP host" but a malicious or buggy caller passing a
+// session_id like "../foo" would escape STATE_DIR via path.join. UUIDv4
+// pattern is strict enough to reject every traversal sequence.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function assertValidSessionId(sessionId) {
+    if (typeof sessionId !== 'string' || !UUID_RE.test(sessionId)) {
+        throw new Error(
+            `invalid session_id: must be a UUID (8-4-4-4-12 hex, dash-separated); got '${String(sessionId).slice(0, 64)}'`
+        );
+    }
+}
+
 function sessionDir(sessionId) {
-    return path.join(STATE_DIR, sessionId);
+    assertValidSessionId(sessionId);
+    const dir = path.join(STATE_DIR, sessionId);
+    // Belt + braces: even with UUID validation, ensure the resolved path
+    // stays under STATE_DIR. Containment check defends against future
+    // changes to UUID_RE that might inadvertently relax it.
+    const resolved = path.resolve(dir);
+    const stateRoot = path.resolve(STATE_DIR);
+    if (!resolved.startsWith(stateRoot + path.sep) && resolved !== stateRoot) {
+        throw new Error(`path traversal attempt blocked: ${sessionId}`);
+    }
+    return dir;
 }
 
 function atomicWriteFile(filePath, content) {

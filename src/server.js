@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -167,8 +167,14 @@ function legacyPeerForCaller(caller) {
 const SKIP_PROBE = process.env.CROSS_REVIEW_SKIP_PROBE === '1';
 const PROBE_BUDGET_MS = Number(process.env.CROSS_REVIEW_PROBE_BUDGET_MS) || 25000;
 
+// v1.2.1 / spec v4.14 §6.20 fix: log line shows env-var caller for backwards
+// compat, but per-session log calls SHOULD include the resolved caller in the
+// meta object. This is a defense-in-depth post-v1.2.0 cleanup — handlers
+// already pass session-specific context via the meta arg, so the global
+// caller= prefix is informational ("this server instance was started by X")
+// rather than authoritative ("this round was driven by X").
 function log(msg, meta) {
-    const base = `[cross-review-mcp ${new Date().toISOString()} caller=${CALLER}] ${msg}`;
+    const base = `[cross-review-mcp ${new Date().toISOString()} env_caller=${CALLER}] ${msg}`;
     process.stderr.write(meta ? `${base} ${JSON.stringify(meta)}\n` : `${base}\n`);
 }
 
@@ -479,7 +485,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: 'ask_peer',
-            description: `Send a prompt to the single bilateral peer (${LEGACY_PEER || `(legacy bilateral not available for caller=${CALLER}; use ask_peers)`}) and return its response with parsed STATUS. Caller MUST declare its own caller_status (READY means "I have no further changes or objections this round"; NOT_READY means "I applied changes and want peer to re-review, or I disagree with peer's previous response"). caller_status is restricted to READY|NOT_READY -- if the caller is missing evidence, emit NOT_READY and attach a CALLER_REQUEST block for peer. Peer status may be READY|NOT_READY|NEEDS_EVIDENCE. Convergence requires both READY in the same round. Peer runs under contained spawn with destructive MCPs/apps disabled; peer is invoked with the top-level model explicitly set (spec v4 section 6.9.2: codex=gpt-5.5 xhigh, claude=claude-opus-4-7, gemini=gemini-2.5-pro; no silent fallback).
+            description: `Send a prompt to the single bilateral peer (${LEGACY_PEER || `(legacy bilateral not available for caller=${CALLER}; use ask_peers)`}) and return its response with parsed STATUS. Caller MUST declare its own caller_status (READY means "I have no further changes or objections this round"; NOT_READY means "I applied changes and want peer to re-review, or I disagree with peer's previous response"). caller_status is restricted to READY|NOT_READY -- if the caller is missing evidence, emit NOT_READY and attach a CALLER_REQUEST block for peer. Peer status may be READY|NOT_READY|NEEDS_EVIDENCE. Convergence requires both READY in the same round. Peer runs under contained spawn with destructive MCPs/apps disabled; peer is invoked with the top-level model explicitly set (spec v4 section 6.9.2: codex=gpt-5.5 xhigh, claude=claude-opus-4-7, gemini=gemini-3.1-pro-preview; no silent fallback).
 
 Legacy bilateral surface: ask_peer is claude<->codex only (R23). Gemini callers MUST use ask_peers instead.
 
