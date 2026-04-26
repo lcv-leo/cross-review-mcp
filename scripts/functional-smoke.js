@@ -829,7 +829,101 @@ async function runAll() {
     all.push(...s49.results);
     const s50 = await driveV414ToolDescriptionDriftUnit();
     all.push(...s50.results);
+    // v1.2.2 §6.10 enforcement (B+C).
+    const s51 = await driveV414PromptLanguageDetectorUnit();
+    all.push(...s51.results);
+    const s52 = await driveV414PromptLanguageDescriptionDriftUnit();
+    all.push(...s52.results);
     return all;
+}
+
+// v1.2.2 §6.10 enforcement — language drift detector unit tests (B+C runtime side).
+async function driveV414PromptLanguageDetectorUnit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/server.js')];
+    const server = require('../src/server.js');
+
+    // Clean en-US: must NOT be flagged.
+    const enClean = 'Please audit the code in server.js for security vulnerabilities. Report findings without modifying code. Return READY when done.';
+    assert(server.detectPromptLanguageDrift(enClean) === null, '§6.10 detector: clean en-US prompt is not flagged');
+
+    // Clean en-US technical with identifiers: must NOT be flagged.
+    const enTechnical = 'Run ask_peers with caller_status=NOT_READY and verify the convergence_health field shifts from normal to extended at round 6. Check meta.caller_resolution.source equals arg when caller is passed explicitly.';
+    assert(server.detectPromptLanguageDrift(enTechnical) === null, '§6.10 detector: en-US technical with identifiers is not flagged');
+
+    // Loanwords with 1-2 diacritics: must NOT be flagged (under threshold of 4).
+    const enLoanwords = 'The naïve approach is to fetch the café data without auth.';
+    assert(server.detectPromptLanguageDrift(enLoanwords) === null, '§6.10 detector: en-US prose with 2 diacritics under threshold');
+
+    // The actual offending prompt from field-evidence 2026-04-26 (Gemini-initiated, pt-BR).
+    const ptOffender = 'Por favor, realize uma auditoria de segurança e robustez no código fonte do servidor cross-review-mcp. Concentre-se em identificar vulnerabilidades de injeção no spawn de processos, vazamento de sessão, falhas de sincronização na leitura do stdout/stderr, fragilidades nos regex dos parsers e falhas no modelo de concorrência.';
+    const flagged = server.detectPromptLanguageDrift(ptOffender);
+    assert(flagged !== null, '§6.10 detector: the canonical pt-BR offending prompt IS flagged');
+    assert(flagged.suspected_language === 'non-en-us', '§6.10 detector: suspected_language=non-en-us');
+    assert(flagged.signals.diacritics_count >= server.PROMPT_LANG_DIACRITICS_THRESHOLD, '§6.10 detector: diacritics_count meets threshold');
+    assert(Array.isArray(flagged.signals.lexemes_matched) && flagged.signals.lexemes_matched.length >= server.PROMPT_LANG_LEXEMES_THRESHOLD, '§6.10 detector: lexemes_matched meets threshold');
+    assert(flagged.spec_reference === 'spec v4.14 §6.10', '§6.10 detector: spec reference attached');
+    assert(flagged.recovery_hint === 'reformulate_in_en_us', '§6.10 detector: recovery_hint attached');
+    assert(['low', 'medium', 'high'].includes(flagged.confidence), '§6.10 detector: confidence is one of low/medium/high');
+    results.push({ step: 'v4.14 §6.10 detector: clean en-US not flagged + canonical pt-BR offender IS flagged with full payload', ok: true });
+
+    // Lexeme-only path: prompt without diacritics but with multiple pt-BR lexemes (defi-decomposed style).
+    const ptNoAccents = 'concentre-se nas vulnerabilidades das falhas e fragilidades dos arquivos do servidor';
+    const lexemeFlag = server.detectPromptLanguageDrift(ptNoAccents);
+    assert(lexemeFlag !== null && lexemeFlag.signals.lexemes_matched.length >= 3, '§6.10 detector: lexeme-only path flags at threshold (3 distinct matches)');
+    results.push({ step: 'v4.14 §6.10 detector: lexeme-only path flags without diacritics', ok: true });
+
+    // Type-shape rejections.
+    assert(server.detectPromptLanguageDrift(null) === null, '§6.10 detector: null input → null');
+    assert(server.detectPromptLanguageDrift('') === null, '§6.10 detector: empty input → null');
+    assert(server.detectPromptLanguageDrift(123) === null, '§6.10 detector: non-string input → null');
+    results.push({ step: 'v4.14 §6.10 detector: rejects non-string + empty inputs', ok: true });
+
+    // Threshold exposure.
+    assert(server.PROMPT_LANG_DIACRITICS_THRESHOLD === 4, '§6.10 detector: diacritics threshold pinned at 4');
+    assert(server.PROMPT_LANG_LEXEMES_THRESHOLD === 3, '§6.10 detector: lexemes threshold pinned at 3');
+    assert(Array.isArray(server.PT_BR_LEXEMES) && server.PT_BR_LEXEMES.length >= 10, '§6.10 detector: lexeme list exported and non-trivial');
+    results.push({ step: 'v4.14 §6.10 detector: thresholds + lexeme list exported for tuning', ok: true });
+
+    return { results };
+}
+
+// v1.2.2 §6.10 anti-drift — assert canonical en-US directive appears in tool descriptions (B side).
+async function driveV414PromptLanguageDescriptionDriftUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const serverSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8');
+
+    // Each of the three peer-exchange tool descriptions must contain the
+    // canonical en-US marker. We check for a stable substring ('§6.10' +
+    // 'en-US') so future paraphrasing is fine but the directive intent is
+    // preserved.
+    const toolDescriptionAnchors = [
+        { name: 'session_init', requires: 'task_language_warning' },
+        { name: 'ask_peer', requires: 'prompt_language_warning' },
+        { name: 'ask_peers', requires: 'prompt_language_warning' },
+    ];
+    for (const t of toolDescriptionAnchors) {
+        // Find the description block for the named tool. The pattern
+        // assumes "name: 'X'" then "description:" within ~3 lines.
+        const nameIdx = serverSrc.indexOf(`name: '${t.name}'`);
+        assert(nameIdx >= 0, `§6.10 anti-drift: tool '${t.name}' is registered`);
+        const descSlice = serverSrc.slice(nameIdx, nameIdx + 8000);
+        assert(
+            descSlice.includes('§6.10') && descSlice.includes('en-US'),
+            `§6.10 anti-drift: '${t.name}' description references §6.10 + en-US`
+        );
+        assert(
+            descSlice.includes(t.requires),
+            `§6.10 anti-drift: '${t.name}' description names the response field '${t.requires}'`
+        );
+    }
+    results.push({ step: 'v4.14 §6.10 anti-drift: session_init / ask_peer / ask_peers descriptions all carry the en-US directive + warning field name', ok: true });
+
+    return { results };
 }
 
 // v1.2.1 hardening — F1 + F4 from gemini audit 2026-04-26: session_id must be

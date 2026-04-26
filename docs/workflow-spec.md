@@ -1705,6 +1705,49 @@ seja em pt-BR o que vier para eu ler; se nao for para eu ler, que seja
 TUDO em en-US." User explicitly chose full-scope migration (all phases
 now, no deferral).
 
+#### 6.10.1 Caller responsibility — operator chat language MUST NOT propagate to peer exchange (clarification, v1.2.2 / v4.14)
+
+Field evidence 2026-04-26: a Gemini-initiated session opened `ask_peers`
+with a pt-BR prompt mirroring the operator's chat language. The
+operator's chat with the caller LLM was correctly in pt-BR per
+exception (a) above, but the caller propagated pt-BR into the
+peer-exchange surface, violating the §6.10 default.
+
+Normative clarification. The caller (assistant LLM driving cross-review
+sessions) is responsible for translating peer-exchange content to en-US
+before submission. The operator-facing chat language and the
+peer-exchange language are CONCEPTUALLY INDEPENDENT artifacts under
+§6.10 — exception (a) for chat output does NOT extend to the prompts
+the caller sends through `session_init.task`, `ask_peer.prompt`, or
+`ask_peers.prompt`. Those are peer-exchange surfaces and bind to the
+en-US default unconditionally.
+
+Runtime enforcement (v1.2.2, advisory). The MCP runtime now detects
+likely non-en-US content in `task` and `prompt` fields using two
+conservative signals (diacritic count and a pt-BR-specific lexeme
+list). When detected, a non-blocking advisory `task_language_warning` /
+`prompt_language_warning` field is attached to the response, carrying:
+
+```
+{
+  "suspected_language": "non-en-us",
+  "confidence": "low" | "medium" | "high",
+  "signals": { "diacritics_count": N, "lexemes_matched": [...] },
+  "spec_reference": "spec v4.14 §6.10",
+  "recovery_hint": "reformulate_in_en_us",
+  "recovery_advice": "<concrete instruction>"
+}
+```
+
+Current behavior: warn-only — the call proceeds. The operator may
+observe false-positive rate and tighten to hard-reject in a future
+version once the signal calibration is field-validated.
+
+Caller obligation when warning is emitted. The caller SHOULD
+reformulate the next round's prompt in en-US even if the current call
+proceeded. Repeated `prompt_language_warning` entries in a session
+are an audit signal that the caller is propagating chat-language drift.
+
 ---
 
 ### 6.11 Transport-aware model-check discipline (NEW in v4.9)

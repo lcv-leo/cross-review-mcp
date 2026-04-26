@@ -11,7 +11,42 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — F2/F3/F5/F6 from `docs/external-audit-2026-04-26-gemini.md` deferred for v1.3+: success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification.)
+- (em aberto — F2/F3/F5/F6 from `docs/external-audit-2026-04-26-gemini.md` deferred for v1.3+: success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+
+---
+
+## [1.2.2] — 2026-04-26
+
+**Peer-exchange language enforcement (B+C) per §6.10.1 clarification.** Field-evidence: a Gemini-initiated session opened `ask_peers` with a pt-BR prompt mirroring the operator-facing chat language, violating spec §6.10. Operator request: implement both tool-description directive (B) and runtime detection (C) so the boundary between operator-facing chat language and peer-exchange language stops getting crossed.
+
+### Adicionado — runtime detection (C, advisory)
+- **`detectPromptLanguageDrift(text)`** in `src/server.js`: two conservative signals — diacritic count (≥4 chars from `áéíóúâêîôûãõàèìòùç` set) OR pt-BR-specific lexeme matches (≥3 distinct from `PT_BR_LEXEMES` list). Returns `null` when clean OR `{ suspected_language: 'non-en-us', confidence: 'low'|'medium'|'high', signals: { diacritics_count, lexemes_matched, ... }, spec_reference, recovery_hint, recovery_advice }` when flagged.
+- **Wired into 3 handlers**:
+  - `session_init` validates `args.task` → `task_language_warning` field on response (when flagged).
+  - `ask_peer` validates `args.prompt` → `prompt_language_warning` field on response.
+  - `ask_peers` validates `args.prompt` → `prompt_language_warning` field on response.
+  - Each emits a structured log line: `prompt language drift detected { confidence, diacritics, lexemes }`.
+- **Warn-only behavior**: the call ALWAYS proceeds; the warning is purely advisory. Operator observation period to calibrate false-positive rate before any tightening to hard-reject.
+- **Excluded surfaces**: `escalate_to_operator.question`/`context` (operator-facing per §6.10 exception a) and `session_finalize.reason` (short convention string) — NOT validated.
+
+### Adicionado — tool descriptions (B, instructive)
+- **`session_init`, `ask_peer`, `ask_peers`** descriptions all carry a new "PROMPT LANGUAGE (spec v4.14 §6.10)" block stating: "peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content to en-US before submission. Runtime emits a non-blocking advisory `task_language_warning`/`prompt_language_warning` when non-en-US text is detected; current behavior is warn-only but future versions may hard-reject."
+- Caller LLMs read tool descriptions on every call → high-signal channel for the contract.
+
+### Adicionado — spec
+- **`docs/workflow-spec.md` §6.10.1 (NEW clarification, no version bump)**: "Caller responsibility — operator chat language MUST NOT propagate to peer exchange". Cites the field-evidence event, restates §6.10 default, records the v1.2.2 runtime advisory mode, and pins the caller obligation when the warning is emitted.
+
+### Adicionado — operator docs
+- **`AGENTS.md`** new mandatory directive bullet covering §6.10 + §6.10.1 enforcement.
+
+### Adicionado — tests (5 new smoke steps)
+- **§6.10 detector unit (4 steps)**: clean en-US not flagged (including technical with identifiers); loanwords with 1-2 diacritics under threshold; canonical pt-BR offending prompt IS flagged with full payload (suspected_language, confidence, signals, spec_reference, recovery_hint); lexeme-only path (no diacritics) flags at threshold of 3 distinct matches; type-shape rejections (null/empty/non-string → null); thresholds + lexeme list exported for tuning.
+- **§6.10 anti-drift (1 step)**: asserts `session_init`/`ask_peer`/`ask_peers` descriptions all reference §6.10 + en-US + the canonical warning field name. Future edits that accidentally remove the directive fail the gate.
+
+### Validação
+- `npm test` 156 GREEN (was 151 in v1.2.1; +5 §6.10 detector + anti-drift steps).
+- `npm run check-models` GREEN.
+- Verified end-to-end: passing the canonical Gemini-style pt-BR prompt to `detectPromptLanguageDrift` returns the structured warning; clean en-US prompts and 2-diacritic loanword prompts return `null`.
 
 ---
 

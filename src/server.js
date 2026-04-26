@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -176,6 +176,69 @@ const PROBE_BUDGET_MS = Number(process.env.CROSS_REVIEW_PROBE_BUDGET_MS) || 2500
 function log(msg, meta) {
     const base = `[cross-review-mcp ${new Date().toISOString()} env_caller=${CALLER}] ${msg}`;
     process.stderr.write(meta ? `${base} ${JSON.stringify(meta)}\n` : `${base}\n`);
+}
+
+// v1.2.2 / spec v4.14 §6.10 enforcement — peer-exchange language drift detector.
+// Spec §6.10 requires en-US for peer exchange. Operator-facing chat may be in
+// any language (pt-BR is common in this workspace) but the caller is
+// responsible for translating to en-US before sending peer exchange. This
+// detector surfaces a non-blocking advisory when the prompt looks non-en-US,
+// using two conservative signals chosen to keep false-positive rate low on
+// technical en-US prompts that happen to contain identifiers or proper nouns.
+//
+// Signal 1 — diacritics: counts chars in the romance-language accented set.
+// English technical prose virtually never has these. Threshold 4 chars
+// allows occasional loanwords (e.g., "café", "naïve") without flagging.
+//
+// Signal 2 — pt-BR-specific lexemes: small list of high-confidence non-en-US
+// words / phrases that don't collide with en-US technical vocabulary.
+// Threshold 3 distinct matches.
+//
+// Either signal hitting threshold flags the prompt. Confidence is reported
+// (low / medium / high) so future tightening to hard-reject can use it.
+const PT_BR_DIACRITICS_RE = /[áéíóúâêîôûãõàèìòùçÁÉÍÓÚÂÊÎÔÛÃÕÀÈÌÒÙÇ]/g;
+const PT_BR_LEXEMES = Object.freeze([
+    'não', 'está', 'estão', 'são', 'foi',
+    'por favor', 'concentre-se', 'apenas', 'realize', 'retorne', 'concluir',
+    'auditoria', 'vulnerabilidades', 'injeção', 'vazamento', 'sincronização',
+    'concorrência', 'falhas', 'fragilidades', 'descobertas', 'arquivos',
+    'código', 'análise', 'servidor', 'segurança', 'robustez',
+]);
+const PROMPT_LANG_DIACRITICS_THRESHOLD = 4;
+const PROMPT_LANG_LEXEMES_THRESHOLD = 3;
+
+function detectPromptLanguageDrift(text) {
+    if (typeof text !== 'string' || !text.length) return null;
+    const diacriticsCount = (text.match(PT_BR_DIACRITICS_RE) || []).length;
+    const lower = text.toLowerCase();
+    const lexemesMatched = PT_BR_LEXEMES.filter((lex) => lower.includes(lex));
+    if (diacriticsCount < PROMPT_LANG_DIACRITICS_THRESHOLD
+        && lexemesMatched.length < PROMPT_LANG_LEXEMES_THRESHOLD) {
+        return null;
+    }
+    // Confidence calibration:
+    //  - low: just barely past threshold on either signal
+    //  - medium: clearly past on either OR both at threshold
+    //  - high: strong signal on either, OR both well past threshold
+    let confidence = 'low';
+    if (diacriticsCount >= 8 || lexemesMatched.length >= 6) confidence = 'medium';
+    if (diacriticsCount >= 16
+        || (diacriticsCount >= 8 && lexemesMatched.length >= 5)) {
+        confidence = 'high';
+    }
+    return {
+        suspected_language: 'non-en-us',
+        confidence,
+        signals: {
+            diacritics_count: diacriticsCount,
+            lexemes_matched: lexemesMatched,
+            diacritics_threshold: PROMPT_LANG_DIACRITICS_THRESHOLD,
+            lexemes_threshold: PROMPT_LANG_LEXEMES_THRESHOLD,
+        },
+        spec_reference: 'spec v4.14 §6.10',
+        recovery_hint: 'reformulate_in_en_us',
+        recovery_advice: 'Spec §6.10 mandates en-US for peer exchange. Operator-facing chat language does NOT propagate. Reformulate the prompt content in en-US before resubmitting. The current call proceeded (advisory mode, v1.2.2); future versions may hard-reject when confidence is high.',
+    };
 }
 
 // Append the tail directives the peer must honor: both structured
@@ -373,7 +436,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         {
             name: 'session_init',
             description:
-                "Create a new cross-review session directory under ~/.cross-review/<uuid>/. Returns the session_id. Also runs a parallel capability probe (probeChain) against all peers (target 20-25s, hard ceiling 30s) and persists the result as meta.capability_snapshot -- spec v4.11 section 6.9.3.\n\nCALLER RESOLUTION (spec v4.14 §6.20). The session's caller is resolved dynamically per call with this precedence:\n  1. `caller` arg (explicit override) — wins if valid (must be one of " + VALID_AGENTS.join('|') + ").\n  2. clientInfo.name from MCP initialize — substring-mapped to agent ('claude'→claude, 'gemini'→gemini, 'codex'→codex).\n  3. CROSS_REVIEW_CALLER env var — operator-configured fallback.\nThe resolved caller is recorded in `meta.caller` and `meta.caller_resolution = { source, client_info_name }` for audit. Peers are computed dynamically as VALID_AGENTS minus the resolved caller. Pass `caller` explicitly when an agent shares an MCP server instance with another (mixed-host setups) or when the env var doesn't reflect reality.",
+                "Create a new cross-review session directory under ~/.cross-review/<uuid>/. Returns the session_id. Also runs a parallel capability probe (probeChain) against all peers (target 20-25s, hard ceiling 30s) and persists the result as meta.capability_snapshot -- spec v4.11 section 6.9.3.\n\nPROMPT LANGUAGE (spec v4.14 §6.10). The `task` field is peer exchange — peer agents read it from meta.json. Peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content (this `task` field, and `prompt` in subsequent ask_peer/ask_peers calls) to en-US before submission. Runtime emits a non-blocking advisory `task_language_warning` when non-en-US text is detected (diacritics or pt-BR lexemes); current behavior is warn-only but future versions may hard-reject.\n\nCALLER RESOLUTION (spec v4.14 §6.20). The session's caller is resolved dynamically per call with this precedence:\n  1. `caller` arg (explicit override) — wins if valid (must be one of " + VALID_AGENTS.join('|') + ").\n  2. clientInfo.name from MCP initialize — substring-mapped to agent ('claude'→claude, 'gemini'→gemini, 'codex'→codex).\n  3. CROSS_REVIEW_CALLER env var — operator-configured fallback.\nThe resolved caller is recorded in `meta.caller` and `meta.caller_resolution = { source, client_info_name }` for audit. Peers are computed dynamically as VALID_AGENTS minus the resolved caller. Pass `caller` explicitly when an agent shares an MCP server instance with another (mixed-host setups) or when the env var doesn't reflect reality.",
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -502,7 +565,9 @@ Response payload includes peer_structured (clean JSON when the structured block 
 FAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): on spawn rejection, the response carries 'failure_class' + 'recovery_hint'. Caller MUST honor the hint:
 - 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): reformulate the prompt per 'reformulation_advice' and call ask_peer again in a new round. Repeat up to 5 attempts before escalating to operator. Do NOT abort the session.
 - 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): wait 'retry_after_seconds' and resubmit.
-- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.`,
+- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.
+
+PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content (this 'prompt' field, plus the session_init 'task' field) to en-US before submission. Runtime emits a non-blocking advisory 'prompt_language_warning' field on the response when non-en-US text is detected (diacritics or pt-BR lexemes); current behavior is warn-only but future versions may hard-reject when confidence is high.`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -524,7 +589,7 @@ FAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): on spawn rejection, the res
         },
         {
             name: 'ask_peers',
-            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are excluded from the round's unanimity denominator. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. Convergence (N-ary): caller READY AND every responded peer READY. This is the canonical tool for triangular sessions.\n\nFAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): each rejected peer carries a 'failure_class' and 'recovery_hint'. The caller MUST honor the hint:\n- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): the peer's provider rejected the prompt as potentially violating its usage policy (commonly OpenAI Codex on reasoning models). The 'reformulation_advice' field gives concrete guidance — avoid charged words ('adversarial', 'jailbreak', 'exploit', 'attack', 'bypass'), replace model-introspection prose with neutral technical descriptions, prefer 'response anomaly' over 'silent_downgrade', 'edge case' over 'adversarial input'. The caller MUST reformulate the prompt and call ask_peers again in a NEW round (do NOT abort the session). Repeat up to 5 reformulation attempts before escalating to the operator.\n- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): observe 'retry_after_seconds' and resubmit after the cooldown window.\n- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.\n\nThe session continues with whatever peers responded; reformulation recovers the missing peer in a follow-up round.`,
+            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are excluded from the round's unanimity denominator. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. Convergence (N-ary): caller READY AND every responded peer READY. This is the canonical tool for triangular sessions.\n\nFAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): each rejected peer carries a 'failure_class' and 'recovery_hint'. The caller MUST honor the hint:\n- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): the peer's provider rejected the prompt as potentially violating its usage policy (commonly OpenAI Codex on reasoning models). The 'reformulation_advice' field gives concrete guidance — avoid charged words ('adversarial', 'jailbreak', 'exploit', 'attack', 'bypass'), replace model-introspection prose with neutral technical descriptions, prefer 'response anomaly' over 'silent_downgrade', 'edge case' over 'adversarial input'. The caller MUST reformulate the prompt and call ask_peers again in a NEW round (do NOT abort the session). Repeat up to 5 reformulation attempts before escalating to the operator.\n- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): observe 'retry_after_seconds' and resubmit after the cooldown window.\n- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.\n\nThe session continues with whatever peers responded; reformulation recovers the missing peer in a follow-up round.\n\nPROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be en-US regardless of operator-facing chat language. The operator may converse with the caller in pt-BR or any other language, but the caller is responsible for translating peer-exchange content (this 'prompt' field, plus the session_init 'task' field) to en-US before submission. Runtime emits a non-blocking advisory 'prompt_language_warning' field on the response when non-en-US text is detected (diacritics or pt-BR lexemes); current behavior is warn-only but future versions may hard-reject when confidence is high.`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -585,6 +650,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                 const resolution = resolveCallerForSession(args.caller, clientInfo);
                 const callerForSession = resolution.caller;
                 const peersForSession = peersForCaller(callerForSession);
+                // Spec v4.14 §6.10 enforcement (advisory): detect non-en-US in
+                // task field. Warn-only — does not block session creation.
+                const taskLanguageWarning = detectPromptLanguageDrift(args.task);
+                if (taskLanguageWarning) {
+                    log('session_init: task language drift detected', {
+                        confidence: taskLanguageWarning.confidence,
+                        diacritics: taskLanguageWarning.signals.diacritics_count,
+                        lexemes: taskLanguageWarning.signals.lexemes_matched.length,
+                    });
+                }
                 const capabilitySnapshot = await runSessionInitProbe(peersForSession);
                 const id = store.initSession({
                     task: args.task,
@@ -605,24 +680,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     probe_duration_ms: Date.now() - t0,
                     probe_skipped: capabilitySnapshot.skipped === true,
                 });
+                const responsePayload = {
+                    session_id: id,
+                    caller: callerForSession,
+                    caller_resolution: {
+                        source: resolution.source,
+                        client_info_name: resolution.client_info_name,
+                    },
+                    peers: peersForSession,
+                    capability_snapshot: capabilitySnapshot,
+                };
+                if (taskLanguageWarning) {
+                    responsePayload.task_language_warning = taskLanguageWarning;
+                }
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify(
-                                {
-                                    session_id: id,
-                                    caller: callerForSession,
-                                    caller_resolution: {
-                                        source: resolution.source,
-                                        client_info_name: resolution.client_info_name,
-                                    },
-                                    peers: peersForSession,
-                                    capability_snapshot: capabilitySnapshot,
-                                },
-                                null,
-                                2
-                            ),
+                            text: JSON.stringify(responsePayload, null, 2),
                         },
                     ],
                 };
@@ -743,6 +818,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         );
                     }
                     const roundNum = (meta.rounds?.length || 0) + 1;
+                    // Spec v4.14 §6.10 enforcement (advisory).
+                    const promptLanguageWarning = detectPromptLanguageDrift(rawPrompt);
+                    if (promptLanguageWarning) {
+                        log('ask_peer: prompt language drift detected', {
+                            round: roundNum,
+                            confidence: promptLanguageWarning.confidence,
+                            diacritics: promptLanguageWarning.signals.diacritics_count,
+                            lexemes: promptLanguageWarning.signals.lexemes_matched.length,
+                        });
+                    }
                     const promptWithTail = attachPromptTailDirective(rawPrompt);
                     store.savePromptForRound(sessionId, roundNum, promptWithTail);
                     log(`ask_peer: spawning ${sessionLegacyPeer}`, {
@@ -903,6 +988,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         rate_limited_peers: rateLimitedPeers,
                                         protocol_violation: parsed.protocol_violation,
                                         convergence_health: convergenceHealth,
+                                        ...(promptLanguageWarning && { prompt_language_warning: promptLanguageWarning }),
                                         duration_ms: durationMs,
                                         content: stdout,
                                         stderr_tail: (stderr || '').slice(-600),
@@ -947,6 +1033,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         );
                     }
                     const roundNum = (meta.rounds?.length || 0) + 1;
+                    // Spec v4.14 §6.10 enforcement (advisory).
+                    const promptLanguageWarning = detectPromptLanguageDrift(rawPrompt);
+                    if (promptLanguageWarning) {
+                        log('ask_peers: prompt language drift detected', {
+                            round: roundNum,
+                            confidence: promptLanguageWarning.confidence,
+                            diacritics: promptLanguageWarning.signals.diacritics_count,
+                            lexemes: promptLanguageWarning.signals.lexemes_matched.length,
+                        });
+                    }
                     const promptWithTail = attachPromptTailDirective(rawPrompt);
                     store.savePromptForRound(sessionId, roundNum, promptWithTail);
                     log(`ask_peers: spawning ${metaPeers.join(',')}`, {
@@ -1153,6 +1249,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                         rate_limited_peers: rateLimitedPeers,
                                         protocol_violation: anyProtocolViolation,
                                         convergence_health: convergenceHealth,
+                                        ...(promptLanguageWarning && { prompt_language_warning: promptLanguageWarning }),
                                         duration_ms: durationMs,
                                     },
                                     null,
@@ -1219,4 +1316,9 @@ module.exports = {
     resolveCallerForSession,
     peersForCaller,
     legacyPeerForCaller,
+    // v1.2.2 / spec v4.14 §6.10 enforcement exports for smoke.
+    detectPromptLanguageDrift,
+    PT_BR_LEXEMES,
+    PROMPT_LANG_DIACRITICS_THRESHOLD,
+    PROMPT_LANG_LEXEMES_THRESHOLD,
 };

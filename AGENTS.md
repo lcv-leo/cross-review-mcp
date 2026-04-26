@@ -1,13 +1,13 @@
 # AGENTS.md — cross-review-mcp
 
-Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando neste repositório. Atualizado para runtime `v1.2.0` / spec `v4.14` (2026-04-26).
+Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando neste repositório. Atualizado para runtime `v1.2.2` / spec `v4.14` (2026-04-26).
 
 ---
 
 ## Fontes autoritativas
 
 1. **`docs/workflow-spec.md`** — spec normativa (atualmente v4.14, ~2200 linhas). Fonte única de verdade para protocolo, diretivas operacionais, schema do bloco estruturado, e regras de versionamento. Cobre §§1-8 (STATUS protocol, tooling parity, FOLLOW-UP vs blocker, Noise, mandatory companion tooling incluindo §6.11 transport-aware model-check, §6.12 strict-only convergence, §6.13 rate-limit class, §6.14 anti-hallucination, §7 conventions summary, §8 acceptance criteria).
-2. **`CHANGELOG.md`** — histórico de mudanças por versão (pt-BR para consumo do operator per §6.10 exception c). Releases listadas: v0.5.0-alpha → v1.2.0 (spec range v4.7 → v4.14).
+2. **`CHANGELOG.md`** — histórico de mudanças por versão (pt-BR para consumo do operator per §6.10 exception c). Releases listadas: v0.5.0-alpha → v1.2.2 (spec range v4.7 → v4.14).
 3. **`CONTRIBUTING.md`** — contrato público de contribuição com três classes (trivial / additive / normative), gates obrigatórios, e non-negotiables. Classe 3 (normative) exige trilateral cross-review session antes do merge.
 
 ## Diretivas mandatórias resumidas
@@ -23,6 +23,7 @@ Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando
 - **Prompt-flag recovery (§6.16 v4.12)**. When a peer rejection carries `failure_class='prompt_flagged_by_moderation'` + `recovery_hint='reformulate_and_retry'`, the caller MUST reformulate the prompt per the embedded `reformulation_advice` (avoid charged words like "adversarial"/"jailbreak"/"exploit"/"bypass"; replace model-introspection prose with neutral technical descriptions) and call `ask_peers`/`ask_peer` again in a NEW round — repeat up to 5 attempts. **Do NOT abort the session** — only the flagged peer's contribution for that round is missing, and reformulation recovers it. Aborting on a moderation flag is non-conforming behavior.
 - **Spec-version persistence (§6.17 v4.13)**. Every `session_init` records `meta.spec_version = SESSION_SPEC_VERSION` (currently `'v4.14'`). Audit consumers MUST tolerate the field's absence on pre-v4.13 sessions.
 - **Long-idle reconciliation + outcome_reason (§6.18 v4.13)**. New `session_sweep` tool finalizes long-idle sessions with `outcome: 'aborted'` + `outcome_reason: 'stale'`. 24h hard floor is non-overridable. Locked sessions are reported, never finalized. Dry-run is read-only. `session_finalize` accepts optional `reason` argument; conventions: `'stale'`, `'peer_scope_creep'`, `'moderation_flag_unresolved'`, `'operator_abort'`. Free-form string — open list.
+- **Peer-exchange language (§6.10 + §6.10.1 clarification v1.2.2)**. All `task` and `prompt` fields sent through `session_init`/`ask_peer`/`ask_peers` are peer exchange and MUST be en-US, regardless of the operator-facing chat language. The caller is responsible for translating peer-exchange content to en-US before submission. Operator chat in pt-BR (per §6.10 exception a) does NOT propagate. Runtime emits advisory `task_language_warning`/`prompt_language_warning` when non-en-US is detected (diacritics + pt-BR lexemes); warn-only currently, may tighten to hard-reject after field calibration.
 - **Convergence-health hint (§6.19 v4.13)**. Every `ask_peer`/`ask_peers` response carries `convergence_health: 'normal' | 'extended' | 'concerning'` (also persisted in `round.convergence_health`). PURELY ADVISORY: caller SHOULD consider stepping back at `concerning`, but no automatic action is triggered. v1.1.0 thresholds: extended at rounds≥6, concerning at rounds≥8 (round-count only; pattern detection deferred to future release).
 - **Em-revalidacao → aprovada**: entradas §8 com "aprovada bilateralmente/trilateralmente" só pós-`session_check_convergence`=true (spec §8 preâmbulo v4.5).
 - **Runtime immutable em bumps coordenados**: `src/server.js`, `src/lib/*.js`, `scripts/functional-smoke.js` mudam juntos.
@@ -30,7 +31,7 @@ Pointer global para agentes AI (Claude Code, Copilot, Gemini, Codex) trabalhando
 ## Gates obrigatórios
 
 ```bash
-npm test              # 151 smoke steps at v1.2.0 (count grows with each release; check the last line)
+npm test              # 156 smoke steps at v1.2.2 (count grows with each release; check the last line)
 npm run check-models  # OK: no drift, fallback_chain invariant holds, no staleness
 ```
 
