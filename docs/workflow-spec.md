@@ -2376,6 +2376,46 @@ invocations on a v1.2.3+ runtime. Test coverage:
 `scripts/functional-smoke.js::driveV414SessionLifecycleGuardsUnit` asserts
 the store-level invariants and anti-drift on the canonical handler text.
 
+#### 6.18.2 Per-file persistence size cap (NEW in v1.2.4, external audit round-3 F8 closure)
+
+Round-3 of the external audit flagged that `~/.cross-review/<id>/round-NN-prompt.md`
+and `round-NN-peer-X.md` files persisted to disk had no size limit, allowing
+an adversarial peer streaming a 100 MB response before timeout to fill the
+session-store directory before `session_sweep` could reclaim it.
+
+**Contract.** Implementations MUST cap per-file artifact writes at
+`PERSISTENCE_MAX_BYTES` (canonical: 64 KiB) for `savePromptForRound` and
+`savePeerResponse`. When the input exceeds the cap, the implementation MUST:
+
+1. Truncate the content at the byte boundary (Node's UTF-8 default discards
+   partial codepoints — acceptable; the marker documents that truncation
+   occurred so audit consumers see it explicitly).
+2. Append a marker of the form
+   `[... truncated by spec v4.14 §6.18.2 size cap: original=<N> bytes,
+   written=<MAX> bytes (label=<context>) ...]` so audit consumers can read
+   the exact original size + the context of what was truncated.
+3. Treat the truncation as expected behavior — NOT raise an error, NOT
+   abort the round. The peer's status block (which is short) lives at the
+   tail of the response and is preserved by parsing on the in-memory string
+   BEFORE truncation; only the on-disk artifact is capped.
+
+**Rationale.** 64 KiB covers >99% of observed peer responses in the
+60-session audit corpus; the few exceptions were single rounds with
+extreme prompt artifacts. The cap is preventive — it doesn't change
+common-case behavior but bounds the worst case.
+
+**Distinction from F6/F7 (deferred to v1.3+).** F8 caps the FINAL on-disk
+write; F6 (per-stream byte cap during spawn) and F7 (transactional spawn
+teardown) cap upstream resource use. F8 alone is sufficient to bound disk
+usage; F6/F7 would additionally bound RAM usage and zombie processes.
+
+**Test coverage.** `scripts/functional-smoke.js::driveV414PersistenceSizeCapUnit`
+asserts the under-cap pass-through path, the over-cap truncation path with
+audit marker, type-shape rejections, and the end-to-end behavior of
+`savePromptForRound` + `savePeerResponse` on oversize input.
+
+---
+
 ---
 
 ### 6.19 Convergence-health hint per round (NEW in v4.13)

@@ -57,7 +57,13 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.2.3';
+const VERSION = '1.2.4';
+
+// v1.2.4: release date for `server_info`. Updated alongside VERSION on each
+// ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
+// CHANGELOG.md `## [VERSION] — DATE` heading matches this constant, so a
+// bump that forgets to update either side fails the gate.
+const RELEASE_DATE = '2026-04-26';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -237,7 +243,15 @@ function detectPromptLanguageDrift(text) {
         },
         spec_reference: 'spec v4.14 §6.10',
         recovery_hint: 'reformulate_in_en_us',
-        recovery_advice: 'Spec §6.10 mandates en-US for peer exchange. Operator-facing chat language does NOT propagate. Reformulate the prompt content in en-US before resubmitting. The current call proceeded (advisory mode, v1.2.2); future versions may hard-reject when confidence is high.',
+        // v1.2.4: bind the version literal to the live VERSION constant so
+        // future bumps auto-update the operator-visible text. The previous
+        // hardcoded "v1.2.2" was caught by Gemini in a v1.2.3 runtime
+        // check — exactly the kind of stale-string drift the anti-drift
+        // smoke step (README ≡ VERSION) was meant to catch but didn't,
+        // because it only inspected README, not runtime payloads.
+        // driveV414PromptLanguageDetectorUnit now asserts this string
+        // contains server.VERSION so any future regression fails the gate.
+        recovery_advice: `Spec §6.10 mandates en-US for peer exchange. Operator-facing chat language does NOT propagate. Reformulate the prompt content in en-US before resubmitting. The current call proceeded (advisory mode, v${VERSION}); future versions may hard-reject when confidence is high.`,
     };
 }
 
@@ -433,6 +447,16 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+        {
+            name: 'server_info',
+            description:
+                "Return server identity and capability metadata: package name, runtime version (server.VERSION), release date (RELEASE_DATE constant — bumped each ship), active spec version (session-store.SESSION_SPEC_VERSION), full list of registered MCP tools, and authoritative links (GitHub repo / npm / spec doc). USE CASES: (a) callers reporting which version they're running for telemetry; (b) operators verifying which version is currently loaded in memory after a release — MCP servers do NOT auto-reload on package update, so a fresh `npm install` does not propagate to running instances until the MCP host is restarted, and `server_info` is the canonical way to confirm what the runtime is actually executing; (c) external auditors mapping findings to a specific runtime build. The tool has no side effects and does not require a session_id.",
+            inputSchema: {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+            },
+        },
         {
             name: 'session_init',
             description:
@@ -641,6 +665,43 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     log(`tool call: ${name}`);
     try {
         switch (name) {
+            case 'server_info': {
+                // v1.2.4 §6.18.2: server identity + capability metadata.
+                // Fully synchronous, no I/O, no session — returns the static
+                // pinning constants so callers and operators can confirm
+                // exactly what runtime is loaded in memory.
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify({
+                                ok: true,
+                                name: 'cross-review-mcp',
+                                version: VERSION,
+                                release_date: RELEASE_DATE,
+                                spec_version: store.SESSION_SPEC_VERSION,
+                                tools: [
+                                    'server_info',
+                                    'session_init',
+                                    'session_read',
+                                    'session_check_convergence',
+                                    'session_finalize',
+                                    'session_sweep',
+                                    'ask_peer',
+                                    'ask_peers',
+                                    'escalate_to_operator',
+                                ],
+                                links: {
+                                    repo: 'https://github.com/lcv-leo/cross-review-mcp',
+                                    npm: 'https://www.npmjs.com/package/@lcv-leo/cross-review-mcp',
+                                    spec: 'https://github.com/lcv-leo/cross-review-mcp/blob/main/docs/workflow-spec.md',
+                                    changelog: 'https://github.com/lcv-leo/cross-review-mcp/blob/main/CHANGELOG.md',
+                                },
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
             case 'session_init': {
                 const t0 = Date.now();
                 // Spec v4.14 §6.20: dynamic caller resolution per session.

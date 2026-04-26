@@ -11,7 +11,44 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — F1/F3/F4/F6 from external audit deferred for v1.3+: caller capability tokens, success-path output redaction, full Zod runtime validation, per-stream byte cap, lock token verification, shell:false migration. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+- (em aberto — F1/F3/F5/F6/F7 from external audits deferred for v1.3+: caller capability tokens, shell:false migration, StdioServerTransport buffer cap (upstream SDK), per-stream byte cap, transactional teardown of timed-out spawns. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
+
+---
+
+## [1.2.4] — 2026-04-26
+
+**External audit round-3 closure (F8 persistence cap) + stale-version-string fix + new `server_info` tool.** Round 3 of the Gemini-orchestrated audit (Codex-authored) ran against v1.2.2 source — most findings were already closed by v1.2.3 (F2 strict quorum) or earlier deferrals (F1/F3/F4/F6/F7). The single shippable new finding was F8: per-file persistence size cap. Bundled with two operator-flagged items: a stale `'v1.2.2'` literal Gemini caught in the v1.2.3 runtime payload, and a request for a metadata tool resolving runtime-vs-source version ambiguity.
+
+### Corrigido — stale version literal in runtime payload
+- **`src/server.js::detectPromptLanguageDrift`** had hardcoded `'(advisory mode, v1.2.2)'` in the `recovery_advice` text. After v1.2.3 ship the string was stale — caller saw `v1.2.2` even from a v1.2.3 server. Gemini caught it via runtime check on a v1.2.3 instance. Fixed: template literal binds to `${VERSION}` so future bumps auto-update.
+- **Anti-drift smoke**: `driveV414PromptLanguageDetectorUnit` now asserts `flagged.recovery_advice.includes(\`v\${server.VERSION}\`)`. Future regressions where someone hardcodes a version literal back fail the gate.
+
+### Adicionado — F8 closure: per-file persistence size cap (spec §6.18.2)
+- **`src/lib/session-store.js::clipForPersistence(content, label)`**: new helper that caps content at 64 KiB (`PERSISTENCE_MAX_BYTES`). Under-cap → pass-through. Over-cap → truncate at byte boundary + append marker `[... truncated by spec v4.14 §6.18.2 size cap: original=N bytes, written=64 KiB (label=...) ...]`.
+- Wired into **`savePromptForRound`** (caller-supplied prompt) and **`savePeerResponse`** (peer-supplied response). Both write paths previously persisted unbounded content to disk; an adversarial peer streaming 100MB before timeout would fill `~/.cross-review/` before `session_sweep` could reclaim it.
+- Audit transparency: the truncation marker IS the audit field — readers see exactly what was clipped + why + how to look up the original size.
+- **Spec §6.18.2 (NEW)**: codifies the cap, the marker format, and the rationale.
+
+### Adicionado — `server_info` tool (9th MCP tool)
+- **New tool `server_info`** (no-args, no-side-effect): returns `{ name, version, release_date, spec_version, tools: [...], links: { repo, npm, spec, changelog } }`.
+- **Use cases**: callers reporting which version they're running for telemetry; operators verifying runtime-vs-source after a release (since MCP servers don't auto-reload after package updates, an `npm install` does not propagate to running instances until the host is restarted — `server_info` is the canonical way to confirm what's actually executing); external auditors mapping findings to a specific runtime build.
+- **`RELEASE_DATE` constant** in `src/server.js` paired with `VERSION`. Anti-drift smoke asserts `RELEASE_DATE` matches the date in the CHANGELOG.md heading for the current `VERSION` (e.g., `## [1.2.4] — 2026-04-26`). Forgetting to update either side fails the gate.
+- Tools list count went from 8 → 9.
+
+### Adicionado — spec §6.18.2 (NEW)
+- Codifies the persistence size cap contract: 64 KiB hard limit per round-prompt and per-peer-response file; truncation MUST be marked in-content with original byte size; the marker is the audit field. No spec version bump (v4.14 stays).
+
+### Adicionado — tests (5 new smoke steps; 169 GREEN total)
+- F8 unit (clipForPersistence): under-cap pass-through; over-cap truncation + audit marker; type-shape rejections (null/non-string → empty).
+- F8 e2e: `savePromptForRound` + `savePeerResponse` cap oversize input on disk + preserve markers + headers.
+- server_info: `VERSION` + `RELEASE_DATE` constants present + ISO format.
+- Anti-drift: RELEASE_DATE matches CHANGELOG heading date for current VERSION.
+- Recovery-advice anti-drift: detector payload's `recovery_advice` contains `v${server.VERSION}` (catches the v1.2.2 stale-literal regression class).
+
+### Validação
+- `npm test` 169 GREEN (was 164 in v1.2.3; +5 for F8 + server_info + anti-drift).
+- `npm run check-models` GREEN.
+- Audit round-3 doc updated with full validation matrix.
 
 ---
 

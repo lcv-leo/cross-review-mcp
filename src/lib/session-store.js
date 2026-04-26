@@ -408,16 +408,49 @@ function saveFailedAttempt(sessionId, agent, reason, extras = {}) {
     return entry;
 }
 
+// v1.2.4 / spec v4.14 §6.18.2 (NEW): per-file size cap on session-store
+// persistence. Closes external audit round-3 F8: pre-v1.2.4 the per-round
+// prompt and peer-response files on disk had no size limit, so an adversarial
+// peer streaming a 100MB response could fill ~/.cross-review/ before
+// session_sweep reclaimed it. Threat model is trusted-host single-user but
+// the bound is cheap and protects against runaway model output too.
+//
+// Cap is 64 KiB per file (covers >99% of observed peer responses in the
+// 60-session audit corpus; the few exceptions were single rounds with
+// extreme prompt artifacts). When exceeded, the content is truncated at
+// the byte boundary AND a marker is appended naming the original byte size
+// so audit consumers see the truncation explicitly.
+const PERSISTENCE_MAX_BYTES = 64 * 1024;
+
+function clipForPersistence(content, label = 'content') {
+    if (typeof content !== 'string') {
+        return { content: '', truncated: false, original_bytes: 0 };
+    }
+    const originalBytes = Buffer.byteLength(content, 'utf8');
+    if (originalBytes <= PERSISTENCE_MAX_BYTES) {
+        return { content, truncated: false, original_bytes: originalBytes };
+    }
+    const buf = Buffer.from(content, 'utf8');
+    // Slice at byte boundary; toString('utf8') will discard partial last
+    // codepoint (Node's default). Acceptable for persistence — the marker
+    // documents that truncation happened.
+    const sliced = buf.subarray(0, PERSISTENCE_MAX_BYTES).toString('utf8');
+    const marker = `\n\n[... truncated by spec v4.14 §6.18.2 size cap: original=${originalBytes} bytes, written=${PERSISTENCE_MAX_BYTES} bytes (label=${label}) ...]\n`;
+    return { content: sliced + marker, truncated: true, original_bytes: originalBytes };
+}
+
 function savePromptForRound(sessionId, roundNum, prompt) {
     const fname = `round-${String(roundNum).padStart(2, '0')}-prompt.md`;
-    atomicWriteFile(path.join(sessionDir(sessionId), fname), String(prompt));
+    const clipped = clipForPersistence(String(prompt), `prompt round=${roundNum}`);
+    atomicWriteFile(path.join(sessionDir(sessionId), fname), clipped.content);
     return fname;
 }
 
 function savePeerResponse(sessionId, roundNum, peerAgent, content, status) {
     const fname = `round-${String(roundNum).padStart(2, '0')}-peer-${peerAgent}.md`;
     const header = `<!-- round=${roundNum} peer=${peerAgent} status=${status ?? 'MISSING'} -->\n`;
-    atomicWriteFile(path.join(sessionDir(sessionId), fname), header + String(content));
+    const clipped = clipForPersistence(String(content), `peer-response round=${roundNum} peer=${peerAgent}`);
+    atomicWriteFile(path.join(sessionDir(sessionId), fname), header + clipped.content);
     return fname;
 }
 
@@ -766,4 +799,7 @@ module.exports = {
     listStaleSessions,
     sweepStaleSessions,
     finalizeIfUnset,
+    // v1.2.4 / spec v4.14 §6.18.2 additions.
+    PERSISTENCE_MAX_BYTES,
+    clipForPersistence,
 };

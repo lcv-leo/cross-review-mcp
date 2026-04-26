@@ -171,7 +171,60 @@ The Gemini-orchestrated audit did not credit:
 The audit was operating on a snapshot that pre-dated these features,
 or didn't surface them as relevant to the audit scope.
 
-## Operator action item
+---
+
+# Audit round 3 — Gemini-orchestrated (Codex-authored), 2026-04-26 (after v1.2.3)
+
+A third audit was commissioned the same day, this time against v1.2.2 source
+(the auditor's snapshot was pre-v1.2.3, missing all the round-2 fixes
+that had just shipped). Findings repeat-rate is high.
+
+## Findings
+
+| # | Finding | Verified against v1.2.3 source | Outcome |
+|---|---|---|---|
+| F1 | Caller bypass — capability tokens | Repeat (round-1 + round-2). Theoretical in single-user threat model. v1.2.0 §6.20 dynamic resolution + meta.caller_resolution audit field provide partial mitigation auditor didn't credit. | **Defer P3** (already documented). |
+| F2 | Quórum exclui silenciosamente | **ALREADY FIXED in v1.2.3** (shipped ~1h before this audit). `computeConvergenceSnapshot` requires `rejectedCount === 0`, exposes `rejected_count` field, `buildConvergenceReason` surfaces "${N} peer(s) failed at spawn". Auditor MISS — snapshot was pre-v1.2.3. | **Confirmed FIXED.** |
+| F3 | shell:true | Repeat (round-1 + round-2). cmd from constants only. | **Defer P3** (already documented). |
+| F4 | Lock concurrency | **PARTIALLY FIXED in v1.2.3.** session_finalize + escalate_to_operator now acquire lock; finalizeIfUnset has re-read-before-write. Lock-token verification (PID-bound release) was the deferred sub-finding. | **Partial closure recorded.** |
+| F5 | StdioServerTransport unbounded | NEW. Real but resides in `@modelcontextprotocol/sdk` (upstream). Mitigation requires wrapper transport or SDK fork. Threat model is trusted local host. | **Defer (upstream issue).** |
+| F6 | stdout/stderr accumulation | Repeat. | **Defer P2** (already documented). |
+| F7 | Transactional spawn teardown | NEW. Real Windows edge case (taskkill zombie children). Bounded by 600s timeout + overlaps F6 mitigation. | **Defer P3.** |
+| **F8** | Per-file persistence size cap | NEW. Real defense-in-depth. Adversarial peer streaming 100 MB before timeout could fill session-store before sweeper reclaims. Easy fix. | **SHIPPED in v1.2.4.** |
+
+## v1.2.4 closure
+
+v1.2.4 closes:
+- **F8 per-file persistence cap**: `clipForPersistence(content, label)` helper
+  + 64 KiB cap + truncation marker citing `spec v4.14 §6.18.2`. Wired into
+  `savePromptForRound` + `savePeerResponse`. Spec §6.18.2 (NEW) codifies.
+- **Stale runtime literal** (operator + Gemini caught): `recovery_advice`
+  text "advisory mode, v1.2.2" was hardcoded in v1.2.3 source. Fix: template
+  literal `\`v\${VERSION}\`` so future bumps auto-update. New anti-drift
+  smoke binds `recovery_advice` to `server.VERSION`.
+- **`server_info` tool** (operator request): 9th MCP tool. Returns
+  `{ name, version, release_date, spec_version, tools, links }`. Resolves
+  the runtime-vs-source ambiguity that arises because MCP servers don't
+  auto-reload after package updates. New `RELEASE_DATE` constant + smoke
+  step asserting the constant matches the CHANGELOG.md heading date for
+  the current VERSION.
+
+## Yield assessment
+
+Round 3 had **lower yield** than rounds 1-2:
+- 1 finding already fixed in source 1h before audit landed (F2 — auditor's snapshot was stale).
+- 4 repeats (F1, F3, F4 partial, F6) — already in deferral matrix from rounds 1-2.
+- 3 genuinely new findings (F5, F7, F8). Of these:
+  - F5 deferred (upstream concern, requires SDK wrapper).
+  - F7 deferred (overlaps F6 mitigation, bounded by timeout).
+  - **F8 shipped** in v1.2.4.
+
+The pattern suggests the auditor is operating against stale snapshots
+and re-flagging items already triaged. To raise yield, future audits
+should be commissioned against tagged releases (e.g., v1.2.4 specifically)
+not against an undated source pull.
+
+## Operator action item (still open from rounds 1-2)
 
 Gemini CLI trust-directory issue persists in the audit environment:
 

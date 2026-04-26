@@ -110,6 +110,7 @@ async function driveServer(extraEnv = {}) {
             'ask_peer',
             'ask_peers',
             'escalate_to_operator',
+            'server_info',
             'session_check_convergence',
             'session_finalize',
             'session_init',
@@ -839,7 +840,118 @@ async function runAll() {
     all.push(...s53.results);
     const s54 = await driveV414SessionLifecycleGuardsUnit();
     all.push(...s54.results);
+    // v1.2.4 / spec v4.14 §6.18.2 + server_info tool.
+    const s55 = await driveV414PersistenceSizeCapUnit();
+    all.push(...s55.results);
+    const s56 = await driveV414ServerInfoUnit();
+    all.push(...s56.results);
     return all;
+}
+
+// v1.2.4 / spec v4.14 §6.18.2 — F8 closure: per-file persistence size cap.
+async function driveV414PersistenceSizeCapUnit() {
+    const results = [];
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/lib/session-store.js')];
+    const store = require('../src/lib/session-store.js');
+
+    // Under the cap → unchanged.
+    const small = 'short content';
+    const c1 = store.clipForPersistence(small, 'unit_under_cap');
+    assert(c1.truncated === false, '§6.18.2 F8: under-cap content NOT truncated');
+    assert(c1.content === small, '§6.18.2 F8: under-cap content preserved verbatim');
+    assert(c1.original_bytes === Buffer.byteLength(small, 'utf8'), '§6.18.2 F8: original_bytes reflects byte length');
+
+    // Over the cap → truncated + marker.
+    const overSize = store.PERSISTENCE_MAX_BYTES * 2;  // 128 KiB
+    const big = 'A'.repeat(overSize);  // ASCII 1 byte/char
+    const c2 = store.clipForPersistence(big, 'unit_over_cap');
+    assert(c2.truncated === true, '§6.18.2 F8: over-cap content marked truncated');
+    assert(c2.original_bytes === overSize, '§6.18.2 F8: original_bytes preserves true size');
+    assert(c2.content.length < overSize, '§6.18.2 F8: persisted content shorter than original');
+    assert(c2.content.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8: marker mentions spec section');
+    assert(c2.content.includes(`original=${overSize} bytes`), '§6.18.2 F8: marker names original byte count');
+    assert(c2.content.includes(`written=${store.PERSISTENCE_MAX_BYTES} bytes`), '§6.18.2 F8: marker names written byte count');
+    assert(c2.content.includes('label=unit_over_cap'), '§6.18.2 F8: marker preserves label for audit');
+    results.push({ step: 'v4.14 §6.18.2 F8: clipForPersistence under-cap pass-through + over-cap truncation with audit marker', ok: true });
+
+    // Type-shape: non-string → empty string + truncated=false.
+    const c3 = store.clipForPersistence(null, 'null_input');
+    assert(c3.content === '' && c3.truncated === false && c3.original_bytes === 0, '§6.18.2 F8: null input → empty content, not truncated');
+    const c4 = store.clipForPersistence(123, 'number_input');
+    assert(c4.content === '' && c4.truncated === false, '§6.18.2 F8: non-string input → empty content');
+    results.push({ step: 'v4.14 §6.18.2 F8: clipForPersistence type-shape rejections', ok: true });
+
+    // End-to-end via savePromptForRound + savePeerResponse: oversize input
+    // produces a written file capped at MAX + marker.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const sid = store.initSession({
+        task: 'F8 e2e test',
+        artifacts: [],
+        callerAgent: 'claude',
+        peers: ['codex', 'gemini'],
+    });
+    try {
+        const oversize = 'B'.repeat(overSize);
+        const fname = store.savePromptForRound(sid, 1, oversize);
+        const filePath = path.join(store.sessionDir(sid), fname);
+        const written = fs.readFileSync(filePath, 'utf8');
+        const writtenBytes = Buffer.byteLength(written, 'utf8');
+        assert(writtenBytes < overSize, '§6.18.2 F8 e2e: prompt file on disk is smaller than oversized input');
+        assert(written.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8 e2e: prompt file contains the truncation marker');
+
+        const peerFname = store.savePeerResponse(sid, 1, 'codex', oversize, 'READY');
+        const peerPath = path.join(store.sessionDir(sid), peerFname);
+        const peerWritten = fs.readFileSync(peerPath, 'utf8');
+        assert(Buffer.byteLength(peerWritten, 'utf8') < overSize, '§6.18.2 F8 e2e: peer-response file on disk smaller than oversized input');
+        assert(peerWritten.includes('<!-- round=1 peer=codex'), '§6.18.2 F8 e2e: peer-response file preserves header');
+        assert(peerWritten.includes('truncated by spec v4.14 §6.18.2 size cap'), '§6.18.2 F8 e2e: peer-response file contains marker');
+    } finally {
+        try { fs.rmSync(store.sessionDir(sid), { recursive: true, force: true }); } catch {}
+    }
+    results.push({ step: 'v4.14 §6.18.2 F8: savePromptForRound + savePeerResponse cap oversize input on disk + preserve marker', ok: true });
+
+    return { results };
+}
+
+// v1.2.4 §6.18.2 — server_info tool + RELEASE_DATE / CHANGELOG sync (anti-drift).
+async function driveV414ServerInfoUnit() {
+    const results = [];
+    const fs = require('node:fs');
+    const path = require('node:path');
+    process.env.CROSS_REVIEW_TEST_IMPORT = '1';
+    process.env.CROSS_REVIEW_CALLER = 'claude';
+    delete require.cache[require.resolve('../src/server.js')];
+    const server = require('../src/server.js');
+
+    // Direct invocation via stdio is exercised by the tools/list expansion
+    // earlier in driveServer. Here we focus on RELEASE_DATE consistency
+    // with CHANGELOG.md (anti-drift) plus the constant exports.
+    assert(typeof server.VERSION === 'string' && /^\d+\.\d+\.\d+$/.test(server.VERSION), 'v4.14 server_info: VERSION format X.Y.Z');
+    // RELEASE_DATE: must be ISO date YYYY-MM-DD.
+    const releaseDateMatch = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'server.js'), 'utf8').match(/^const RELEASE_DATE\s*=\s*['"]([0-9]{4}-[0-9]{2}-[0-9]{2})['"]/m);
+    assert(releaseDateMatch !== null, 'v4.14 server_info: RELEASE_DATE constant present + ISO format');
+    const releaseDate = releaseDateMatch[1];
+    results.push({ step: 'v4.14 server_info: VERSION + RELEASE_DATE constants present + ISO format', ok: true });
+
+    // RELEASE_DATE must match the heading for the current VERSION in
+    // CHANGELOG.md. Format: `## [X.Y.Z] — YYYY-MM-DD`.
+    const changelog = fs.readFileSync(path.resolve(__dirname, '..', 'CHANGELOG.md'), 'utf8');
+    const headingRe = new RegExp(`^##\\s*\\[${server.VERSION.replace(/\./g, '\\.')}\\][^\\n]*?(\\d{4}-\\d{2}-\\d{2})`, 'm');
+    const headingMatch = changelog.match(headingRe);
+    assert(
+        headingMatch !== null,
+        `v4.14 anti-drift: CHANGELOG.md has heading for v${server.VERSION} with date`
+    );
+    assert(
+        headingMatch[1] === releaseDate,
+        `v4.14 anti-drift: CHANGELOG date for v${server.VERSION} (${headingMatch[1]}) === RELEASE_DATE constant (${releaseDate})`
+    );
+    results.push({ step: 'v4.14 anti-drift: RELEASE_DATE constant matches CHANGELOG date for current VERSION', ok: true });
+
+    return { results };
 }
 
 // v1.2.3 / external audit round-2 F2 — strict quorum: rejected_count counts AGAINST.
@@ -1020,7 +1132,16 @@ async function driveV414PromptLanguageDetectorUnit() {
     assert(flagged.spec_reference === 'spec v4.14 §6.10', '§6.10 detector: spec reference attached');
     assert(flagged.recovery_hint === 'reformulate_in_en_us', '§6.10 detector: recovery_hint attached');
     assert(['low', 'medium', 'high'].includes(flagged.confidence), '§6.10 detector: confidence is one of low/medium/high');
-    results.push({ step: 'v4.14 §6.10 detector: clean en-US not flagged + canonical pt-BR offender IS flagged with full payload', ok: true });
+    // v1.2.4 anti-drift: recovery_advice must reference the live
+    // server.VERSION (caught by external Gemini runtime check that the
+    // hardcoded "v1.2.2" was still in v1.2.3 source). Future regressions
+    // where someone pastes a hardcoded version literal back will fail here.
+    assert(
+        typeof flagged.recovery_advice === 'string'
+            && flagged.recovery_advice.includes(`v${server.VERSION}`),
+        `v4.14 §6.10 anti-drift: recovery_advice contains current runtime VERSION (v${server.VERSION})`
+    );
+    results.push({ step: 'v4.14 §6.10 detector: clean en-US not flagged + canonical pt-BR offender IS flagged with full payload + recovery_advice references runtime VERSION', ok: true });
 
     // Lexeme-only path: prompt without diacritics but with multiple pt-BR lexemes (defi-decomposed style).
     const ptNoAccents = 'concentre-se nas vulnerabilidades das falhas e fragilidades dos arquivos do servidor';
