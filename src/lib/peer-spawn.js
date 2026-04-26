@@ -227,6 +227,38 @@ function detectSpawnRateLimit(stderr) {
     };
 }
 
+// Provider-shaped moderation-flag lexemes. Distinct from rate-limit because
+// the recovery is "reformulate the prompt and retry", not "wait and retry".
+// OpenAI Codex CLI emits these on reasoning-model moderation rejections.
+const PROMPT_FLAG_LEXEMES = Object.freeze([
+    'your prompt was flagged as potentially violating',
+    'flagged as potentially violating our usage policy',
+    'invalid prompt: your prompt was flagged',
+]);
+
+function matchPromptFlagLexeme(text) {
+    if (typeof text !== 'string' || !text.length) return null;
+    const lower = text.toLowerCase();
+    for (const lex of PROMPT_FLAG_LEXEMES) {
+        if (lower.includes(lex)) return lex;
+    }
+    return null;
+}
+
+// Spawn-level prompt-moderation detection: non-zero exit + stderr lexeme match.
+// Returns null or { detection_source:'spawn', lexeme_matched, docs_url }.
+// Recovery contract is recorded by the server.js handler as
+// failure_class='prompt_flagged_by_moderation' + recovery_hint='reformulate_and_retry'.
+function detectPromptModerationFlag(stderr) {
+    const lexeme = matchPromptFlagLexeme(stderr);
+    if (!lexeme) return null;
+    return {
+        detection_source: 'spawn',
+        lexeme_matched: lexeme,
+        docs_url: 'https://platform.openai.com/docs/guides/reasoning#advice-on-prompting',
+    };
+}
+
 // Forensic-only (v0.6.0-alpha): extract Codex CLI stderr banner line
 // `model: <id>`. Unparsed beyond the trim; non-authoritative. CLI banner as
 // authoritative attestation is deferred to v0.7+.
@@ -1040,6 +1072,7 @@ function spawnPeer(peerAgent, prompt, options = {}) {
                 // classify via saveFailedAttempt with failure_class =
                 // 'rate_limit_induced_response' + retry_after_seconds.
                 const rl = detectSpawnRateLimit(stderr);
+                const flagged = detectPromptModerationFlag(stderr);
                 const err = new Error(
                     `peer ${peerAgent} exit ${code}: ${stderr.slice(-400)}`
                 );
@@ -1047,6 +1080,7 @@ function spawnPeer(peerAgent, prompt, options = {}) {
                 err.stderr_tail = stderr.slice(-400);
                 err.transport_descriptor = descriptor;
                 if (rl) err.spawn_rate_limit = rl;
+                if (flagged) err.prompt_flagged = flagged;
                 return reject(err);
             }
             // spec v4 section 6.9.2: peer_model must be persisted per
@@ -1115,4 +1149,8 @@ module.exports = {
     extractRetryAfterSeconds,
     detectSpawnRateLimit,
     extractCodexAttestedModelRaw,
+    // v1.0.5 additions: prompt-moderation flag detection + recovery contract.
+    PROMPT_FLAG_LEXEMES,
+    matchPromptFlagLexeme,
+    detectPromptModerationFlag,
 };

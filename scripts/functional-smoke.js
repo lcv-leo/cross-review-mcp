@@ -1223,6 +1223,36 @@ async function driveV6RateLimitUnit() {
     assert(peerSpawn.detectSpawnRateLimit('benign error') === null, 'v4.9 Item C: no match on benign stderr');
     results.push({ step: 'v4.9 Item C: detectSpawnRateLimit output shape + null paths', ok: true });
 
+    // v4.12 §6.16: prompt moderation flag detection.
+    const flaggedStderr = 'peer codex exit 1: your prompt was flagged as potentially violating our usage policy. Please try again with a different prompt: https://platform.openai.com/docs/guides/reasoning#advice-on-prompting';
+    const promptFlag = peerSpawn.detectPromptModerationFlag(flaggedStderr);
+    assert(
+        promptFlag && promptFlag.detection_source === 'spawn' && promptFlag.docs_url.includes('platform.openai.com/docs/guides/reasoning'),
+        'v4.12 §6.16: detectPromptModerationFlag composed shape'
+    );
+    assert(
+        promptFlag.lexeme_matched === 'your prompt was flagged as potentially violating',
+        'v4.12 §6.16: lexeme_matched picks the canonical phrase'
+    );
+    assert(peerSpawn.detectPromptModerationFlag('benign error') === null, 'v4.12 §6.16: no match on benign stderr');
+    assert(peerSpawn.detectPromptModerationFlag('') === null, 'v4.12 §6.16: empty stderr → null');
+    assert(peerSpawn.detectPromptModerationFlag(null) === null, 'v4.12 §6.16: null stderr → null');
+    // Disjoint from rate-limit: same stderr should not match both.
+    assert(
+        peerSpawn.detectSpawnRateLimit(flaggedStderr) === null,
+        'v4.12 §6.16: moderation-flag stderr does not match rate-limit lexemes'
+    );
+    assert(
+        peerSpawn.detectPromptModerationFlag('HTTP 429 Too Many Requests') === null,
+        'v4.12 §6.16: rate-limit stderr does not match moderation lexemes'
+    );
+    // Lexeme set is exported for inspection / extension.
+    assert(
+        Array.isArray(peerSpawn.PROMPT_FLAG_LEXEMES) && peerSpawn.PROMPT_FLAG_LEXEMES.length >= 3,
+        'v4.12 §6.16: PROMPT_FLAG_LEXEMES exported and non-trivial'
+    );
+    results.push({ step: 'v4.12 §6.16: detectPromptModerationFlag detection + disjointness from rate-limit', ok: true });
+
     // Response-level guardrail via parsePeerOutputs: ALL THREE required.
     // Case: short body + no status block + provider lexeme → detected.
     const shortRL = 'HTTP 429 rate limit';

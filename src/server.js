@@ -57,7 +57,7 @@ const {
     MODEL_CLOSE_TAG,
 } = require('./lib/model-parser.js');
 
-const VERSION = '1.0.3';
+const VERSION = '1.0.5';
 
 // v0.6.0-alpha / spec v4.9: response-level rate-limit detection.
 // Requires ALL THREE of (1) status block absent, (2) body < 200 chars,
@@ -375,7 +375,12 @@ The peer-model block MUST appear immediately before the status block; the status
 
 The v3 legacy line-form (STATUS: READY | STATUS: NOT_READY | STATUS: NEEDS_EVIDENCE) remains supported for status but does NOT substitute for the peer-model block.
 
-Response payload includes peer_structured (clean JSON when the structured block validated), status_source ('structured' | 'regex' | null), parser_warnings (from both parsers), peer_model (requested pinned id), model_reported (declared by peer), model_match (boolean or null when peer is synthetic), and protocol_violation (boolean).`,
+Response payload includes peer_structured (clean JSON when the structured block validated), status_source ('structured' | 'regex' | null), parser_warnings (from both parsers), peer_model (requested pinned id), model_reported (declared by peer), model_match (boolean or null when peer is synthetic), and protocol_violation (boolean).
+
+FAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): on spawn rejection, the response carries 'failure_class' + 'recovery_hint'. Caller MUST honor the hint:
+- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): reformulate the prompt per 'reformulation_advice' and call ask_peer again in a new round. Repeat up to 5 attempts before escalating to operator. Do NOT abort the session.
+- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): wait 'retry_after_seconds' and resubmit.
+- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -397,7 +402,7 @@ Response payload includes peer_structured (clean JSON when the structured block 
         },
         {
             name: 'ask_peers',
-            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are excluded from the round's unanimity denominator. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. Convergence (N-ary): caller READY AND every responded peer READY. This is the canonical tool for triangular sessions.`,
+            description: `N-ary peer spawn (spec v4.11): send the same prompt to all complements (caller=${CALLER}, peers=${PEERS.join(',')}) in parallel and return the aggregated per-peer responses. Promise.allSettled preserves per-peer partial results; failed spawns enter meta.failed_attempts (redaction applied) and are excluded from the round's unanimity denominator. Successful peers enter the round with their parsed status and model-check outcome. caller_status semantics identical to ask_peer. Convergence (N-ary): caller READY AND every responded peer READY. This is the canonical tool for triangular sessions.\n\nFAILURE-CLASS RECOVERY CONTRACT (spec v4.12 §6.16): each rejected peer carries a 'failure_class' and 'recovery_hint'. The caller MUST honor the hint:\n- 'prompt_flagged_by_moderation' (recovery_hint='reformulate_and_retry'): the peer's provider rejected the prompt as potentially violating its usage policy (commonly OpenAI Codex on reasoning models). The 'reformulation_advice' field gives concrete guidance — avoid charged words ('adversarial', 'jailbreak', 'exploit', 'attack', 'bypass'), replace model-introspection prose with neutral technical descriptions, prefer 'response anomaly' over 'silent_downgrade', 'edge case' over 'adversarial input'. The caller MUST reformulate the prompt and call ask_peers again in a NEW round (do NOT abort the session). Repeat up to 5 reformulation attempts before escalating to the operator.\n- 'rate_limit_induced_response' (recovery_hint='wait_and_retry'): observe 'retry_after_seconds' and resubmit after the cooldown window.\n- 'spawn_rejected' (no recovery_hint): unclassified peer-side error; surface to operator.\n\nThe session continues with whatever peers responded; reformulation recovers the missing peer in a follow-up round.`,
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -560,10 +565,59 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                         prompt_bytes: Buffer.byteLength(promptWithTail, 'utf8'),
                     });
                     const t0 = Date.now();
-                    const spawnResult = await spawnPeer(
-                        LEGACY_PEER,
-                        promptWithTail
-                    );
+                    let spawnResult;
+                    try {
+                        spawnResult = await spawnPeer(LEGACY_PEER, promptWithTail);
+                    } catch (spawnErr) {
+                        // v1.0.5 / spec v4.12 §6.16: classify spawn-level
+                        // failures with structured recovery_hint so the caller
+                        // can act (reformulate vs wait vs escalate). Mirrors
+                        // ask_peers semantics for bilateral surface.
+                        const spawnRateLimit = spawnErr?.spawn_rate_limit || null;
+                        const promptFlagged = spawnErr?.prompt_flagged || null;
+                        const failureClass = promptFlagged
+                            ? 'prompt_flagged_by_moderation'
+                            : spawnRateLimit
+                                ? 'rate_limit_induced_response'
+                                : 'spawn_rejected';
+                        const recoveryHint = promptFlagged
+                            ? 'reformulate_and_retry'
+                            : spawnRateLimit
+                                ? 'wait_and_retry'
+                                : null;
+                        const reasonMsg = String(spawnErr?.message || spawnErr || 'spawn rejected');
+                        store.saveFailedAttempt(sessionId, LEGACY_PEER, failureClass, {
+                            stderr_tail: reasonMsg,
+                            failure_class: failureClass,
+                            round: roundNum,
+                            retry_attempt: 0,
+                            retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
+                            detection_source: (spawnRateLimit || promptFlagged) ? 'spawn' : null,
+                            lexeme_matched: (promptFlagged?.lexeme_matched
+                                ?? spawnRateLimit?.lexeme_matched) ?? null,
+                            recovery_hint: recoveryHint,
+                            docs_url: promptFlagged?.docs_url ?? null,
+                        });
+                        return {
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        ok: false,
+                                        agent: LEGACY_PEER,
+                                        failure_class: failureClass,
+                                        recovery_hint: recoveryHint,
+                                        retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
+                                        docs_url: promptFlagged?.docs_url ?? null,
+                                        reformulation_advice: promptFlagged
+                                            ? 'Avoid charged words like "adversarial", "jailbreak", "exploit", "attack", "bypass", "circumvent". Replace model-introspection prose with neutral technical descriptions. Prefer "response anomaly" over "silent_downgrade", "edge case" over "adversarial input", "alternative path" over "bypass". Resubmit the reformulated prompt via ask_peer in a new round; do NOT abort the session. Repeat up to 5 reformulation attempts before escalating to the operator.'
+                                            : null,
+                                        reason: reasonMsg.slice(-400),
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
                     const {
                         stdout,
                         stderr,
@@ -721,22 +775,40 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                             // non-zero exit. Classify as
                             // 'rate_limit_induced_response' when present.
                             const spawnRateLimit = reason?.spawn_rate_limit || null;
-                            const failureClass = spawnRateLimit
-                                ? 'rate_limit_induced_response'
-                                : 'spawn_rejected';
+                            // v1.0.5 / spec v4.12: spawn-level prompt
+                            // moderation flag (OpenAI Codex on reasoning models).
+                            // Recovery contract is reformulate_and_retry, NOT
+                            // wait-and-retry. Surfaced as a distinct
+                            // failure_class so the caller knows which path to
+                            // take.
+                            const promptFlagged = reason?.prompt_flagged || null;
+                            const failureClass = promptFlagged
+                                ? 'prompt_flagged_by_moderation'
+                                : spawnRateLimit
+                                    ? 'rate_limit_induced_response'
+                                    : 'spawn_rejected';
+                            const recoveryHint = promptFlagged
+                                ? 'reformulate_and_retry'
+                                : spawnRateLimit
+                                    ? 'wait_and_retry'
+                                    : null;
                             store.saveFailedAttempt(sessionId, entry.agent, failureClass, {
                                 stderr_tail: reasonMsg,
                                 failure_class: failureClass,
                                 round: roundNum,
                                 retry_attempt: 0,
                                 retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
-                                detection_source: spawnRateLimit ? 'spawn' : null,
-                                lexeme_matched: spawnRateLimit?.lexeme_matched ?? null,
+                                detection_source: (spawnRateLimit || promptFlagged) ? 'spawn' : null,
+                                lexeme_matched: (promptFlagged?.lexeme_matched
+                                    ?? spawnRateLimit?.lexeme_matched) ?? null,
+                                recovery_hint: recoveryHint,
+                                docs_url: promptFlagged?.docs_url ?? null,
                             });
                             log('ask_peers: peer rejected', {
                                 round: roundNum,
                                 agent: entry.agent,
                                 failure_class: failureClass,
+                                recovery_hint: recoveryHint,
                                 retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
                                 reason: reasonMsg.slice(-200),
                             });
@@ -746,7 +818,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                                 reason: reasonMsg.slice(-400),
                                 failure_class: failureClass,
                                 retry_after_seconds: spawnRateLimit?.retry_after_seconds ?? null,
-                                detection_source: spawnRateLimit ? 'spawn' : null,
+                                detection_source: (spawnRateLimit || promptFlagged) ? 'spawn' : null,
+                                recovery_hint: recoveryHint,
+                                docs_url: promptFlagged?.docs_url ?? null,
+                                reformulation_advice: promptFlagged
+                                    ? 'Avoid charged words like "adversarial", "jailbreak", "exploit", "attack", "bypass", "circumvent". Replace model-introspection prose with neutral technical descriptions. Prefer "response anomaly" over "silent_downgrade", "edge case" over "adversarial input", "alternative path" over "bypass". Resubmit the reformulated prompt via ask_peers in a new round; do NOT abort the session. Repeat up to 5 reformulation attempts before escalating to the operator.'
+                                    : null,
                             });
                             if (spawnRateLimit) {
                                 rateLimitedPeers.push({

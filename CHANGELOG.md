@@ -11,7 +11,37 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 ## [Unreleased]
 
 ### Adicionado
-- (em aberto — próximos follow-ups pós-v1.0 listados em `docs/workflow-spec.md` §8 e nas memórias do workspace; nenhum bloqueio para v1.x patch/minor.)
+- (em aberto — próximos follow-ups pós-v1.0.5 rastreados em `docs/session-audit-2026-04-26.md` §5: spec_version recording in meta.json, chatgpt-pro-backend smoke test, orphan session sweep, convergence-health hint.)
+
+---
+
+## [1.0.5] — 2026-04-26
+
+**§6.16 prompt-flag recovery contract + 60-session audit.** Field evidence from three sessions in 2026-04-24 (`6cf09af3`, `70d1d349`, `fca13b80`) showed OpenAI Codex on reasoning models (gpt-5 family) rejecting prompts with `your prompt was flagged as potentially violating our usage policy`. Runtime classified these as generic `spawn_rejected`, the session went to `outcome: aborted`, and the codex contribution was lost. Spec v4.12 §6.16 + runtime now classifies + provides reformulation guidance + binds the caller to retry instead of aborting.
+
+### Adicionado — runtime
+- **`src/lib/peer-spawn.js`**: `PROMPT_FLAG_LEXEMES` constant (3 canonical OpenAI-stderr substrings), `matchPromptFlagLexeme(text)`, `detectPromptModerationFlag(stderr)`. Returns `{ detection_source: 'spawn', lexeme_matched, docs_url }` or `null`. Disjoint from `detectSpawnRateLimit` — same stderr never matches both.
+- **`src/lib/peer-spawn.js`** `spawnPeer.on('close')`: when exit≠0, attaches `err.prompt_flagged` (parallel to `err.spawn_rate_limit`) so the rejection error carries structured info.
+- **`src/server.js`** `ask_peers` and `ask_peer` handlers: classify spawn rejections with `failure_class: 'prompt_flagged_by_moderation'` (precedence over `rate_limit_induced_response`) + `recovery_hint: 'reformulate_and_retry'` + embedded `reformulation_advice` text + `docs_url`. Persisted into `meta.failed_attempts[]`. Bilateral surface (`ask_peer`) gained an inline try/catch matching N-ary semantics — previously the rejection fell to the global error catch and lost structured info.
+- **Tool descriptions** for `ask_peer` and `ask_peers` extended with the FAILURE-CLASS RECOVERY CONTRACT block: caller MUST honor `recovery_hint`; reformulate up to 5 attempts before escalating; do NOT abort the session on a moderation flag.
+
+### Adicionado — spec
+- **`docs/workflow-spec.md`** §6.16 (NEW in v4.12): trigger description, distinction from rate-limit (§6.13), normative contract for detect/classify/surface/persist + caller obligation, canonical reformulation guidance (charged-word replacements), anti-pattern (aborting = non-conforming), out-of-scope notes (auto-reformulation inside MCP deferred), observability hooks.
+- **§0l (NEW)**: executive summary of v4.11 → v4.12 delta.
+- **Spec banner** bumped from v4.11 to v4.12.
+
+### Adicionado — operator docs
+- **`AGENTS.md`** new mandatory directive: "Prompt-flag recovery (§6.16 v4.12)" — caller MUST reformulate and retry, do NOT abort. Spec range bumped to v4.12.
+
+### Adicionado — audit
+- **`docs/session-audit-2026-04-26.md`** (NEW): structural audit of all 60 sessions in `~/.cross-review/`. Headlines: 60 sessions, 177 rounds, 80% converged, 8.3% aborted (1 of 5 was moderation flag — fixed by §6.16). Findings catalog with priorities + target releases for §2.4 (spec_version in meta), §2.5 (chatgpt-pro-backend bypass smoke), §2.2 (orphan session sweep), §2.3 (convergence-health hint).
+
+### Adicionado — tests
+- **`scripts/functional-smoke.js`** new step 126: `detectPromptModerationFlag` shape + lexeme match + null paths + disjointness from `detectSpawnRateLimit` + `PROMPT_FLAG_LEXEMES` export.
+
+### Validação
+- `npm test` 126 GREEN (was 125, +1 for new detector test).
+- `npm run check-models` GREEN (no drift, fallback chain invariant holds).
 
 ---
 
