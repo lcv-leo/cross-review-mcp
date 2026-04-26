@@ -15,6 +15,22 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.0.4] — 2026-04-26
+
+**Workspace parity sweep + Pages enablement.** Documentação/CI puramente aditivo, sem mudança runtime, fechando paridade com os outros 8 repos públicos do workspace (admin-app, mainsite-app, calculadora-app, astrologo-app, oraculo-financeiro, adminapps, apphub, mtasts-motor).
+
+### Adicionado
+- **`THIRDPARTY.md`** — inventário completo de dependências npm + licenças (MIT-compatible).
+- **`.github/CODEOWNERS`** — `* @lcv-leo` como owner default (paridade com os outros repos do workspace).
+
+### Alterado
+- **`.github/workflows/pages.yml`** — `actions/configure-pages@v6.0.0` passou a declarar `with: enablement: true` para idempotência em forks/clones que ainda não tenham GitHub Pages habilitado (corrige `Get Pages site failed... HTTP 404` em primeiro run).
+
+### Validação
+- Trilateral cross-review session `08bc6b9a-f3f5-434d-8276-2b21f562a843` (caller + Codex + Gemini) **READY** após 6 rodadas: paridade confirmada nos 9 repos públicos em security baseline, repo features, workflow perms, branch rulesets, Pages deployment, CodeQL Default Setup, 0 alertas abertos.
+
+---
+
 ## [1.0.3] — 2026-04-25
 
 **Security patch: ReDoS hardening em parser helpers.** GitHub CodeQL (`js/polynomial-redos`, severity `high`) flagou dois sites usando `/\s+$/` para right-trim em texto de input não-controlado vindo de peers. Em inputs com cluster de whitespace seguido de não-whitespace (`"   X"`-style) o regex tem complexidade O(N²) por backtracking polinomial; `String.prototype.trimEnd()` resolve em O(N) com semântica idêntica. Frozen surfaces v1.x preservados (zero observable change para inputs válidos).
