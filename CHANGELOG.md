@@ -15,6 +15,43 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.2.13] — 2026-04-27
+
+**Packaging fix: include `reviewer-configs/` in the npm tarball.**
+
+**Bug:** the `package.json:files` manifest enumerated `src/` + license + readme + changelog + security + code-of-conduct, but omitted the `reviewer-configs/` directory at the repo root. Two files inside that directory — `peer-exclusions.json` and `reviewer-minimal.mcp.json` — are read at runtime by `src/lib/peer-spawn.js:78-80`:
+
+```
+const CONFIGS_DIR = path.resolve(__dirname, "..", "..", "reviewer-configs");
+const EXCLUSIONS_PATH = path.join(CONFIGS_DIR, "peer-exclusions.json");
+const REVIEWER_MCP_JSON = path.join(CONFIGS_DIR, "reviewer-minimal.mcp.json");
+```
+
+Locally-cloned dev installs were unaffected because the source repository contains the directory. But every user who installed via `npm install -g @lcv-leo/cross-review-mcp` (the documented install path on README:11) hit `ENOENT: no such file or directory, open '...reviewer-configs/peer-exclusions.json'` at the first peer-spawn attempt, blocking `ask_peer` and `ask_peers` for codex and gemini transports.
+
+**Discovery:** this caller (claude-code) hit the failure path on 2026-04-27 while running a mandatory pre-commit cross-review for an unrelated `admin-app` sanitizer fix (`session_id: 050bb2be-e900-4329-b9ae-dbf9adb8f5f2`). The capability_snapshot showed codex with `failure_class: "spawn_error"` and a `stderr_tail` containing the exact ENOENT path — a clear smoking gun pointing at the missing files. The immediate workaround was a manual file copy from the local source repo into the installed location, which unblocked the admin-app cross-review but obviously does not fix any other host.
+
+**Fix scope:**
+- `package.json:files` array gains `"reviewer-configs/"` between `"src/"` and the license/docs entries. The next `npm publish` will include the directory in the tarball.
+- No code change. No spec change. No behavioral change for users who installed from a local clone (`git clone` + `npm link`).
+
+**Fix verification:**
+- `package.json:version` and `src/server.js:VERSION` both bumped 1.2.12 → 1.2.13. `RELEASE_DATE` bumped 2026-04-26 → 2026-04-27. `package-lock.json` resolves to the new version.
+- README "Current release" line and version-history table top row reflect v1.2.13. CHANGELOG heading matches the constants.
+- Smoke (`npm test`) re-asserted GREEN.
+
+**Cross-review:** trilateral session opened post-edits to validate the packaging change before tag/push (operator hard-gate `feedback_cross_review_mandatory_pre_commit.md`).
+
+### Adicionado
+
+- `package.json:files` manifest gains `"reviewer-configs/"`.
+
+### Corrigido
+
+- `npm install -g @lcv-leo/cross-review-mcp` now ships `reviewer-configs/peer-exclusions.json` + `reviewer-configs/reviewer-minimal.mcp.json` (was: ENOENT on every peer-spawn attempt for users installed from npm).
+
+---
+
 ## [1.2.12] — 2026-04-26
 
 **Bugfix + spec tightening: `CROSS_REVIEW_CALLER` env-var fallback removed entirely; caller is resolved dynamically per session via `args.caller > clientInfo.name` only (spec v4.14 §6.20 simplification).**
