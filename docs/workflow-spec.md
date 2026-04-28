@@ -2810,6 +2810,148 @@ evidence-rigor discipline.
 
 ---
 
+### 6.22 Lock & session resilience (NEW in v1.2.15)
+
+**Trigger.** Operator-reported incident on 2026-04-27: a cross-review-mcp
+instance was killed by the host (Claude Code reload) mid-`ask_peers`,
+leaving the session's `.lock` directory present on disk with no live
+holder process. The next attempt to operate on that session_id was
+refused with "session locked by another process (TTL 1h)" until either
+manual `rm -rf .lock` or the 1h TTL passed. Two such locks accumulated
+in `~/.cross-review/` over a single working session. Concurrently, the
+peer-CLI subprocesses spawned for the killed session continued running
+(orphans), consuming API tokens until the LLM call finished — the
+per-peer 30min watchdog could not fire because the parent process that
+held the watchdog timer was already dead.
+
+**Contract — eight items (A–H).** v1.2.15 closes the resilience gap
+with a layered defense; each item is independently verifiable and
+backward-compatible.
+
+**(A) Configurable lock TTL.** `LOCK_TTL_MS` is read from the
+`CROSS_REVIEW_LOCK_TTL_MS` env var at module-load time. Default
+reduced from 60min (pre-v1.2.15) to 5min, aligned with the typical
+duration of a trilateral round (~3-5min). Invalid or absent env values
+fall back to default. Operator override is permitted upward (extended
+debug sessions) or downward (aggressive recovery), with positive
+integer validation.
+
+**(B) Startup lock sweep.** `sweepStaleLocksOnBoot()` walks every
+`~/.cross-review/<uuid>/` whose name matches `UUID_RE`, reads each
+present `.lock/info.json`, and removes the lock when the holder pid is
+dead OR when `acquired_at` exceeds `LOCK_TTL_MS`. Idempotent + best
+effort: errors are logged to stderr but never propagate. Wired in
+`server.js main()` via `setImmediate` AFTER `server.connect(transport)`
+so the MCP `initialize` handshake response is never delayed by the
+sweep work. Returns `{ scanned, removed }` for telemetry. Test/CI
+environments opt out via `CROSS_REVIEW_SKIP_BOOT_SWEEPS=1`.
+
+**(C) PID liveness probe in acquireLock.** `isPidAlive(pid)` is a
+cross-platform helper: Windows uses `tasklist /fi "PID eq <n>" /nh /fo
+csv` parse; POSIX uses `process.kill(pid, 0)` (signal 0 is a
+"is process alive" probe with no actual signal delivery). Conservative
+on uncertainty: probe failure (permission denied, exec timeout) returns
+`true` so the TTL still acts as backstop. Inside `acquireLock`, when an
+existing `.lock/info.json` is found:
+1. If holder pid is dead → release immediately, log audit line.
+2. Else if `age > LOCK_TTL_MS` → release as stale, log audit line.
+3. Else refuse — holder is alive and recent.
+
+This makes the recovery time after host-kill bounded by the next
+`acquireLock` call rather than the full TTL.
+
+**(D) Pending-session discovery in session_init.**
+`findPendingSessionsForCaller(caller, limit=5)` walks `~/.cross-review/`
+for sessions where `meta.caller === caller`, `meta.outcome === null`,
+and last activity timestamp older than `PENDING_THRESHOLD_MS` (default
+10min, env override `CROSS_REVIEW_PENDING_THRESHOLD_MS`). Returns up
+to `limit` rows oldest-first, each with: `session_id`, truncated
+`task` (≤120 chars), `rounds_completed`, `last_activity` (ISO),
+`idle_seconds`, and `locked` (boolean indicating if `.lock` is
+present). The `session_init` response includes a `pending_sessions`
+field when the array is non-empty (advisory; absent when empty). The
+new session is fully usable regardless — caller decides whether to
+finalize the pending sessions, resume them, or ignore.
+
+**(E) Half-written round detection + archive.**
+`findHalfWrittenRounds(sessionId, expectedPeers)` scans the session
+directory for rounds where `round-NN-prompt.md` exists but no
+`round-NN-peer-<agent>.md` for any expected peer. Such rounds were
+written when `ask_peers` persisted the prompt as the first step but
+the round never completed (parent killed mid-spawn). Returns
+`[{ round, missing_peers }]`. `archiveOrphanedRoundPrompt(sessionId,
+roundNum)` renames `round-NN-prompt.md` to
+`round-NN-prompt.orphan-<iso-ts>.md`, preserving the audit trail while
+allowing the active round numbering to advance cleanly. `ask_peers`
+runs this scan + archive AFTER acquiring the lock and BEFORE
+`savePromptForRound`, so each new round starts on a clean slate.
+Partial rounds (at least one peer responded) are NOT archived — the
+caller still has actionable state.
+
+**(F) Round-level + per-peer timeouts.** `spawnPeer`'s per-peer
+hard timeout is configurable via `CROSS_REVIEW_PEER_TIMEOUT_MS` (or
+per-call `options.timeoutMs`); default reduced from 30min →
+**8min**, aligned with observed real-world peer latency (3-9min
+typical). New `spawnPeers` round-level timeout via
+`CROSS_REVIEW_ROUND_TIMEOUT_MS` (default **12min**) wraps the entire
+batch with a wall-clock cap. On round-timeout, unresolved peers are
+force-resolved with `failure_class: 'round_timeout'`,
+`recovery_hint: 'retry_round'`, `round_timeout_ms: <ms>`. Peers that
+responded in time keep their results; the partial round survives the
+timeout. The round-timeout watchdog uses `setTimeout(..., ms).unref()`
+so it never holds the event loop alive past a successful all-resolved
+case.
+
+**(G) Configurable session_sweep min-age floor.** `SWEEP_MIN_AGE_MS`
+is read from `CROSS_REVIEW_SWEEP_MIN_AGE_MS` env var at module-load
+time. Default unchanged at 24h (the v4.13 footgun guard).
+Override values below 60s are clamped up to 60s to keep some
+footgun protection; override is logged at boot to make the
+relaxation visible. Use case: aggressive cleanup of stuck sessions
+immediately after a host-kill incident; reset the env var after
+recovery.
+
+**(H) Startup orphan peer-CLI sweep.** `sweepOrphanPeerProcesses()`
+enumerates running processes via `Get-CimInstance Win32_Process`
+(Windows) or `ps -eo pid,ppid,args` (POSIX), each via
+`util.promisify(exec)` so the boot path stays responsive while OS
+enumeration is in flight. For each process whose command-line argv
+matches a peer-CLI signature (`codex exec`, `gemini -p`/`--prompt`,
+`claude code`/`--print`/`-p`), the parent is looked up:
+- If the process is a descendant of the current cross-review-mcp pid →
+  skip (active management).
+- Else if parent is a live Node process running
+  `cross-review-mcp/src/server.js` → skip (sibling instance).
+- Else (parent dead OR alive but unrelated) → classify as orphan and
+  kill via `killProcessTree({ pid })` (Windows: `taskkill /T /F`;
+  POSIX: best-effort `proc.kill('SIGKILL')`).
+
+Conservative: ambiguous parent metadata is treated as legitimate
+operator usage. The per-peer timeout still bounds future orphan
+windows; this sweep cleans up the historical residue. Wired alongside
+the lock sweep in `server.js main()` via `setImmediate`. Returns
+`{ scanned, killed, candidates }` for telemetry. Opt-out via
+`CROSS_REVIEW_SKIP_BOOT_SWEEPS=1`.
+
+**Backwards compatibility.** All defaults are conservative and
+strictly more permissive than pre-v1.2.15: shorter TTLs are released
+auto-recovery faster, shorter timeouts surface failures faster, the
+new helpers are pure additions. Pre-v1.2.15 sessions remain readable
+without migration. The only externally-observable schema change is
+the optional `pending_sessions` field on `session_init` response,
+which is absent when the resolved caller has no pending sessions.
+
+**Test coverage.** 8 unit-level smoke invariants in `functional-smoke.js`
+(one per item), executed under `CROSS_REVIEW_SKIP_BOOT_SWEEPS=1` so
+the orphan sweep doesn't scan the host process table during CI. Each
+invariant validates structural presence + behavior on synthetic
+fixtures; end-to-end behavioral coverage of the boot-sweep path is
+deferred to a future v1.2.x release that adds a child-process harness
+which spawns a parent-mcp + peer pair, kills the parent, and asserts
+the next mcp boot cleans the orphan.
+
+---
+
 ## 7. Summary of conventions for immediate use (UPDATED through v4.10)
 
 | Convention | Caller action |

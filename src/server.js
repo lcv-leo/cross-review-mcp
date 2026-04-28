@@ -50,6 +50,7 @@ const {
 	authoritativeModelAttestationAvailable,
 	matchRateLimitLexeme,
 	extractRetryAfterSeconds,
+	sweepOrphanPeerProcesses,
 } = require("./lib/peer-spawn.js");
 const { parsePeerResponse } = require("./lib/status-parser.js");
 const {
@@ -59,7 +60,7 @@ const {
 	MODEL_CLOSE_TAG,
 } = require("./lib/model-parser.js");
 
-const VERSION = "1.2.14";
+const VERSION = "1.2.15";
 
 // v1.2.4: release date for `server_info`. Updated alongside VERSION on each
 // ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
@@ -800,6 +801,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 					probe_duration_ms: Date.now() - t0,
 					probe_skipped: capabilitySnapshot.skipped === true,
 				});
+				// v1.2.15 / spec §6.22 Item D — surface dangling sessions
+				// belonging to the same resolved caller. Advisory only:
+				// the new session is fully usable regardless. Caller
+				// decides whether to finalize or resume the pending ones.
+				const pendingSessions =
+					store.findPendingSessionsForCaller(callerForSession);
 				const responsePayload = {
 					session_id: id,
 					caller: callerForSession,
@@ -812,6 +819,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 				};
 				if (taskLanguageWarning) {
 					responsePayload.task_language_warning = taskLanguageWarning;
+				}
+				if (pendingSessions.length > 0) {
+					responsePayload.pending_sessions = pendingSessions;
+					log("session_init: pending sessions detected", {
+						caller: callerForSession,
+						count: pendingSessions.length,
+						oldest_idle_seconds: pendingSessions[0].idle_seconds,
+					});
 				}
 				return {
 					content: [
@@ -1304,7 +1319,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 				}
 				if (!store.acquireLock(sessionId)) {
 					throw new Error(
-						`session ${sessionId} is currently locked by another process (TTL 1h); retry shortly or clear ~/.cross-review/${sessionId}/.lock if stale`,
+						`session ${sessionId} is currently locked by another process (lock TTL ${Math.round(store.LOCK_TTL_MS / 1000)}s; PID-liveness checked first per spec §6.22). Retry shortly or clear ~/.cross-review/${sessionId}/.lock if stale.`,
 					);
 				}
 				try {
@@ -1334,6 +1349,27 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 						throw new Error(
 							`ask_peers has no peers to spawn (session caller='${sessionCaller}' is the only agent in VALID_AGENTS).`,
 						);
+					}
+					// v1.2.15 / spec §6.22 Item E — half-written round detection.
+					// If the previous attempt at this session was killed mid-round
+					// (host reload, crash), a `round-NN-prompt.md` may exist on
+					// disk without any peer-response files AND without a `.lock`.
+					// Archive those orphaned prompts so the round numbering
+					// advances cleanly and the audit trail shows what happened.
+					const orphans = store.findHalfWrittenRounds(sessionId, metaPeers);
+					if (orphans.length > 0) {
+						for (const orphan of orphans) {
+							const archivedPath = store.archiveOrphanedRoundPrompt(
+								sessionId,
+								orphan.round,
+							);
+							log("ask_peers: archived orphaned round prompt", {
+								session: sessionId,
+								round: orphan.round,
+								missing_peers: orphan.missing_peers,
+								archived_to: archivedPath,
+							});
+						}
 					}
 					const roundNum = (meta.rounds?.length || 0) + 1;
 					// Spec v4.14 §6.10 enforcement (advisory).
@@ -1386,18 +1422,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 							// Volumetric (not semantic) → recovery_hint=null
 							// (caller MAY retry as transient).
 							const streamOverflow = reason?.stream_overflow || null;
+							// v1.2.15 / spec §6.22 Item F — round_timeout
+							// classification. spawnPeers attaches the field
+							// directly on the rejection reason when the
+							// round-level watchdog fires before per-peer
+							// resolution. Preserve through ask_peers so
+							// callers can decide retry vs escalate.
+							const roundTimedOut = reason?.failure_class === "round_timeout";
 							const failureClass = promptFlagged
 								? "prompt_flagged_by_moderation"
 								: streamOverflow
 									? "stream_overflow"
-									: spawnRateLimit
-										? "rate_limit_induced_response"
-										: "spawn_rejected";
+									: roundTimedOut
+										? "round_timeout"
+										: spawnRateLimit
+											? "rate_limit_induced_response"
+											: "spawn_rejected";
 							const recoveryHint = promptFlagged
 								? "reformulate_and_retry"
-								: spawnRateLimit
-									? "wait_and_retry"
-									: null;
+								: roundTimedOut
+									? "retry_round"
+									: spawnRateLimit
+										? "wait_and_retry"
+										: null;
 							store.saveFailedAttempt(sessionId, entry.agent, failureClass, {
 								stderr_tail: reasonMsg,
 								failure_class: failureClass,
@@ -1413,6 +1460,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 									null,
 								recovery_hint: recoveryHint,
 								docs_url: promptFlagged?.docs_url ?? null,
+								// v1.2.15 / spec §6.22 Item F: surface the
+								// configured round-level timeout when it
+								// fired so audit consumers can correlate
+								// the failure with the env-configured cap.
+								round_timeout_ms: roundTimedOut
+									? (reason?.round_timeout_ms ?? null)
+									: null,
 							});
 							log("ask_peers: peer rejected", {
 								round: roundNum,
@@ -1434,6 +1488,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 									spawnRateLimit || promptFlagged ? "spawn" : null,
 								recovery_hint: recoveryHint,
 								docs_url: promptFlagged?.docs_url ?? null,
+								// v1.2.15 / spec §6.22 Item F: round_timeout
+								// surfaces the configured cap to callers so
+								// they can decide between retry_round vs
+								// escalate vs raise CROSS_REVIEW_ROUND_TIMEOUT_MS.
+								round_timeout_ms: roundTimedOut
+									? (reason?.round_timeout_ms ?? null)
+									: null,
 								reformulation_advice: promptFlagged
 									? 'Avoid charged words like "adversarial", "jailbreak", "exploit", "attack", "bypass", "circumvent". Replace model-introspection prose with neutral technical descriptions. Prefer "response anomaly" over "silent_downgrade", "edge case" over "adversarial input", "alternative path" over "bypass". Resubmit the reformulated prompt via ask_peers in a new round; do NOT abort the session. Repeat up to 5 reformulation attempts before escalating to the operator.'
 									: null,
@@ -1613,6 +1674,55 @@ async function main() {
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
 	log("stdio transport connected");
+
+	// v1.2.15 / spec §6.22 Items B + H — boot-time resilience sweeps.
+	// Run fire-and-forget AFTER transport is connected so they don't
+	// delay the MCP initialize handshake (orphan-peer sweep on Windows
+	// takes 3-8s via PowerShell Get-CimInstance, exceeding typical
+	// host-side initialize timeouts). Sweeps are fully async — they
+	// don't block the event loop while OS enumeration is in flight.
+	//
+	// (B) lock sweep: remove `.lock` directories whose holder pid is dead
+	// or whose acquired_at exceeds LOCK_TTL_MS. Self-heals after host
+	// reload / SIGKILL of the previous server instance.
+	// (H) orphan peer sweep: kill peer-CLI subprocesses (codex / gemini /
+	// claude) whose parent process is dead or is not a current
+	// cross-review-mcp instance. Recovers token/CPU consumption from
+	// abandoned LLM calls left behind by the previous instance.
+	//
+	// Test/CI may opt out via CROSS_REVIEW_SKIP_BOOT_SWEEPS=1 (the orphan
+	// sweep enumerates the entire process table — heavy, not relevant
+	// to most smoke tests).
+	if (process.env.CROSS_REVIEW_SKIP_BOOT_SWEEPS !== "1") {
+		setImmediate(() => {
+			try {
+				const lockSweep = store.sweepStaleLocksOnBoot();
+				if (lockSweep.scanned > 0) {
+					log("startup: lock sweep complete", lockSweep);
+				}
+			} catch (err) {
+				process.stderr.write(
+					`[cross-review-mcp] startup lock sweep error: ${err?.message || err}\n`,
+				);
+			}
+		});
+		setImmediate(() => {
+			sweepOrphanPeerProcesses()
+				.then((orphanSweep) => {
+					if (orphanSweep.scanned > 0) {
+						log("startup: orphan peer sweep complete", {
+							scanned: orphanSweep.scanned,
+							killed: orphanSweep.killed,
+						});
+					}
+				})
+				.catch((err) => {
+					process.stderr.write(
+						`[cross-review-mcp] startup orphan sweep error: ${err?.message || err}\n`,
+					);
+				});
+		});
+	}
 }
 
 if (!TEST_IMPORT) {

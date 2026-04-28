@@ -63,6 +63,7 @@ async function driveServer(extraEnv = {}) {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			...extraEnv,
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -261,6 +262,7 @@ async function driveAskPeerMatrix() {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: "READY",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -392,6 +394,7 @@ async function driveProtocolViolation() {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: "MISSING",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -471,6 +474,7 @@ async function oneShotAskPeer(stubValue, callerStatus = "NOT_READY") {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: stubValue,
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -1179,6 +1183,7 @@ async function drivePeerModelAndWarningsPersisted() {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
 		shell: false,
@@ -1381,6 +1386,23 @@ async function runAll() {
 	all.push(...s61.results);
 	const s62 = await driveV414TaskkillFallbackUnit();
 	all.push(...s62.results);
+	// v1.2.15 / spec §6.22 — Lock & Session Resilience (Items A-H).
+	const s63 = await driveV1215LockTtlEnvOverrideUnit();
+	all.push(...s63.results);
+	const s64 = await driveV1215PidLivenessProbeUnit();
+	all.push(...s64.results);
+	const s65 = await driveV1215PendingSessionsHelperUnit();
+	all.push(...s65.results);
+	const s66 = await driveV1215HalfWrittenRoundUnit();
+	all.push(...s66.results);
+	const s67 = await driveV1215RoundTimeoutUnit();
+	all.push(...s67.results);
+	const s68 = await driveV1215SweepMinAgeOverrideUnit();
+	all.push(...s68.results);
+	const s69 = await driveV1215OrphanSweepHelpersUnit();
+	all.push(...s69.results);
+	const s70 = await driveV1215BootSweepWiringUnit();
+	all.push(...s70.results);
 	return all;
 }
 
@@ -3862,6 +3884,7 @@ async function driveV7EscalateToOperatorUnit() {
 		...process.env,
 		CROSS_REVIEW_CALLER: "claude",
 		CROSS_REVIEW_SKIP_PROBE: "1",
+		CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 	};
 	delete childEnv.CROSS_REVIEW_TEST_IMPORT;
 	const proc = spawn("node", [SERVER], {
@@ -4479,6 +4502,7 @@ async function driveAskPeersNAry() {
 			...process.env,
 			CROSS_REVIEW_CALLER: "claude",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: "STRUCTURED:READY",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -4578,6 +4602,7 @@ async function driveAskPeerGeminiCallerRejected() {
 			...process.env,
 			CROSS_REVIEW_CALLER: "gemini",
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: "STRUCTURED:READY",
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -4656,6 +4681,7 @@ async function runServerAskPeer(
 			...process.env,
 			CROSS_REVIEW_CALLER: callerAgent,
 			CROSS_REVIEW_SKIP_PROBE: "1",
+			CROSS_REVIEW_SKIP_BOOT_SWEEPS: "1",
 			CROSS_REVIEW_PEER_STUB: stubValue,
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -4847,11 +4873,11 @@ async function driveSessionStoreUnit() {
 	assert(!redacted.includes(jwtFixture.slice(0, 10)), "redact: JWT");
 	assert(!redacted.includes(githubFixture.slice(0, 8)), "redact: GitHub gh");
 	assert(!redacted.includes(slackFixture.slice(0, 12)), "redact: Slack xox");
+	assert(!redacted.includes(envFixture), "redact: env-style PRIVATE_API_KEY");
 	assert(
-		!redacted.includes(envFixture),
-		"redact: env-style PRIVATE_API_KEY",
+		!redacted.includes(`alice:${userPassFixture}`),
+		"redact: URL userinfo",
 	);
-	assert(!redacted.includes(`alice:${userPassFixture}`), "redact: URL userinfo");
 	results.push({
 		step: "session-store.redactSensitive masks OpenAI/Google/JWT/GitHub/Slack/env-style/URL-userinfo (R14)",
 		ok: true,
@@ -4925,8 +4951,7 @@ async function driveSessionStoreUnit() {
 
 	// saveFailedAttempt with secret in stderr_tail -> redacted.
 	store.saveFailedAttempt(id, "gemini", "rate_limit_exceeded", {
-		stderr_tail:
-			`Error: quota exceeded. token=${["sk", "-"].join("")}${"1".repeat(20)}; retry later.`,
+		stderr_tail: `Error: quota exceeded. token=${["sk", "-"].join("")}${"1".repeat(20)}; retry later.`,
 		failure_class: "rate_limit_exceeded",
 		round: 1,
 		retry_attempt: 0,
@@ -5355,6 +5380,414 @@ async function drivePeerSpawnRealPathModel() {
 		ok: true,
 	});
 
+	return { results };
+}
+
+// ============================================================
+// v1.2.15 / spec §6.22 — Lock & Session Resilience (Items A-H)
+// ============================================================
+
+// Item A: LOCK_TTL_MS configurable via env, default 5min.
+async function driveV1215LockTtlEnvOverrideUnit() {
+	const results = [];
+	const helperScript = `
+		const orig = process.env.CROSS_REVIEW_LOCK_TTL_MS;
+		delete process.env.CROSS_REVIEW_LOCK_TTL_MS;
+		delete require.cache[require.resolve('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}')];
+		const def = require('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}').LOCK_TTL_MS;
+		process.env.CROSS_REVIEW_LOCK_TTL_MS = '12345';
+		delete require.cache[require.resolve('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}')];
+		const ovr = require('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}').LOCK_TTL_MS;
+		if (orig === undefined) delete process.env.CROSS_REVIEW_LOCK_TTL_MS;
+		else process.env.CROSS_REVIEW_LOCK_TTL_MS = orig;
+		console.log(JSON.stringify({ default: def, override: ovr }));
+	`;
+	const { spawnSync } = require("node:child_process");
+	const r = spawnSync("node", ["-e", helperScript], { encoding: "utf8" });
+	const out = JSON.parse(r.stdout.trim());
+	assert(
+		out.default === 5 * 60 * 1000,
+		`§6.22 Item A: LOCK_TTL_MS default is 5min (got ${out.default})`,
+	);
+	assert(
+		out.override === 12345,
+		`§6.22 Item A: LOCK_TTL_MS env override applied (got ${out.override})`,
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item A: LOCK_TTL_MS default 5min + CROSS_REVIEW_LOCK_TTL_MS env override",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item C: PID liveness probe — returns true for current process, false for clearly-dead pid.
+async function driveV1215PidLivenessProbeUnit() {
+	const results = [];
+	const store = require("../src/lib/session-store.js");
+	assert(
+		store.isPidAlive(process.pid) === true,
+		"§6.22 Item C: isPidAlive(self) === true",
+	);
+	// PID 0 is reserved on every platform; not a valid runnable process.
+	assert(
+		store.isPidAlive(0) === false,
+		"§6.22 Item C: isPidAlive(0) === false (invalid)",
+	);
+	// Negative pids are invalid.
+	assert(
+		store.isPidAlive(-1) === false,
+		"§6.22 Item C: isPidAlive(-1) === false (invalid)",
+	);
+	// Very high unallocated pid is "almost certainly" dead. We accept either
+	// false (correctly identified dead) or true (conservative fallback) as
+	// long as the function doesn't throw.
+	let didNotThrow = true;
+	try {
+		store.isPidAlive(999999999);
+	} catch {
+		didNotThrow = false;
+	}
+	assert(
+		didNotThrow,
+		"§6.22 Item C: isPidAlive(huge) does not throw on probe failure (conservative fallback)",
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item C: isPidAlive helper handles self / 0 / negative / unreachable without throwing",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item D: findPendingSessionsForCaller helper — exists, accepts caller, returns array.
+async function driveV1215PendingSessionsHelperUnit() {
+	const results = [];
+	const store = require("../src/lib/session-store.js");
+	assert(
+		typeof store.findPendingSessionsForCaller === "function",
+		"§6.22 Item D: findPendingSessionsForCaller exported",
+	);
+	const out = store.findPendingSessionsForCaller("claude");
+	assert(
+		Array.isArray(out),
+		"§6.22 Item D: findPendingSessionsForCaller returns array",
+	);
+	assert(
+		typeof store.PENDING_THRESHOLD_MS === "number" &&
+			store.PENDING_THRESHOLD_MS > 0,
+		"§6.22 Item D: PENDING_THRESHOLD_MS exported as positive number",
+	);
+	assert(
+		store.PENDING_THRESHOLD_DEFAULT_MS === 10 * 60 * 1000,
+		"§6.22 Item D: PENDING_THRESHOLD_DEFAULT_MS is 10min",
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item D: findPendingSessionsForCaller + PENDING_THRESHOLD_MS exports + 10min default",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item E: half-written round detection + archive helpers — exist + work on synthetic dir.
+async function driveV1215HalfWrittenRoundUnit() {
+	const results = [];
+	const store = require("../src/lib/session-store.js");
+	assert(
+		typeof store.findHalfWrittenRounds === "function",
+		"§6.22 Item E: findHalfWrittenRounds exported",
+	);
+	assert(
+		typeof store.archiveOrphanedRoundPrompt === "function",
+		"§6.22 Item E: archiveOrphanedRoundPrompt exported",
+	);
+	// Empty session: returns []
+	const tmpId = "00000000-0000-4000-8000-000000000001";
+	const dir = path.join(STATE_DIR, tmpId);
+	fs.mkdirSync(dir, { recursive: true });
+	try {
+		const r1 = store.findHalfWrittenRounds(tmpId, ["codex", "gemini"]);
+		assert(
+			Array.isArray(r1) && r1.length === 0,
+			"§6.22 Item E: empty session has no half-written rounds",
+		);
+		// Synthetic orphan: prompt exists, no peer files
+		fs.writeFileSync(path.join(dir, "round-01-prompt.md"), "test prompt");
+		const r2 = store.findHalfWrittenRounds(tmpId, ["codex", "gemini"]);
+		assert(
+			r2.length === 1 && r2[0].round === 1,
+			"§6.22 Item E: orphan prompt detected when no peer responses present",
+		);
+		assert(
+			Array.isArray(r2[0].missing_peers) &&
+				r2[0].missing_peers.includes("codex") &&
+				r2[0].missing_peers.includes("gemini"),
+			"§6.22 Item E: missing_peers lists all expected peers",
+		);
+		// Archive the orphan
+		const archivedPath = store.archiveOrphanedRoundPrompt(tmpId, 1);
+		assert(
+			typeof archivedPath === "string" &&
+				/round-01-prompt\.orphan-/.test(archivedPath) &&
+				fs.existsSync(archivedPath),
+			"§6.22 Item E: archiveOrphanedRoundPrompt renames to .orphan-<ts>.md",
+		);
+		assert(
+			!fs.existsSync(path.join(dir, "round-01-prompt.md")),
+			"§6.22 Item E: original prompt file removed after archive",
+		);
+		// Partial round (one peer responded): NOT classified as orphan
+		fs.writeFileSync(path.join(dir, "round-02-prompt.md"), "test prompt 2");
+		fs.writeFileSync(path.join(dir, "round-02-peer-codex.md"), "codex resp");
+		const r3 = store.findHalfWrittenRounds(tmpId, ["codex", "gemini"]);
+		assert(
+			r3.length === 0,
+			"§6.22 Item E: round with at least one peer response is NOT orphan (caller still has partial state to act on)",
+		);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+	results.push({
+		step: "v1.2.15 §6.22 Item E: findHalfWrittenRounds + archiveOrphanedRoundPrompt detect/archive only fully-orphaned rounds",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item F: round-level timeout — spawnPeers honors options.roundTimeoutMs OR env.
+async function driveV1215RoundTimeoutUnit() {
+	const results = [];
+	const peerSpawn = require("../src/lib/peer-spawn.js");
+	// Source-level invariant: spawnPeers function references roundTimeoutMs option.
+	const src = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	assert(
+		/spawnPeers[\s\S]{0,2000}roundTimeoutMs/.test(src),
+		"§6.22 Item F: spawnPeers references roundTimeoutMs option",
+	);
+	assert(
+		/CROSS_REVIEW_ROUND_TIMEOUT_MS/.test(src),
+		"§6.22 Item F: CROSS_REVIEW_ROUND_TIMEOUT_MS env var honored in spawnPeers",
+	);
+	assert(
+		/12\s*\*\s*60\s*\*\s*1000/.test(src),
+		"§6.22 Item F: 12min default round timeout literal present",
+	);
+	assert(
+		/CROSS_REVIEW_PEER_TIMEOUT_MS/.test(src),
+		"§6.22 Item F: CROSS_REVIEW_PEER_TIMEOUT_MS env var honored in spawnPeer",
+	);
+	assert(
+		/8\s*\*\s*60\s*\*\s*1000/.test(src),
+		"§6.22 Item F: 8min default per-peer timeout literal present",
+	);
+	assert(
+		/failure_class:\s*"round_timeout"/.test(src),
+		"§6.22 Item F: round_timeout failure_class wired into round-timeout watchdog",
+	);
+
+	// v1.2.15 R1 codex catch — Item F server-side classification mapping.
+	// spawnPeers attaches failure_class='round_timeout' on rejection; the
+	// ask_peers handler MUST preserve this through to the response payload
+	// AND saveFailedAttempt(). Pre-fix the handler reclassified all non-
+	// moderation/non-stream-overflow/non-rate-limit rejections as
+	// 'spawn_rejected' with recovery_hint=null, dropping the round_timeout
+	// signal. Source-level guard.
+	const serverSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+	assert(
+		/reason\?\.failure_class\s*===\s*"round_timeout"/.test(serverSrc),
+		"§6.22 Item F server: ask_peers handler detects spawnPeers round_timeout via reason.failure_class",
+	);
+	assert(
+		/roundTimedOut[\s\S]{0,40}"retry_round"/.test(serverSrc),
+		"§6.22 Item F server: ask_peers handler maps round_timeout to recovery_hint='retry_round'",
+	);
+	// R2 codex catch — split into two anchored asserts so a future regression
+	// that drops EITHER surface (saveFailedAttempt persistence OR responsePeers
+	// telemetry) is caught independently. The pre-fix single regex would
+	// have passed if only one of the two surfaces survived.
+	assert(
+		/store\.saveFailedAttempt\([\s\S]{0,1200}round_timeout_ms:\s*roundTimedOut/.test(
+			serverSrc,
+		),
+		"§6.22 Item F server: round_timeout_ms surfaced in store.saveFailedAttempt() persistence payload (audit trail)",
+	);
+	assert(
+		/responsePeers\.push\([\s\S]{0,1200}round_timeout_ms:\s*roundTimedOut/.test(
+			serverSrc,
+		),
+		"§6.22 Item F server: round_timeout_ms surfaced in responsePeers.push() telemetry payload (caller-visible)",
+	);
+
+	void peerSpawn;
+	results.push({
+		step: "v1.2.15 §6.22 Item F: spawnPeers round-level timeout + per-peer timeout configurable via env, defaults 12min/8min, round_timeout failure_class wired AND preserved through ask_peers handler (server-side mapping verified)",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item G: SWEEP_MIN_AGE_MS configurable, clamped at 60s minimum.
+async function driveV1215SweepMinAgeOverrideUnit() {
+	const results = [];
+	const helperScript = `
+		const orig = process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS;
+		delete process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS;
+		delete require.cache[require.resolve('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}')];
+		const def = require('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}').SWEEP_MIN_AGE_MS;
+		process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS = '5000';
+		delete require.cache[require.resolve('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}')];
+		const clamped = require('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}').SWEEP_MIN_AGE_MS;
+		process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS = '120000';
+		delete require.cache[require.resolve('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}')];
+		const ovr = require('${path
+			.resolve(__dirname, "..", "src", "lib", "session-store.js")
+			.replace(/\\/g, "\\\\")}').SWEEP_MIN_AGE_MS;
+		if (orig === undefined) delete process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS;
+		else process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS = orig;
+		console.log(JSON.stringify({ default: def, clamped, override: ovr }));
+	`;
+	const { spawnSync } = require("node:child_process");
+	const r = spawnSync("node", ["-e", helperScript], { encoding: "utf8" });
+	const out = JSON.parse(r.stdout.trim());
+	assert(
+		out.default === 24 * 60 * 60 * 1000,
+		`§6.22 Item G: SWEEP_MIN_AGE_MS default is 24h (got ${out.default})`,
+	);
+	assert(
+		out.clamped === 60_000,
+		`§6.22 Item G: SWEEP_MIN_AGE_MS=5000 clamped up to 60s (got ${out.clamped})`,
+	);
+	assert(
+		out.override === 120_000,
+		`§6.22 Item G: SWEEP_MIN_AGE_MS=120000 (2min) honored as-is (got ${out.override})`,
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item G: SWEEP_MIN_AGE_MS env override default 24h, minimum clamp 60s, override applied when above clamp",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item H: orphan sweep helpers — exist + classify peer-cli commands correctly.
+async function driveV1215OrphanSweepHelpersUnit() {
+	const results = [];
+	const peerSpawn = require("../src/lib/peer-spawn.js");
+	assert(
+		typeof peerSpawn.sweepOrphanPeerProcesses === "function",
+		"§6.22 Item H: sweepOrphanPeerProcesses exported",
+	);
+	assert(
+		typeof peerSpawn.enumerateProcesses === "function",
+		"§6.22 Item H: enumerateProcesses exported",
+	);
+	assert(
+		typeof peerSpawn.isPeerCliCommand === "function",
+		"§6.22 Item H: isPeerCliCommand exported",
+	);
+	assert(
+		typeof peerSpawn.isDescendantOfPid === "function",
+		"§6.22 Item H: isDescendantOfPid exported",
+	);
+	// Pattern matching: positive cases
+	assert(
+		peerSpawn.isPeerCliCommand("codex exec --output-last-message foo") === true,
+		"§6.22 Item H: 'codex exec' classified as peer CLI",
+	);
+	assert(
+		peerSpawn.isPeerCliCommand("gemini -p 'hello'") === true,
+		"§6.22 Item H: 'gemini -p' classified as peer CLI",
+	);
+	assert(
+		peerSpawn.isPeerCliCommand("claude code --print foo") === true,
+		"§6.22 Item H: 'claude code --print' classified as peer CLI",
+	);
+	// Pattern matching: negative cases
+	assert(
+		peerSpawn.isPeerCliCommand("node server.js") === false,
+		"§6.22 Item H: random node invocation NOT classified as peer CLI",
+	);
+	assert(
+		peerSpawn.isPeerCliCommand("") === false,
+		"§6.22 Item H: empty string NOT classified",
+	);
+	assert(
+		peerSpawn.isPeerCliCommand(undefined) === false,
+		"§6.22 Item H: undefined NOT classified",
+	);
+	// Descendant probe: a process is its own descendant via parent pid 0
+	const fakeProc = { pid: 100, parentPid: 50 };
+	const fakeAll = [
+		{ pid: 50, parentPid: 1, command: "x" },
+		{ pid: 100, parentPid: 50, command: "y" },
+	];
+	assert(
+		peerSpawn.isDescendantOfPid(fakeProc, 50, fakeAll) === true,
+		"§6.22 Item H: isDescendantOfPid(parent matches direct) === true",
+	);
+	assert(
+		peerSpawn.isDescendantOfPid(fakeProc, 999, fakeAll) === false,
+		"§6.22 Item H: isDescendantOfPid(no match) === false",
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item H: sweepOrphanPeerProcesses + enumerateProcesses + isPeerCliCommand + isDescendantOfPid exported and classify peer CLI argv shapes correctly",
+		ok: true,
+	});
+	return { results };
+}
+
+// Item B: boot sweeps wired into main() via setImmediate fire-and-forget.
+async function driveV1215BootSweepWiringUnit() {
+	const results = [];
+	const src = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+	assert(
+		/setImmediate[\s\S]{0,400}sweepStaleLocksOnBoot/.test(src),
+		"§6.22 Item B: server.js main() schedules sweepStaleLocksOnBoot via setImmediate",
+	);
+	assert(
+		/setImmediate[\s\S]{0,400}sweepOrphanPeerProcesses/.test(src),
+		"§6.22 Item H: server.js main() schedules sweepOrphanPeerProcesses via setImmediate",
+	);
+	assert(
+		/CROSS_REVIEW_SKIP_BOOT_SWEEPS\s*!==\s*"1"/.test(src),
+		"§6.22 boot wiring: opt-out via CROSS_REVIEW_SKIP_BOOT_SWEEPS=1 honored in server.js",
+	);
+	// Order: server.connect() must come BEFORE the setImmediate calls so the
+	// sweeps don't delay initialize.
+	const connectIdx = src.search(/await\s+server\.connect\(transport\)/);
+	const sweepIdx = src.search(/setImmediate[\s\S]{0,200}sweepStaleLocksOnBoot/);
+	assert(
+		connectIdx > 0 && sweepIdx > 0 && connectIdx < sweepIdx,
+		"§6.22 Item B/H: server.connect() runs BEFORE setImmediate sweep schedule (fire-and-forget after transport ready)",
+	);
+	results.push({
+		step: "v1.2.15 §6.22 Item B + H: boot sweeps wired in main() AFTER server.connect, opt-out via CROSS_REVIEW_SKIP_BOOT_SWEEPS",
+		ok: true,
+	});
 	return { results };
 }
 

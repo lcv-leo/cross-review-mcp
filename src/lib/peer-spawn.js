@@ -1317,7 +1317,22 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 	const stubbed = peerStub();
 	if (stubbed) return stubbed;
 
-	const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000; // 30 min
+	// v1.2.15 / spec §6.22 Item F — per-peer timeout configurable.
+	// Default reduced from 30min (pre-v1.2.15) to 8min, aligned with
+	// observed real-world peer latency (3-9min typical for trilateral
+	// review prompts). Operator override via `CROSS_REVIEW_PEER_TIMEOUT_MS`
+	// env var, or per-call `options.timeoutMs`. The round-level timeout
+	// (CROSS_REVIEW_ROUND_TIMEOUT_MS, default 12min) acts as the wall-clock
+	// backstop when per-peer wedges entirely.
+	const peerTimeoutEnv = Number.parseInt(
+		process.env.CROSS_REVIEW_PEER_TIMEOUT_MS || "",
+		10,
+	);
+	const timeoutMs =
+		options.timeoutMs ??
+		(Number.isInteger(peerTimeoutEnv) && peerTimeoutEnv > 0
+			? peerTimeoutEnv
+			: 8 * 60 * 1000);
 	let cmd;
 	let args;
 	if (peerAgent === "codex") {
@@ -1461,14 +1476,264 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 // {agent, status: 'fulfilled', value} or {agent, status: 'rejected',
 // reason}. `value` is the raw spawnPeer resolution; callers layer the
 // statusParser + silent-downgrade check on top.
+//
+// v1.2.15 / spec §6.22 Item F — round-level timeout.
+// `options.roundTimeoutMs` (or env CROSS_REVIEW_ROUND_TIMEOUT_MS, default
+// 12min) caps the wall-clock duration of the entire batch. When the round
+// timeout fires before all per-peer Promises have settled, this function
+// resolves with whatever partial state exists; unresolved peers are
+// represented as rejected entries with reason.failure_class='round_timeout'.
+// The per-peer timeout (default 30min, also configurable via
+// CROSS_REVIEW_PEER_TIMEOUT_MS) remains the primary cap on individual
+// peer latency; the round timeout is the backstop when the per-peer
+// machinery itself wedges.
 function spawnPeers(agents, prompt, options = {}) {
-	const tasks = agents.map((a) =>
-		spawnPeer(a, prompt, options).then(
-			(value) => ({ agent: a, status: "fulfilled", value }),
-			(reason) => ({ agent: a, status: "rejected", reason }),
-		),
-	);
-	return Promise.all(tasks);
+	const roundTimeoutMs = (() => {
+		if (
+			Number.isInteger(options.roundTimeoutMs) &&
+			options.roundTimeoutMs > 0
+		) {
+			return options.roundTimeoutMs;
+		}
+		const raw = Number.parseInt(
+			process.env.CROSS_REVIEW_ROUND_TIMEOUT_MS || "",
+			10,
+		);
+		if (Number.isInteger(raw) && raw > 0) return raw;
+		return 12 * 60 * 1000; // 12 min default
+	})();
+
+	const settled = new Map(); // agent -> {status, value|reason}
+	const perAgentResolvers = new Map(); // agent -> resolver function
+
+	const tasks = agents.map((a) => {
+		return new Promise((resolve) => {
+			perAgentResolvers.set(a, resolve);
+			spawnPeer(a, prompt, options).then(
+				(value) => {
+					if (settled.has(a)) return;
+					const entry = { agent: a, status: "fulfilled", value };
+					settled.set(a, entry);
+					resolve(entry);
+				},
+				(reason) => {
+					if (settled.has(a)) return;
+					const entry = { agent: a, status: "rejected", reason };
+					settled.set(a, entry);
+					resolve(entry);
+				},
+			);
+		});
+	});
+
+	const roundTimer = setTimeout(() => {
+		// Force-resolve any agent that hasn't reported yet.
+		for (const a of agents) {
+			if (settled.has(a)) continue;
+			const entry = {
+				agent: a,
+				status: "rejected",
+				reason: Object.assign(
+					new Error(
+						`round timed out after ${Math.round(roundTimeoutMs / 1000)}s before ${a} reported`,
+					),
+					{
+						failure_class: "round_timeout",
+						recovery_hint: "retry_round",
+						round_timeout_ms: roundTimeoutMs,
+					},
+				),
+			};
+			settled.set(a, entry);
+			const resolver = perAgentResolvers.get(a);
+			if (typeof resolver === "function") resolver(entry);
+		}
+	}, roundTimeoutMs);
+	if (typeof roundTimer.unref === "function") roundTimer.unref();
+
+	return Promise.all(tasks).finally(() => clearTimeout(roundTimer));
+}
+
+// v1.2.15 / spec §6.22 Item H — orphan peer-CLI sweep at boot.
+//
+// When the cross-review-mcp parent process is killed (host reload, crash,
+// SIGKILL) BEFORE the per-peer timeout fires, the spawned peer-CLI
+// subprocess (codex / gemini / claude exec) becomes an orphan: it
+// continues consuming API tokens and CPU until the LLM call finishes,
+// with no caller waiting on its output. Recovery is impossible (the pipe
+// to the dead parent is broken); the only sensible action is to kill
+// the orphan tree.
+//
+// Detection strategy (Windows + POSIX cross-platform):
+//   1. Enumerate processes whose command line contains a peer-spawn
+//      argv signature: "codex exec", "gemini -p" / "gemini --prompt",
+//      or "claude code".
+//   2. For each match, look up its parent PID.
+//   3. If parent PID is dead OR alive but is NOT a Node process running
+//      cross-review-mcp/src/server.js, classify as orphan.
+//   4. Kill the orphan + its children via killProcessTree (already
+//      taskkill /T /F on Windows, kill -- -<pgid> on POSIX).
+//
+// Best-effort: errors are logged to stderr but never propagate (boot
+// continues). Conservative on ambiguity — if the parent walk fails or
+// the subprocess metadata is unreadable, treat as legitimate (operator's
+// own usage) and leave alone. The per-peer timeout still bounds future
+// orphan windows; this sweep cleans up the historical residue.
+//
+// Returns Promise<{ scanned, killed }> for telemetry. Async — uses
+// non-blocking child_process.exec under the hood so the boot path
+// stays responsive while the OS-level enumeration is in flight.
+async function sweepOrphanPeerProcesses() {
+	const result = { scanned: 0, killed: 0, candidates: [] };
+	try {
+		const procs = await enumerateProcesses();
+		const ourPid = process.pid;
+		const orphans = [];
+		for (const p of procs) {
+			if (!isPeerCliCommand(p.command)) continue;
+			result.scanned += 1;
+			// Same agent label heuristic, only used for logging.
+			let agent = null;
+			if (/\bcodex\b/i.test(p.command) && /\bexec\b/i.test(p.command))
+				agent = "codex";
+			else if (/\bgemini\b/i.test(p.command)) agent = "gemini";
+			else if (/\bclaude\b/i.test(p.command) && /\bcode\b/i.test(p.command))
+				agent = "claude";
+
+			// Don't touch our own descendants — they're being managed.
+			if (isDescendantOfPid(p, ourPid, procs)) continue;
+
+			// If the parent is alive AND looks like another live cross-review-mcp
+			// instance running src/server.js, leave alone (sibling parent).
+			const parent = procs.find((x) => x.pid === p.parentPid);
+			if (parent && /node(?:\.exe)?$/i.test(parent.command.split(/\s+/)[0])) {
+				if (/cross-review-mcp[\\/]src[\\/]server\.js/i.test(parent.command)) {
+					continue;
+				}
+			}
+
+			// If we got here: the peer-CLI subprocess has either a dead
+			// parent or a non-cross-review-mcp parent. Treat as orphan.
+			orphans.push({ ...p, agent });
+		}
+		for (const o of orphans) {
+			try {
+				killProcessTree({ pid: o.pid });
+				process.stderr.write(
+					`[cross-review-mcp] orphan-sweep killed peer pid=${o.pid} agent=${o.agent || "unknown"} parent=${o.parentPid}\n`,
+				);
+				result.killed += 1;
+				result.candidates.push({
+					pid: o.pid,
+					agent: o.agent,
+					parent_pid: o.parentPid,
+					killed: true,
+				});
+			} catch (err) {
+				process.stderr.write(
+					`[cross-review-mcp] orphan-sweep failed to kill pid=${o.pid}: ${err?.message || err}\n`,
+				);
+				result.candidates.push({
+					pid: o.pid,
+					agent: o.agent,
+					parent_pid: o.parentPid,
+					killed: false,
+					error: err?.message || String(err),
+				});
+			}
+		}
+	} catch (err) {
+		process.stderr.write(
+			`[cross-review-mcp] orphan-sweep aborted: ${err?.message || err}\n`,
+		);
+	}
+	return result;
+}
+
+// Process enumeration: returns Promise<[{ pid, parentPid, command }]>
+// cross-platform. Windows: PowerShell `Get-CimInstance Win32_Process`
+// (more reliable than `wmic` which is deprecated). POSIX: `ps -eo
+// pid,ppid,args`. Each row has the full command line so callers can
+// pattern-match the argv shape. Async via util.promisify(exec) so the
+// caller (orphan sweep) doesn't block the Node event loop while the OS
+// enumeration is running — critical for not delaying MCP initialize
+// handshake responses on host startup.
+function enumerateProcesses() {
+	const { exec } = require("node:child_process");
+	const { promisify } = require("node:util");
+	const execP = promisify(exec);
+	if (process.platform === "win32") {
+		const psCommand =
+			"Get-CimInstance Win32_Process | " +
+			"Select-Object ProcessId,ParentProcessId,CommandLine | " +
+			"ConvertTo-Json -Compress";
+		return execP(
+			`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psCommand}"`,
+			{
+				timeout: 8000,
+				windowsHide: true,
+				maxBuffer: 16 * 1024 * 1024,
+			},
+		).then(({ stdout }) => {
+			const parsed = JSON.parse(stdout);
+			const arr = Array.isArray(parsed) ? parsed : [parsed];
+			return arr
+				.filter((p) => p && Number.isInteger(p.ProcessId))
+				.map((p) => ({
+					pid: p.ProcessId,
+					parentPid: Number.isInteger(p.ParentProcessId)
+						? p.ParentProcessId
+						: 0,
+					command: typeof p.CommandLine === "string" ? p.CommandLine : "",
+				}));
+		});
+	}
+	return execP("ps -eo pid,ppid,args", {
+		timeout: 4000,
+		maxBuffer: 16 * 1024 * 1024,
+	}).then(({ stdout }) => {
+		const lines = stdout.split("\n").slice(1); // strip header
+		const result = [];
+		for (const line of lines) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			const m = trimmed.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+			if (!m) continue;
+			result.push({
+				pid: Number.parseInt(m[1], 10),
+				parentPid: Number.parseInt(m[2], 10),
+				command: m[3],
+			});
+		}
+		return result;
+	});
+}
+
+// Heuristic: argv shape that cross-review-mcp uses for peer-CLI spawns.
+// Conservative — only matches well-known shapes from buildCodexArgs /
+// buildGeminiArgs / buildClaudeArgs. Won't false-positive on operator's
+// own interactive Codex/Gemini/Claude usage (which doesn't pass these
+// flags in this exact order).
+function isPeerCliCommand(cmdLine) {
+	if (typeof cmdLine !== "string" || cmdLine.length === 0) return false;
+	const lower = cmdLine.toLowerCase();
+	// Codex peer signature: "codex exec --output-last-message" or "codex exec --json"
+	if (/\bcodex(?:\.exe)?\b.*\bexec\b/.test(lower)) return true;
+	// Gemini peer signature: "gemini -p" or "gemini --prompt" with stdin
+	if (/\bgemini(?:\.exe)?\b.*\s(-p|--prompt)\b/.test(lower)) return true;
+	// Claude peer signature: "claude code -p" or "claude --print"
+	if (/\bclaude(?:\.exe)?\b.*\b(code|--print|-p)\b/.test(lower)) return true;
+	return false;
+}
+
+// Walk up the parent chain to determine if `proc` is a descendant of `ancestorPid`.
+function isDescendantOfPid(proc, ancestorPid, allProcs, depth = 0) {
+	if (depth > 10) return false; // cycle guard
+	if (proc.parentPid === ancestorPid) return true;
+	if (proc.parentPid === 0 || proc.parentPid === proc.pid) return false;
+	const parent = allProcs.find((p) => p.pid === proc.parentPid);
+	if (!parent) return false;
+	return isDescendantOfPid(parent, ancestorPid, allProcs, depth + 1);
 }
 
 module.exports = {
@@ -1483,6 +1748,11 @@ module.exports = {
 	buildGeminiArgs,
 	listCodexConfiguredServers,
 	loadExclusions,
+	// v1.2.15 / spec §6.22 Item H additions.
+	sweepOrphanPeerProcesses,
+	enumerateProcesses,
+	isPeerCliCommand,
+	isDescendantOfPid,
 	// Exported for audit/test use only. Exposes the pinned top-level
 	// model IDs per spec section 6.9.2 + 6.9.2.1.
 	modelForPeer,

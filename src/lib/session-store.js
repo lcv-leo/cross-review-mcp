@@ -31,9 +31,70 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 
 const STATE_DIR = path.join(os.homedir(), ".cross-review");
-const LOCK_TTL_MS = 60 * 60 * 1000; // 1h
+
+// v1.2.15 / spec §6.22 — Lock & session resilience.
+// LOCK_TTL_MS controls when an existing `.lock` directory becomes
+// auto-releasable. Default reduced from 60min (pre-v1.2.15) to 5min,
+// aligned with typical round duration (~3-5min). Operator override via
+// `CROSS_REVIEW_LOCK_TTL_MS` env var (positive integer, milliseconds).
+// Invalid/absent values fall back to default.
+const LOCK_TTL_DEFAULT_MS = 5 * 60 * 1000; // 5min
+const LOCK_TTL_MS = (() => {
+	const raw = Number.parseInt(process.env.CROSS_REVIEW_LOCK_TTL_MS || "", 10);
+	return Number.isInteger(raw) && raw > 0 ? raw : LOCK_TTL_DEFAULT_MS;
+})();
+
+// v1.2.15 / spec §6.22 — pending-session detection threshold.
+// session_init returns a `pending_sessions` array listing same-caller
+// sessions with `outcome=null` and last_updated_at older than this
+// threshold. Default 10min. Override via `CROSS_REVIEW_PENDING_THRESHOLD_MS`.
+const PENDING_THRESHOLD_DEFAULT_MS = 10 * 60 * 1000;
+const PENDING_THRESHOLD_MS = (() => {
+	const raw = Number.parseInt(
+		process.env.CROSS_REVIEW_PENDING_THRESHOLD_MS || "",
+		10,
+	);
+	return Number.isInteger(raw) && raw > 0 ? raw : PENDING_THRESHOLD_DEFAULT_MS;
+})();
+
 const MAX_STDERR_TAIL_CHARS = 2000;
 const REDACTED = "[REDACTED]";
+
+// v1.2.15 / spec §6.22 Item C — PID liveness probe.
+// Returns true if process with given pid is currently alive on the host.
+// Uses platform-native APIs: `process.kill(pid, 0)` on POSIX (signal 0
+// is a "test if alive" probe with no actual signal delivery), and
+// `tasklist /fi "PID eq <pid>"` parse on Windows. Returns false on
+// any error (process gone, permission denied, invalid pid). Conservative:
+// when uncertain, treats process as ALIVE so the lock isn't released
+// prematurely. The TTL still acts as the hard backstop for false-alive.
+function isPidAlive(pid) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	if (process.platform === "win32") {
+		try {
+			const { execSync } = require("node:child_process");
+			const out = execSync(`tasklist /fi "PID eq ${pid}" /nh /fo csv`, {
+				stdio: ["ignore", "pipe", "ignore"],
+				timeout: 2000,
+				windowsHide: true,
+			})
+				.toString("utf8")
+				.trim();
+			// "INFO: No tasks are running which match the specified criteria."
+			// otherwise: a CSV row with the pid present.
+			return out !== "" && !/^INFO:\s/.test(out) && out.includes(`"${pid}"`);
+		} catch {
+			return true; // conservative: TTL backstops false-alive
+		}
+	}
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (e) {
+		// ESRCH = no such process (dead). EPERM = exists but we can't signal.
+		return e?.code === "EPERM";
+	}
+}
 
 function ensureStateDir() {
 	fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -121,17 +182,41 @@ function acquireLock(sessionId) {
 		fs.mkdirSync(lockDir);
 	} catch (e) {
 		if (e.code !== "EEXIST") throw e;
+		// v1.2.15 / spec §6.22 — stale-lock detection ladder:
+		//   1. PID liveness check (Item C): if the holding pid is dead,
+		//      release IMMEDIATELY regardless of TTL. Crashes/SIGKILLs
+		//      would otherwise keep the lock for the full TTL window.
+		//   2. TTL fallback (Item A): if the holder claims to be alive
+		//      (or pid is unknown) but `acquired_at` is older than
+		//      LOCK_TTL_MS (default 5min), release as stale.
+		//   3. Otherwise refuse — the holder is alive and recent.
+		// Malformed info.json or unreadable lock files: release (legacy
+		// behavior; defensive recovery). Each release path emits a
+		// stderr audit line so operators see the auto-recovery happen.
 		try {
 			const infoPath = path.join(lockDir, "info.json");
 			const info = JSON.parse(fs.readFileSync(infoPath, "utf8"));
 			const age = Date.now() - Date.parse(info.acquired_at);
-			if (age > LOCK_TTL_MS) {
+			const holderAlive = info.pid ? isPidAlive(info.pid) : true;
+			if (!holderAlive) {
+				process.stderr.write(
+					`[cross-review-mcp] lock auto-release for session ${sessionId}: holder pid=${info.pid} is dead (age=${Math.round(age / 1000)}s)\n`,
+				);
+				fs.rmSync(lockDir, { recursive: true, force: true });
+				fs.mkdirSync(lockDir);
+			} else if (age > LOCK_TTL_MS) {
+				process.stderr.write(
+					`[cross-review-mcp] lock auto-release for session ${sessionId}: TTL exceeded (age=${Math.round(age / 1000)}s, ttl=${Math.round(LOCK_TTL_MS / 1000)}s, pid=${info.pid})\n`,
+				);
 				fs.rmSync(lockDir, { recursive: true, force: true });
 				fs.mkdirSync(lockDir);
 			} else {
 				return false;
 			}
 		} catch {
+			process.stderr.write(
+				`[cross-review-mcp] lock auto-release for session ${sessionId}: malformed info.json\n`,
+			);
 			fs.rmSync(lockDir, { recursive: true, force: true });
 			fs.mkdirSync(lockDir);
 		}
@@ -145,6 +230,178 @@ function acquireLock(sessionId) {
 		),
 	);
 	return true;
+}
+
+// v1.2.15 / spec §6.22 Item B — startup sweep.
+// On server boot, walks every session directory and removes any `.lock`
+// whose `info.json` indicates either a dead holder pid or an `acquired_at`
+// older than LOCK_TTL_MS. Idempotent + best-effort: errors are logged but
+// never propagate (server boot continues regardless). Returns count of
+// removed locks for telemetry.
+function sweepStaleLocksOnBoot() {
+	let removed = 0;
+	let scanned = 0;
+	if (!fs.existsSync(STATE_DIR)) return { scanned: 0, removed: 0 };
+	let entries;
+	try {
+		entries = fs.readdirSync(STATE_DIR, { withFileTypes: true });
+	} catch {
+		return { scanned: 0, removed: 0 };
+	}
+	for (const ent of entries) {
+		if (!ent.isDirectory()) continue;
+		// Only act on UUID-named directories (skip anything else).
+		if (!UUID_RE.test(ent.name)) continue;
+		const lockDir = path.join(STATE_DIR, ent.name, ".lock");
+		if (!fs.existsSync(lockDir)) continue;
+		scanned += 1;
+		try {
+			const info = JSON.parse(
+				fs.readFileSync(path.join(lockDir, "info.json"), "utf8"),
+			);
+			const age = Date.now() - Date.parse(info.acquired_at);
+			const holderAlive = info.pid ? isPidAlive(info.pid) : true;
+			if (!holderAlive || age > LOCK_TTL_MS) {
+				fs.rmSync(lockDir, { recursive: true, force: true });
+				process.stderr.write(
+					`[cross-review-mcp] startup-sweep removed stale lock for session ${ent.name} (pid=${info.pid}, alive=${holderAlive}, age=${Math.round(age / 1000)}s)\n`,
+				);
+				removed += 1;
+			}
+		} catch {
+			// Malformed info.json on a stale-looking lock — remove defensively.
+			try {
+				fs.rmSync(lockDir, { recursive: true, force: true });
+				process.stderr.write(
+					`[cross-review-mcp] startup-sweep removed malformed lock for session ${ent.name}\n`,
+				);
+				removed += 1;
+			} catch {
+				/* unreadable, give up silently */
+			}
+		}
+	}
+	return { scanned, removed };
+}
+
+// v1.2.15 / spec §6.22 Item D — pending-session discovery for caller.
+// Returns up to `limit` sessions where `meta.caller === forCaller`,
+// `meta.outcome === null`, and last activity is older than
+// `PENDING_THRESHOLD_MS`. Used by session_init to surface "you have a
+// dangling session from before" to the caller. Sorted oldest-first
+// (the most likely abandoned one first).
+function findPendingSessionsForCaller(forCaller, limit = 5) {
+	const out = [];
+	if (!fs.existsSync(STATE_DIR)) return out;
+	let entries;
+	try {
+		entries = fs.readdirSync(STATE_DIR, { withFileTypes: true });
+	} catch {
+		return out;
+	}
+	const now = Date.now();
+	for (const ent of entries) {
+		if (!ent.isDirectory()) continue;
+		if (!UUID_RE.test(ent.name)) continue;
+		const metaPath = path.join(STATE_DIR, ent.name, "meta.json");
+		if (!fs.existsSync(metaPath)) continue;
+		try {
+			const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+			if (meta.caller !== forCaller) continue;
+			if (meta.outcome != null) continue;
+			const lastActivityIso =
+				meta.last_updated_at ||
+				(Array.isArray(meta.rounds) && meta.rounds.length > 0
+					? meta.rounds[meta.rounds.length - 1].completed_at ||
+						meta.rounds[meta.rounds.length - 1].started_at
+					: null) ||
+				meta.started_at;
+			if (!lastActivityIso) continue;
+			const idleMs = now - Date.parse(lastActivityIso);
+			if (Number.isNaN(idleMs)) continue;
+			if (idleMs < PENDING_THRESHOLD_MS) continue;
+			out.push({
+				session_id: ent.name,
+				task: typeof meta.task === "string" ? meta.task.slice(0, 120) : null,
+				rounds_completed: Array.isArray(meta.rounds) ? meta.rounds.length : 0,
+				last_activity: lastActivityIso,
+				idle_seconds: Math.round(idleMs / 1000),
+				locked: fs.existsSync(path.join(STATE_DIR, ent.name, ".lock")),
+			});
+		} catch {
+			/* skip malformed meta */
+		}
+	}
+	out.sort((a, b) => Date.parse(a.last_activity) - Date.parse(b.last_activity));
+	return out.slice(0, limit);
+}
+
+// v1.2.15 / spec §6.22 Item E — half-written round detection.
+// Detects rounds where `round-NN-prompt.md` exists but no peer-response
+// files for the expected peer set are present (i.e., the prompt was
+// persisted but the round never completed). Returns array of orphaned
+// round numbers. Caller (`ask_peers` handler) can clean these before
+// starting a new round to keep the audit trail honest.
+function findHalfWrittenRounds(sessionId, expectedPeers) {
+	assertValidSessionId(sessionId);
+	const dir = sessionDir(sessionId);
+	if (!fs.existsSync(dir)) return [];
+	const orphans = [];
+	let entries;
+	try {
+		entries = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const promptRe = /^round-(\d+)-prompt\.md$/;
+	const peerRe = /^round-(\d+)-peer-([a-z]+)\.md$/;
+	const promptRounds = new Map(); // roundNum (string) -> filename
+	const peerRoundCounts = new Map(); // roundNum (string) -> Set(agent)
+	for (const f of entries) {
+		const pm = f.match(promptRe);
+		if (pm) {
+			promptRounds.set(pm[1], f);
+			continue;
+		}
+		const pp = f.match(peerRe);
+		if (pp) {
+			const set = peerRoundCounts.get(pp[1]) || new Set();
+			set.add(pp[2]);
+			peerRoundCounts.set(pp[1], set);
+		}
+	}
+	for (const [roundNum, _] of promptRounds) {
+		const responded = peerRoundCounts.get(roundNum) || new Set();
+		const missing = expectedPeers.filter((p) => !responded.has(p));
+		if (missing.length === expectedPeers.length) {
+			// Zero peer responses recorded — clearly orphaned.
+			orphans.push({
+				round: Number.parseInt(roundNum, 10),
+				missing_peers: missing,
+			});
+		}
+	}
+	return orphans;
+}
+
+// v1.2.15 / spec §6.22 Item E — clean a half-written round's prompt file.
+// Renames `round-NN-prompt.md` to `round-NN-prompt.orphan-<ts>.md` so
+// the audit trail is preserved (operator can still reconstruct what
+// went wrong) but the active round numbering can advance cleanly.
+function archiveOrphanedRoundPrompt(sessionId, roundNum) {
+	assertValidSessionId(sessionId);
+	const dir = sessionDir(sessionId);
+	const padded = String(roundNum).padStart(2, "0");
+	const src = path.join(dir, `round-${padded}-prompt.md`);
+	if (!fs.existsSync(src)) return null;
+	const ts = new Date().toISOString().replace(/[:.]/g, "-");
+	const dst = path.join(dir, `round-${padded}-prompt.orphan-${ts}.md`);
+	try {
+		fs.renameSync(src, dst);
+		return dst;
+	} catch {
+		return null;
+	}
 }
 
 function releaseLock(sessionId) {
@@ -685,7 +942,30 @@ function finalize(sessionId, outcome, reason = null) {
 // 24h hard floor: sessions younger than this are NEVER candidates regardless
 // of staleDays argument. Footgun guard — prevents accidentally finalizing a
 // session the operator just opened.
-const SWEEP_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+//
+// v1.2.15 / spec §6.22 Item G: hard floor is now configurable via
+// `CROSS_REVIEW_SWEEP_MIN_AGE_MS` env var for operational recovery scenarios
+// (e.g., aggressive cleanup of stuck sessions immediately after a host-kill
+// incident). The default remains 24h. If set, the override is logged at
+// boot (one-shot) so the relaxation is visible in audit. Minimum override
+// is 60s — values below that are clamped up to 60s to keep some footgun
+// protection. Setting this < default is INSECURE for normal operation;
+// reset (unset env) after recovery completes.
+const SWEEP_MIN_AGE_DEFAULT_MS = 24 * 60 * 60 * 1000;
+const SWEEP_MIN_AGE_MS = (() => {
+	const raw = Number.parseInt(
+		process.env.CROSS_REVIEW_SWEEP_MIN_AGE_MS || "",
+		10,
+	);
+	if (!Number.isInteger(raw) || raw <= 0) return SWEEP_MIN_AGE_DEFAULT_MS;
+	const clamped = Math.max(raw, 60_000);
+	if (clamped !== SWEEP_MIN_AGE_DEFAULT_MS) {
+		process.stderr.write(
+			`[cross-review-mcp] notice: CROSS_REVIEW_SWEEP_MIN_AGE_MS override active (${clamped}ms = ${Math.round(clamped / 1000)}s); default is ${SWEEP_MIN_AGE_DEFAULT_MS}ms (24h). Reset env var after recovery.\n`,
+		);
+	}
+	return clamped;
+})();
 const SWEEP_DEFAULT_STALE_DAYS = 7;
 
 // Compute last-activity timestamp from meta. Last activity = max of
@@ -933,4 +1213,15 @@ module.exports = {
 	UUID_RE,
 	isPathContained,
 	assertValidSessionId,
+	// v1.2.15 / spec §6.22 — Lock & session resilience.
+	LOCK_TTL_MS,
+	LOCK_TTL_DEFAULT_MS,
+	PENDING_THRESHOLD_MS,
+	PENDING_THRESHOLD_DEFAULT_MS,
+	SWEEP_MIN_AGE_DEFAULT_MS,
+	isPidAlive,
+	sweepStaleLocksOnBoot,
+	findPendingSessionsForCaller,
+	findHalfWrittenRounds,
+	archiveOrphanedRoundPrompt,
 };
