@@ -1,17 +1,18 @@
 name: Auto-tag on version bump
 
-# When a push to main lands with a bumped package.json version, this
-# workflow creates the matching git tag (v${version}) and pushes it. The
-# tag push fires the existing publish.yml workflow which handles npm
-# publish + GitHub Packages publish + GitHub Release creation.
+# Universal tag convention (operator directive 2026-04-28): vXX.XX.XX with
+# two-digit zero-padded segments. package.json keeps semver shape (npm
+# requires it) — the tag is derived with zero-pad transform.
 #
-# Idempotent: when package.json version equals the latest tag (no bump
-# in this push), the workflow exits cleanly without creating anything.
+# Idempotent on transition: checks BOTH the new universal format and the
+# legacy unpadded format for the current version. If either exists on
+# origin, the workflow exits without creating anything. This prevents a
+# duplicate release when the repo's history has tags from before the
+# universal convention was adopted.
 #
-# Inspired by the maestro-app release.yml prepare-release pattern
-# (Codex 2026-04-26). Adapted for cross-review-mcp's leaner Node-only
-# distribution (no Tauri build, no GHCR OCI mirror — those concerns are
-# already handled by publish.yml's three downstream jobs on tag push).
+# Triggered by push to main + workflow_dispatch. The tag-push event fires
+# the existing publish.yml which handles npm publish, GitHub Packages
+# publish, and GitHub Release creation.
 
 on:
   push:
@@ -27,7 +28,7 @@ concurrency:
 
 jobs:
   auto-tag:
-    name: Create version tag if package.json was bumped
+    name: Create universal-format tag if package.json was bumped
     runs-on: ubuntu-latest
 
     steps:
@@ -36,46 +37,51 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Read package.json version
+      - name: Read package.json version + compute tags
         id: version
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          TAG="v${VERSION}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9]+)?$ ]]; then
-            echo "::error::Invalid version shape in package.json: '$VERSION'. Expected vX.Y.Z or vX.Y.Z-prerelease."
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version shape in package.json: '$VERSION'. Expected X.Y.Z or X.Y.Z-prerelease."
             exit 1
           fi
+          # Universal format: vXX.XX.XX with zero-pad. Strips any pre-release suffix from the tag.
+          BASE=$(echo "$VERSION" | sed -E 's/-.*$//')
+          PAD=$(echo "$BASE" | awk -F. '{ printf "v%02d.%02d.%02d", $1, $2, $3 }')
+          # Legacy format: v${VERSION} (unpadded; what cross-review-mcp shipped before 2026-04-28).
+          LEGACY="v${VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION (tag: $TAG)"
+          echo "tag=$PAD" >> "$GITHUB_OUTPUT"
+          echo "legacy_tag=$LEGACY" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION → universal tag: $PAD, legacy tag: $LEGACY"
 
-      - name: Check if tag already exists on origin
+      - name: Check if either tag already exists on origin
         id: check
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          LEGACY_TAG: ${{ steps.version.outputs.legacy_tag }}
         run: |
           set -euo pipefail
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} already exists on origin; skipping create."
+            echo "Tag ${TAG} already exists; skipping."
+          elif git ls-remote --exit-code --tags origin "refs/tags/${LEGACY_TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Legacy tag ${LEGACY_TAG} already exists for this version; skipping (transition guard)."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Tag ${TAG} does not exist; will create."
+            echo "Neither ${TAG} nor ${LEGACY_TAG} exists; will create universal-format tag ${TAG}."
           fi
 
       - name: Create and push tag
         if: steps.check.outputs.exists == 'false'
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Use the GitHub Actions bot identity for the tag.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Annotated tag with one-line message; downstream publish.yml
-          # extracts release notes from CHANGELOG.md (its own concern).
           git tag -a "${TAG}" -m "${TAG}: auto-tagged from package.json on push to main"
           git push origin "${TAG}"
           echo "Created and pushed ${TAG}; publish.yml will fire on the tag-push event."
