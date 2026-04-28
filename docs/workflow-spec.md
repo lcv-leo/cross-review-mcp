@@ -3151,6 +3151,147 @@ Together, these layers ensure that even if a future regression made
 the matcher excessively permissive, the host cross-review-mcp's
 ancestors cannot be killed.
 
+### 6.23 Concurrence injection + diagnostic propagation + summary field + convergence_scope (NEW in v1.2.18)
+
+**Surfaced by.** Codex's technical handoff
+(`maestro-app/.ai/handoffs/2026-04-28-cross-review-mcp-technical-prompt-for-claude.md`)
+filed after the v0.3.10 cross-review session `28343cdb-36bf-4667-b0d0-2df115cf175a`
+identified 8 operational findings. The caller (claude) audited each
+finding empirically against current source + the actual session
+artifacts and confirmed Findings 1, 2, 3, 6, 7 as real architectural
+gaps within the v1.x frozen public surface. v1.2.18 ships those four
+(1+2 are two halves of the same gap) as additive improvements.
+Findings 4 (heartbeat), 5 (stderr classification), 8 (evidence
+directory convention) are deferred to v1.3.0 minor bump because
+Finding 8 introduces a new MCP tool.
+
+**Finding 1+2 — Concurrence auto-injection.** When the caller
+declares `caller_status=READY` and the round is a concurrence pass
+("I concur with your previous READY assessment, no new code
+changes"), the peer subprocess is stateless across rounds and has
+no in-context proof of its own prior verdict. The peer correctly
+applies anti-hallucination discipline (§6.14) and returns
+NEEDS_EVIDENCE asking for the prior artifact path — even though
+the artifact is right there in the session directory. Empirically
+observed in session `28343cdb` Round 4: Codex submitted a 1-line
+concurrence prompt; Claude returned NEEDS_EVIDENCE listing 5
+specific artifacts it needed to verify the concurrence claim;
+Codex re-submitted the same evidence in Round 5; Claude returned
+READY. Three rounds when one was the intent.
+
+**Fix.** Optional `concurrence: boolean` parameter on `ask_peer`
+and `ask_peers`:
+
+- `ask_peer(session_id, prompt, caller_status, concurrence?)`. When
+  `concurrence=true`, the server walks `meta.rounds` in reverse and
+  returns the most recent round where the bilateral peer reported
+  `peer_status='READY'`. The verbatim content of that round's peer
+  artifact is auto-prepended to the prompt before
+  `attachPromptTailDirective`. The injected block is self-describing
+  (declares it was auto-injected by v1.2.18 for concurrence) and
+  includes anti-hallucination guidance — the peer is explicitly
+  instructed NOT to rubber-stamp the artifact. If material claims in
+  the new prompt cannot be reconciled with the artifact or current
+  source, NEEDS_EVIDENCE remains the correct response. Response
+  includes `concurrence_artifact_injected: { round, peer_file } |
+  null` for caller audit.
+
+- `ask_peers(session_id, prompt, caller_status, concurrence?)`. When
+  `concurrence=true`, the server independently looks up each peer's
+  most recent READY artifact and builds a per-agent prompt map. Per-peer
+  injection (no cross-contamination). `spawnPeers` consumes the map via
+  `options.perAgentPrompts`. Response includes
+  `concurrence_artifacts_injected: { agent: { round, peer_file } |
+  null }` mapping each peer to its injected artifact (or null when no
+  prior READY exists for that peer in this session).
+
+**Anti-hallucination invariant preserved.** The server only injects a
+verifiable artifact (the peer's own prior response, persisted in the
+session directory). The injected block tells the peer the artifact's
+provenance and explicitly instructs against rubber-stamping. If the
+peer subsequently returns READY, that READY is grounded in the
+artifact + current source, not in fabrication. Concurrence opt-in is a
+caller decision (the `concurrence` flag is explicit in the tool input,
+not inferred); the server never auto-injects without the caller
+declaring concurrence intent.
+
+**No-op semantics.** When `concurrence=true` but no prior READY exists
+for the requested peer, the helper returns `null` and no injection
+occurs; the audit field reports `null` so the caller knows the flag
+was honored but had no artifact to inject. The prompt continues with
+the standard tail-directive only — equivalent to non-concurrence
+behavior.
+
+**Finding 3 — `spawn_rejected` diagnostic propagation.** `spawnPeer`'s
+close-nonzero handler attaches `exit_code`, `stderr_tail` (separate
+from the stringified Error message), and `transport_descriptor` to
+the rejection error since v1.2.5. The `ask_peer` and `ask_peers`
+handlers in server.js were discarding all of these and using only
+`String(err.message)` for both the audit (`saveFailedAttempt`) and
+the response payload — caller had to parse the message tail to
+recover the exit code.
+
+**Fix.** Both handlers now propagate `exit_code`,
+`transport_descriptor`, separated `stderr_tail`, and `duration_ms`
+through to:
+
+- `saveFailedAttempt` payload (so the meta.json audit captures the
+  diagnostic separately from the message string).
+- The tool response (so the caller gets actionable structured fields
+  instead of having to string-parse a tail).
+
+The change is purely additive — pre-v1.2.18 fields are preserved.
+
+**Finding 6 — `convergence_scope` field.** Pre-v1.2.18 the
+convergence snapshot already included `responded_peers`,
+`excluded_probe`, `excluded_runtime`, and `rejected_count`. Callers
+had to derive the effective regime (trilateral vs bilateral vs
+degraded) by counting the lists. v1.2.18 adds a single
+`convergence_scope` field with derived values:
+
+- `trilateral`: 2 peers responded, no exclusions or rejections.
+- `bilateral`: legacy ask_peer round (designed bilateral) OR ask_peers
+  with one designed peer responding cleanly.
+- `degraded_bilateral`: triangular intent fell back to bilateral
+  because one peer was excluded by probe or rejected at runtime.
+- `degraded_none`: zero peers responded.
+
+`deriveConvergenceScope(legacyBilateral, respondedPeers,
+excludedProbe, excludedRuntime)` is exported for testability and
+reuse. `computeConvergenceSnapshot` always includes the field
+(N-ary and legacy paths).
+
+**Finding 7 — `summary` accepted as structured field.** Peer
+responses (especially Claude) commonly include a one-line
+`"summary"` field in the structured `<cross_review_status>` block
+describing the round verdict. Pre-v1.2.18 the parser emitted
+`parser_warnings: ["unknown field 'summary' ignored"]` on every such
+response, treating useful operator-readable signal as defect noise.
+
+**Fix.** Added `"summary"` to `OPTIONAL_FIELDS` in `status-parser.js`.
+The field now round-trips cleanly into `peer_structured.summary`
+without warning. Genuinely unknown fields still warn (regression guard
+in smoke).
+
+**Test coverage.** 4 new smoke functions in `functional-smoke.js`:
+`driveV1218SummaryFieldAcceptanceUnit`, `driveV1218ConvergenceScopeUnit`,
+`driveV1218SpawnRejectedDiagnosticPropagationUnit`,
+`driveV1218ConcurrenceArtifactInjectionUnit`. 11 new invariants total,
+covering positive paths, negative paths (regression guards), and
+source-level anti-drift assertions for the wires through server.js +
+peer-spawn.js. Smoke total 220 GREEN (was 209).
+
+**Backwards compatibility.** All four fixes are additive within the
+v1.x frozen public surface. New tool inputs (`concurrence`) are
+optional with default `false`. New response fields
+(`concurrence_artifact_injected`, `concurrence_artifacts_injected`,
+`exit_code`, `transport_descriptor`, `stderr_tail`,
+`duration_ms` on rejection paths, `convergence_scope` on convergence
+snapshots) are pure additions — pre-v1.2.18 callers see no behavior
+delta. The `summary` field acceptance removes a warning that was
+already advisory (not blocking); peer prompts that emit `summary`
+now produce cleaner audit trails.
+
 ---
 
 ## 7. Summary of conventions for immediate use (UPDATED through v4.10)

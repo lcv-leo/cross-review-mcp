@@ -567,6 +567,39 @@ const CONVERGENCE_SPEC_VERSION = "v4.9";
 // session_sweep + outcome_reason, §6.19 convergence_health.
 const SESSION_SPEC_VERSION = "v4.14";
 
+// v1.2.18 / Finding 6 (handoff 2026-04-28): derive `convergence_scope`
+// from snapshot data so the caller can distinguish trilateral unanimity
+// from a bilateral round where one peer was excluded (probe failure or
+// runtime rejection). The information was already present in
+// excluded_probe / excluded_runtime / responded_peers but required the
+// caller to compute the regime themselves; this field surfaces it
+// explicitly. Values:
+//   - "trilateral": all expected peers responded and round was triangular.
+//   - "bilateral": legacy ask_peer round (designed bilateral) OR ask_peers
+//     where the session always intended one peer (caller had only one
+//     non-self in VALID_AGENTS, theoretical edge case).
+//   - "degraded_bilateral": triangular session that fell back to bilateral
+//     because one peer was excluded by probe or runtime rejection.
+//   - "degraded_none": triangular/bilateral session where zero peers
+//     responded (all excluded or rejected).
+function deriveConvergenceScope(
+	legacyBilateral,
+	respondedPeers,
+	excludedProbe,
+	excludedRuntime,
+) {
+	const responded = Array.isArray(respondedPeers) ? respondedPeers.length : 0;
+	const excluded =
+		(Array.isArray(excludedProbe) ? excludedProbe.length : 0) +
+		(Array.isArray(excludedRuntime) ? excludedRuntime.length : 0);
+	if (responded === 0) return "degraded_none";
+	if (legacyBilateral) return "bilateral";
+	if (responded >= 2) return "trilateral";
+	// responded === 1 in N-ary path:
+	if (excluded > 0) return "degraded_bilateral";
+	return "bilateral";
+}
+
 function computeConvergenceSnapshot(roundIndex, round, context = {}) {
 	const excludedProbe = Array.isArray(context.excluded_probe)
 		? [...context.excluded_probe]
@@ -622,6 +655,12 @@ function computeConvergenceSnapshot(roundIndex, round, context = {}) {
 			ready_peers: readyPeers,
 			blocking_peers: blockingPeers,
 			converged,
+			convergence_scope: deriveConvergenceScope(
+				false,
+				respondedPeers,
+				excludedProbe,
+				excludedRuntime,
+			),
 		};
 	}
 
@@ -649,6 +688,12 @@ function computeConvergenceSnapshot(roundIndex, round, context = {}) {
 		ready_peers: readyPeers,
 		blocking_peers: blockingPeers,
 		converged: callerReady && peerReady,
+		convergence_scope: deriveConvergenceScope(
+			true,
+			respondedPeers,
+			excludedProbe,
+			excludedRuntime,
+		),
 	};
 }
 
@@ -775,6 +820,84 @@ function savePromptForRound(sessionId, roundNum, prompt) {
 	);
 	atomicWriteFile(path.join(sessionDir(sessionId), fname), clipped.content);
 	return fname;
+}
+
+// v1.2.18 / Finding 1+2 (handoff 2026-04-28): support for concurrence
+// rounds. When the caller declares caller_status=READY and the peer is
+// being asked to confirm a previously-asserted READY, the peer subprocess
+// is stateless and has no in-context proof of its own prior verdict. A
+// concurrence round prompt typically reads "I concur with your previous
+// READY assessment" — the peer (correctly applying anti-hallucination
+// §6.14) cannot verify the prior assertion without the artifact and
+// returns NEEDS_EVIDENCE.
+//
+// `findLastReadyPeerArtifact(sessionId, peerAgent)` walks meta.rounds in
+// reverse and returns the file content of the most recent round where the
+// given peer agent reported peer_status='READY'. Returns null if no prior
+// READY exists for that peer in this session. The caller-side handler
+// uses this to optionally prepend the artifact to the next prompt when
+// `concurrence: true` is passed in the tool input.
+//
+// Returns: { round, peer_file, content } or null.
+function findLastReadyPeerArtifact(sessionId, peerAgent) {
+	if (typeof peerAgent !== "string" || peerAgent.length === 0) return null;
+	const meta = readMeta(sessionId);
+	if (!Array.isArray(meta.rounds) || meta.rounds.length === 0) return null;
+	for (let i = meta.rounds.length - 1; i >= 0; i--) {
+		const round = meta.rounds[i];
+		if (!round) continue;
+		// N-ary path: round.peers is an array of { agent, peer_status, peer_file }.
+		if (Array.isArray(round.peers)) {
+			const entry = round.peers.find(
+				(p) => p && p.agent === peerAgent && p.peer_status === "READY",
+			);
+			if (entry) {
+				const fname =
+					entry.peer_file ||
+					`round-${String(round.round).padStart(2, "0")}-peer-${peerAgent}.md`;
+				const fpath = path.join(sessionDir(sessionId), fname);
+				if (fs.existsSync(fpath)) {
+					const content = fs.readFileSync(fpath, "utf8");
+					return { round: round.round, peer_file: fname, content };
+				}
+			}
+			continue;
+		}
+		// Legacy bilateral path: round.peer + round.peer_status.
+		if (round.peer === peerAgent && round.peer_status === "READY") {
+			const fname =
+				round.peer_file ||
+				`round-${String(round.round).padStart(2, "0")}-peer-${peerAgent}.md`;
+			const fpath = path.join(sessionDir(sessionId), fname);
+			if (fs.existsSync(fpath)) {
+				const content = fs.readFileSync(fpath, "utf8");
+				return { round: round.round, peer_file: fname, content };
+			}
+		}
+	}
+	return null;
+}
+
+// v1.2.18 / Finding 1+2 helper: format an auto-injected prior peer
+// artifact block to prepend to a concurrence prompt. The peer reads this
+// as the most recent verifiable record of its own prior assessment, so
+// it can confirm consistency without rubber-stamping fabrication.
+function formatPriorArtifactForPrompt(artifact) {
+	if (!artifact || typeof artifact.content !== "string") return "";
+	return [
+		"## Prior round artifact (auto-injected by cross-review-mcp v1.2.18 for concurrence)",
+		"",
+		`Source: \`${artifact.peer_file}\` (this session, round ${artifact.round})`,
+		"",
+		"This is the verbatim content of your own prior peer response in this session. Use it as the verifiable record of your prior verdict; the caller's concurrence round prompt is asking you to confirm consistency with this record. Per anti-hallucination discipline (§6.14), you SHOULD NOT rubber-stamp; if material claims in the caller's prompt cannot be reconciled with this artifact or current source, prefer NEEDS_EVIDENCE over READY.",
+		"",
+		"```",
+		artifact.content.trim(),
+		"```",
+		"",
+		"---",
+		"",
+	].join("\n");
 }
 
 function savePeerResponse(sessionId, roundNum, peerAgent, content, status) {
@@ -1181,6 +1304,9 @@ module.exports = {
 	appendRound,
 	savePromptForRound,
 	savePeerResponse,
+	// v1.2.18 / Finding 1+2 (handoff 2026-04-28).
+	findLastReadyPeerArtifact,
+	formatPriorArtifactForPrompt,
 	saveCapabilitySnapshot,
 	saveFailedAttempt,
 	checkConvergence,
@@ -1198,6 +1324,8 @@ module.exports = {
 	computeConvergenceSnapshot,
 	collectSessionExclusions,
 	CONVERGENCE_SPEC_VERSION,
+	// v1.2.18 / Finding 6 (handoff 2026-04-28).
+	deriveConvergenceScope,
 	// v1.1.0 / spec v4.13 additions.
 	SESSION_SPEC_VERSION,
 	SWEEP_MIN_AGE_MS,

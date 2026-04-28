@@ -15,6 +15,39 @@ Histórico de mudanças do servidor MCP de cross-review (bilateral claude↔code
 
 ---
 
+## [1.2.18] — 2026-04-28
+
+**Operator-driven improvements from Codex's technical handoff after Maestro Editorial AI v0.3.10 cross-review (session `28343cdb`).**
+
+Codex shared a technical handoff (`maestro-app/.ai/handoffs/2026-04-28-cross-review-mcp-technical-prompt-for-claude.md`) listing 8 operational findings observed during the v0.3.10 trilateral. The caller (claude) audited each finding against current source + the actual session artifacts (`~/.cross-review/28343cdb-36bf-4667-b0d0-2df115cf175a/`) and confirmed Findings 1, 2, 3, 6, 7 as real architectural gaps inside the v1.x frozen public surface. v1.2.18 ships those four (1+2 are two halves of the same gap) as additive improvements. Findings 4 (heartbeat), 5 (stderr classification), 8 (evidence directory convention) are deferred to v1.3.0 (minor bump because Finding 8 introduces a new MCP tool).
+
+### Adicionado
+- **`concurrence: boolean` parameter on `ask_peer` and `ask_peers`** (Findings 1+2). Opt-in. When true:
+  - `ask_peer`: server walks `meta.rounds` in reverse, finds the most recent round where the bilateral peer reported `peer_status='READY'`, and auto-prepends the verbatim artifact content to the prompt before the tail directive. The artifact block is self-describing (declares it was auto-injected by v1.2.18 for concurrence) and includes anti-hallucination guidance — the peer is explicitly instructed NOT to rubber-stamp; if material claims in the new prompt cannot be reconciled with the artifact or current source, NEEDS_EVIDENCE remains the correct response. Response includes `concurrence_artifact_injected: { round, peer_file } | null` so the caller can audit whether injection fired.
+  - `ask_peers`: per-peer injection via `spawnPeers` `options.perAgentPrompts`. Each peer in `metaPeers` independently looks up its OWN prior READY artifact; no cross-contamination between peers. Response includes `concurrence_artifacts_injected: { agent: { round, peer_file } | null }` mapping each peer to its injected artifact (or null when no prior READY exists).
+  - Closes the gap surfaced in Maestro session `28343cdb` Round 4 where Codex declared `caller_status=READY` with prompt "I concur with your previous READY assessment", and the peer Claude correctly returned NEEDS_EVIDENCE per anti-hallucination discipline (§6.14) because its stateless subprocess had no in-context proof of the prior verdict.
+- **New session-store helpers** `findLastReadyPeerArtifact(sessionId, peerAgent)` and `formatPriorArtifactForPrompt(artifact)`. Exported for testability and reuse.
+- **`convergence_scope` field on convergence snapshots** (Finding 6). New helper `deriveConvergenceScope(legacyBilateral, respondedPeers, excludedProbe, excludedRuntime)` maps the existing `responded_peers` / `excluded_probe` / `excluded_runtime` data into a single regime label: `trilateral` (2 peers responded, no exclusions), `bilateral` (legacy ask_peer round OR designed-bilateral session), `degraded_bilateral` (triangular intent, 1 peer responded due to exclusion), `degraded_none` (zero peers responded). Surfaces the effective convergence regime at a glance instead of forcing the caller to derive it from raw counts.
+- **`summary` accepted as optional structured field** (Finding 7). Added to `OPTIONAL_FIELDS` in `status-parser.js`. Peer responses commonly include a one-line `"summary"` field describing the round verdict; pre-v1.2.18 every such response triggered `parser_warnings: ["unknown field 'summary' ignored"]` — operationally useful field treated as defect noise. Now the field round-trips cleanly into `peer_structured.summary`. Genuinely unknown fields still warn (regression guard).
+- **4 new smoke functions, 11 new invariants** in `scripts/functional-smoke.js`:
+  - `driveV1218SummaryFieldAcceptanceUnit`: positive (no warning + value preserved) + negative (random unknown field still warns).
+  - `driveV1218ConvergenceScopeUnit`: 5 deriveConvergenceScope cases + integration via computeConvergenceSnapshot for both N-ary and legacy paths.
+  - `driveV1218SpawnRejectedDiagnosticPropagationUnit`: source-level wiring asserts in BOTH ask_peer and ask_peers handlers (exit_code, transport_descriptor, duration_ms in saveFailedAttempt) + upstream regression guard on spawnPeer's rejection error fields.
+  - `driveV1218ConcurrenceArtifactInjectionUnit`: synthetic session with NOT_READY round 1 + READY round 2; helper returns most-recent READY (round 2); null when no prior READY exists; format helper produces self-describing block with anti-hallucination guidance; source-level wiring asserts in server.js handlers + spawnPeers `options.perAgentPrompts`.
+
+### Corrigido
+- **`spawn_rejected` diagnostic propagation** (Finding 3). `ask_peer` and `ask_peers` handlers were discarding `exit_code`, `transport_descriptor`, separated `stderr_tail`, and `duration_ms` from the spawnPeer rejection error — only `.message` was retained. Caller had to parse the stringified message tail to recover exit code. spawnPeer attached all these fields since v1.2.5 ([peer-spawn.js:1466-1468](src/lib/peer-spawn.js)); the wires were just missing in server.js. v1.2.18 wires them through both handlers into `saveFailedAttempt` audit AND the response payload.
+
+### Validação
+- `npm test`: 220 GREEN (was 209, +11 invariants from 4 new functions).
+- `npm run check-models`: no drift.
+- `npx biome check src scripts`: clean (no errors).
+
+### Cross-review
+- Session id: `50486ffb-b8fb-4f8f-89bb-92900a362aa6` (caller=claude). R1 outcome: gemini READY (verified, evidence_sources cited, all 6 caller R1 questions answered, recommendation (e) on `summary` truncation warning applied as caller-side R1 follow-up before R2). Codex rejected by host environment issue (`InvalidOperation: Cannot set property. Property setting is supported only on core types in this language mode.` — Windows ConstrainedLanguage/AppLocker policy intercepting Codex CLI's internal tool invocations; codex-side, not v1.2.18 code). R2+R3 retry attempts hit transient gemini 429 + same codex environment error. Operator authorized ship-with-deferral after gemini READY: codex environment fix (Windows CLM policy review or `[windows] sandbox` config change in `~/.codex/config.toml`) is operator-side workstream; retro-trilateral once codex CLI runs cleanly on this host. Recorded as a partial-trilateral exception per `feedback_cross_review_self_repair_exception.md` precedent (the precedent covers self-broken-tool; the operator extended it here to also cover host-environment-broken-peer when the peer's failure is provably unrelated to the code change under review).
+
+---
+
 ## [1.2.17] — 2026-04-28
 
 **npm-shim recognition + findOrphans wiring anti-drift (spec §6.22.1 v1.2.17 amendment).**

@@ -1419,6 +1419,17 @@ async function runAll() {
 	all.push(...s74.results);
 	const s75 = await driveV1217FindOrphansWiringAntiDriftUnit();
 	all.push(...s75.results);
+	// v1.2.18 / handoff 2026-04-28 (Codex's findings on Maestro v0.3.10
+	// session 28343cdb). 4 fixes shipped together as additive improvements
+	// within the v1.x frozen public surface.
+	const s76 = await driveV1218SummaryFieldAcceptanceUnit();
+	all.push(...s76.results);
+	const s77 = await driveV1218ConvergenceScopeUnit();
+	all.push(...s77.results);
+	const s78 = await driveV1218SpawnRejectedDiagnosticPropagationUnit();
+	all.push(...s78.results);
+	const s79 = await driveV1218ConcurrenceArtifactInjectionUnit();
+	all.push(...s79.results);
 	return all;
 }
 
@@ -6206,6 +6217,424 @@ async function driveV1217FindOrphansWiringAntiDriftUnit() {
 	);
 	results.push({
 		step: "v1.2.17 §6.22.1 v1.2.17 amendment anti-drift: findOrphans body wires ancestorPidSet + ancestors.has(p.pid) (Bug #2 ancestor-skip is structurally locked)",
+		ok: true,
+	});
+
+	return { results };
+}
+
+// v1.2.18 / Finding 7 — `summary` accepted as optional structured field.
+async function driveV1218SummaryFieldAcceptanceUnit() {
+	const results = [];
+	delete require.cache[require.resolve("../src/lib/status-parser.js")];
+	const sp = require("../src/lib/status-parser.js");
+
+	assert(
+		sp.OPTIONAL_FIELDS.has("summary"),
+		"v1.2.18 Finding 7: status-parser OPTIONAL_FIELDS must include 'summary'",
+	);
+
+	// Behavioral: a structured block with `summary` must NOT emit a
+	// "unknown field 'summary' ignored" warning.
+	const blockWithSummary = `<cross_review_status>{"status":"READY","confidence":"verified","evidence_sources":["file:foo.js"],"summary":"v0.3.10 delta verified: sidecar paths align with unit tests"}</cross_review_status>`;
+	const parsed = sp.parsePeerResponse(blockWithSummary);
+	const summaryWarnings = (parsed.parser_warnings || []).filter((w) =>
+		/unknown field 'summary'/i.test(String(w)),
+	);
+	assert(
+		summaryWarnings.length === 0,
+		`v1.2.18 Finding 7: 'summary' field must NOT emit 'unknown field' warning (got: ${JSON.stringify(parsed.parser_warnings)})`,
+	);
+	assert(
+		parsed.structured?.summary ===
+			"v0.3.10 delta verified: sidecar paths align with unit tests",
+		"v1.2.18 Finding 7: 'summary' value must round-trip through parsePeerResponse into structured.summary",
+	);
+	results.push({
+		step: "v1.2.18 Finding 7: status-parser accepts 'summary' field, no parser_warnings, value preserved in structured payload",
+		ok: true,
+	});
+
+	// Sanity: unknown field still warns.
+	const blockWithUnknown = `<cross_review_status>{"status":"READY","confidence":"verified","evidence_sources":["file:foo.js"],"random_field":"value"}</cross_review_status>`;
+	const parsedUnknown = sp.parsePeerResponse(blockWithUnknown);
+	const unknownWarnings = (parsedUnknown.parser_warnings || []).filter((w) =>
+		/unknown field 'random_field'/i.test(String(w)),
+	);
+	assert(
+		unknownWarnings.length === 1,
+		"v1.2.18 Finding 7 sanity: genuinely unknown field must still emit warning",
+	);
+	results.push({
+		step: "v1.2.18 Finding 7 sanity: parser still warns on genuinely unknown fields (regression guard)",
+		ok: true,
+	});
+
+	// v1.2.18 Finding 7 R1 (gemini): summary > 500 chars MUST emit truncation
+	// warning AND value is clipped to exactly 500 chars (aligns with the
+	// existing per-field-too-long warning mechanics in validateStringArray).
+	const longSummary = "x".repeat(600);
+	const blockWithLongSummary = `<cross_review_status>{"status":"READY","confidence":"verified","evidence_sources":["file:foo.js"],"summary":${JSON.stringify(longSummary)}}</cross_review_status>`;
+	const parsedLong = sp.parsePeerResponse(blockWithLongSummary);
+	const truncWarnings = (parsedLong.parser_warnings || []).filter((w) =>
+		/summary truncated to 500 chars/i.test(String(w)),
+	);
+	assert(
+		truncWarnings.length === 1,
+		`v1.2.18 Finding 7 R1: summary > 500 chars MUST emit truncation warning (got: ${JSON.stringify(parsedLong.parser_warnings)})`,
+	);
+	assert(
+		parsedLong.structured?.summary?.length === 500,
+		"v1.2.18 Finding 7 R1: summary value MUST be truncated to exactly 500 chars when over the cap",
+	);
+	results.push({
+		step: "v1.2.18 Finding 7 R1 (gemini): summary > 500 chars emits truncation warning AND value clipped to 500 chars",
+		ok: true,
+	});
+
+	// Wrong shape (non-string) still warns.
+	const blockWithBadSummary = `<cross_review_status>{"status":"READY","confidence":"verified","evidence_sources":["file:foo.js"],"summary":42}</cross_review_status>`;
+	const parsedBad = sp.parsePeerResponse(blockWithBadSummary);
+	const shapeWarnings = (parsedBad.parser_warnings || []).filter((w) =>
+		/summary has invalid shape/i.test(String(w)),
+	);
+	assert(
+		shapeWarnings.length === 1,
+		"v1.2.18 Finding 7: summary with non-string shape must emit warning",
+	);
+	results.push({
+		step: "v1.2.18 Finding 7: summary with invalid shape (non-string) emits warning, dropped from clean",
+		ok: true,
+	});
+
+	return { results };
+}
+
+// v1.2.18 / Finding 6 — convergence_scope derived from snapshot data.
+async function driveV1218ConvergenceScopeUnit() {
+	const results = [];
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
+
+	assert(
+		typeof store.deriveConvergenceScope === "function",
+		"v1.2.18 Finding 6: deriveConvergenceScope must be exported",
+	);
+
+	// Trilateral: 2 peers responded, no exclusions.
+	assert(
+		store.deriveConvergenceScope(false, ["codex", "gemini"], [], []) ===
+			"trilateral",
+		"v1.2.18 Finding 6: 2 peers responded + no exclusions → trilateral",
+	);
+	// Degraded bilateral: 1 peer responded, 1 excluded by probe.
+	assert(
+		store.deriveConvergenceScope(false, ["codex"], ["gemini"], []) ===
+			"degraded_bilateral",
+		"v1.2.18 Finding 6: 1 peer responded + 1 excluded probe → degraded_bilateral",
+	);
+	// Degraded bilateral via runtime rejection.
+	assert(
+		store.deriveConvergenceScope(false, ["codex"], [], ["gemini"]) ===
+			"degraded_bilateral",
+		"v1.2.18 Finding 6: 1 peer responded + 1 excluded runtime → degraded_bilateral",
+	);
+	// True bilateral via legacy ask_peer round.
+	assert(
+		store.deriveConvergenceScope(true, ["codex"], [], []) === "bilateral",
+		"v1.2.18 Finding 6: legacy bilateral round → bilateral",
+	);
+	// Degraded none: zero peers responded.
+	assert(
+		store.deriveConvergenceScope(false, [], ["codex", "gemini"], []) ===
+			"degraded_none",
+		"v1.2.18 Finding 6: zero peers responded → degraded_none",
+	);
+	results.push({
+		step: "v1.2.18 Finding 6: deriveConvergenceScope returns correct regime label for trilateral / bilateral / degraded_bilateral / degraded_none",
+		ok: true,
+	});
+
+	// Snapshot integration: computeConvergenceSnapshot must include
+	// convergence_scope in its output.
+	const naryRound = {
+		caller: "claude",
+		caller_status: "READY",
+		peers: [
+			{ agent: "codex", peer_status: "READY" },
+			{ agent: "gemini", peer_status: "READY" },
+		],
+		quorum: { requested: 2, responded: 2, rejected: 0 },
+	};
+	const naryShot = store.computeConvergenceSnapshot(0, naryRound, {
+		excluded_probe: [],
+		excluded_runtime: [],
+	});
+	assert(
+		naryShot.convergence_scope === "trilateral",
+		`v1.2.18 Finding 6: N-ary snapshot with 2 peers READY must report convergence_scope=trilateral (got '${naryShot.convergence_scope}')`,
+	);
+
+	const legacyRound = {
+		caller: "codex",
+		caller_status: "READY",
+		peer: "claude",
+		peer_status: "READY",
+	};
+	const legacyShot = store.computeConvergenceSnapshot(0, legacyRound, {});
+	assert(
+		legacyShot.convergence_scope === "bilateral",
+		`v1.2.18 Finding 6: legacy bilateral snapshot must report convergence_scope=bilateral (got '${legacyShot.convergence_scope}')`,
+	);
+	results.push({
+		step: "v1.2.18 Finding 6: computeConvergenceSnapshot surfaces convergence_scope on both N-ary and legacy paths",
+		ok: true,
+	});
+
+	return { results };
+}
+
+// v1.2.18 / Finding 3 — spawn_rejected diagnostic propagation.
+// Verifies that spawnPeer attaches exit_code + stderr_tail + transport_descriptor
+// to its rejection error (already true since v1.2.5) AND that the server.js
+// handler propagates these to saveFailedAttempt + the response payload.
+// Source-level anti-drift assertion: the propagation wires are in place.
+async function driveV1218SpawnRejectedDiagnosticPropagationUnit() {
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const src = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+
+	// Both ask_peer and ask_peers handlers must have spawnExitCode wired
+	// from spawnErr.exit_code / reason.exit_code.
+	const askPeerExitCodeWired =
+		/spawnExitCode\s*=\s*Number\.isFinite\(\s*spawnErr\?\.exit_code\s*\)/.test(
+			src,
+		);
+	const askPeersExitCodeWired =
+		/spawnExitCode\s*=\s*Number\.isFinite\(\s*reason\?\.exit_code\s*\)/.test(
+			src,
+		);
+	assert(
+		askPeerExitCodeWired,
+		"v1.2.18 Finding 3 anti-drift: ask_peer handler MUST extract spawnExitCode from spawnErr.exit_code via Number.isFinite guard",
+	);
+	assert(
+		askPeersExitCodeWired,
+		"v1.2.18 Finding 3 anti-drift: ask_peers handler MUST extract spawnExitCode from reason.exit_code via Number.isFinite guard",
+	);
+
+	// Both handlers must include exit_code AND transport_descriptor AND
+	// duration_ms in the saveFailedAttempt payload.
+	const askPeerSavePayload = src.match(
+		/saveFailedAttempt\s*\(\s*sessionId\s*,\s*sessionLegacyPeer\s*,\s*failureClass\s*,\s*\{[\s\S]*?\}\s*\)/,
+	);
+	assert(
+		askPeerSavePayload &&
+			/exit_code:\s*spawnExitCode/.test(askPeerSavePayload[0]) &&
+			/transport_descriptor:\s*spawnTransport/.test(askPeerSavePayload[0]) &&
+			/duration_ms:\s*durationMsAtFailure/.test(askPeerSavePayload[0]),
+		"v1.2.18 Finding 3: ask_peer saveFailedAttempt MUST include exit_code, transport_descriptor, duration_ms",
+	);
+
+	const askPeersSavePayload = src.match(
+		/saveFailedAttempt\s*\(\s*sessionId\s*,\s*entry\.agent\s*,\s*failureClass\s*,\s*\{[\s\S]*?\}\s*\)/,
+	);
+	assert(
+		askPeersSavePayload &&
+			/exit_code:\s*spawnExitCode/.test(askPeersSavePayload[0]) &&
+			/transport_descriptor:\s*spawnTransport/.test(askPeersSavePayload[0]) &&
+			/duration_ms:\s*durationMs/.test(askPeersSavePayload[0]),
+		"v1.2.18 Finding 3: ask_peers saveFailedAttempt MUST include exit_code, transport_descriptor, duration_ms",
+	);
+
+	results.push({
+		step: "v1.2.18 Finding 3: spawn_rejected diagnostic propagation wired in BOTH ask_peer + ask_peers handlers (exit_code + transport_descriptor + duration_ms)",
+		ok: true,
+	});
+
+	// Behavioral: peer-spawn.js spawnPeer rejection error already has the
+	// fields. Just validate the source-level guarantee is intact.
+	const peerSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	assert(
+		/err\.exit_code\s*=\s*code/.test(peerSrc) &&
+			/err\.stderr_tail\s*=\s*stderr\.slice\(\s*-400\s*\)/.test(peerSrc) &&
+			/err\.transport_descriptor\s*=\s*descriptor/.test(peerSrc),
+		"v1.2.18 Finding 3 upstream: spawnPeer close-nonzero handler MUST attach exit_code, stderr_tail, transport_descriptor to the rejection error (was true since v1.2.5; this is a regression guard)",
+	);
+	results.push({
+		step: "v1.2.18 Finding 3 upstream: spawnPeer rejection error carries exit_code + stderr_tail + transport_descriptor (regression guard for v1.2.5+ contract)",
+		ok: true,
+	});
+
+	return { results };
+}
+
+// v1.2.18 / Finding 1+2 — concurrence flag with auto-injection of prior
+// peer artifact.
+async function driveV1218ConcurrenceArtifactInjectionUnit() {
+	const results = [];
+	const fs = require("node:fs");
+	const path = require("node:path");
+	const os = require("node:os");
+
+	delete require.cache[require.resolve("../src/lib/session-store.js")];
+	const store = require("../src/lib/session-store.js");
+
+	// Helpers must be exported.
+	assert(
+		typeof store.findLastReadyPeerArtifact === "function",
+		"v1.2.18 Finding 1+2: findLastReadyPeerArtifact must be exported",
+	);
+	assert(
+		typeof store.formatPriorArtifactForPrompt === "function",
+		"v1.2.18 Finding 1+2: formatPriorArtifactForPrompt must be exported",
+	);
+
+	// Build a synthetic session via initSession + appendRound + savePeerResponse
+	// and verify the helper finds the most recent READY artifact.
+	const sessionId = store.initSession({
+		caller: "codex",
+		peers: ["claude", "gemini"],
+		task: "v1.2.18 smoke: concurrence injection",
+	});
+
+	// Round 1: claude=NOT_READY (should NOT be picked up).
+	store.savePeerResponse(
+		sessionId,
+		1,
+		"claude",
+		"<!-- round=1 peer=claude status=NOT_READY -->\nNeed more evidence.",
+		"NOT_READY",
+	);
+	store.appendRound(sessionId, {
+		round: 1,
+		caller: "codex",
+		caller_status: "NOT_READY",
+		peers: [
+			{
+				agent: "claude",
+				peer_status: "NOT_READY",
+				peer_file: "round-01-peer-claude.md",
+			},
+		],
+		quorum: { requested: 1, responded: 1, rejected: 0 },
+	});
+
+	// Round 2: claude=READY (THIS is what should be returned).
+	store.savePeerResponse(
+		sessionId,
+		2,
+		"claude",
+		"<!-- round=2 peer=claude status=READY -->\nVerified delta against source. No remaining blockers.",
+		"READY",
+	);
+	store.appendRound(sessionId, {
+		round: 2,
+		caller: "codex",
+		caller_status: "NOT_READY",
+		peers: [
+			{
+				agent: "claude",
+				peer_status: "READY",
+				peer_file: "round-02-peer-claude.md",
+			},
+		],
+		quorum: { requested: 1, responded: 1, rejected: 0 },
+	});
+
+	const found = store.findLastReadyPeerArtifact(sessionId, "claude");
+	assert(
+		found && found.round === 2,
+		`v1.2.18 Finding 1+2: findLastReadyPeerArtifact must return the MOST RECENT READY round (expected round=2, got ${JSON.stringify(found)})`,
+	);
+	assert(
+		found.peer_file === "round-02-peer-claude.md",
+		"v1.2.18 Finding 1+2: peer_file must point to the round-02 artifact",
+	);
+	assert(
+		/Verified delta against source/.test(found.content),
+		"v1.2.18 Finding 1+2: artifact content must include the round-02 body",
+	);
+	results.push({
+		step: "v1.2.18 Finding 1+2: findLastReadyPeerArtifact returns most-recent READY peer artifact, ignoring prior NOT_READY rounds",
+		ok: true,
+	});
+
+	// No-op for an agent with no prior READY.
+	const notFound = store.findLastReadyPeerArtifact(sessionId, "gemini");
+	assert(
+		notFound === null,
+		"v1.2.18 Finding 1+2: helper returns null when no prior READY exists for the requested peer",
+	);
+	results.push({
+		step: "v1.2.18 Finding 1+2: findLastReadyPeerArtifact returns null when no prior READY for given peer (concurrence becomes no-op)",
+		ok: true,
+	});
+
+	// Format helper produces a prompt block referencing the artifact + the
+	// anti-hallucination guidance.
+	const formatted = store.formatPriorArtifactForPrompt(found);
+	assert(
+		/Prior round artifact \(auto-injected by cross-review-mcp v1\.2\.18 for concurrence\)/.test(
+			formatted,
+		),
+		"v1.2.18 Finding 1+2: formatted block must declare itself as concurrence auto-injection",
+	);
+	assert(
+		/anti-hallucination/i.test(formatted) &&
+			/SHOULD NOT rubber-stamp/i.test(formatted),
+		"v1.2.18 Finding 1+2: formatted block must include anti-hallucination guidance (peer should NOT rubber-stamp)",
+	);
+	assert(
+		/Verified delta against source/.test(formatted),
+		"v1.2.18 Finding 1+2: formatted block must embed the artifact content verbatim",
+	);
+	results.push({
+		step: "v1.2.18 Finding 1+2: formatPriorArtifactForPrompt produces self-describing block with artifact content + anti-hallucination guidance (no rubber-stamp)",
+		ok: true,
+	});
+
+	// Source-level wiring: ask_peer + ask_peers handlers must consume the
+	// concurrence flag.
+	const serverSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "server.js"),
+		"utf8",
+	);
+	assert(
+		/concurrenceRequested\s*=\s*args\.concurrence\s*===\s*true/.test(serverSrc),
+		"v1.2.18 Finding 1+2 anti-drift: handlers MUST extract concurrence flag from args.concurrence === true",
+	);
+	assert(
+		/findLastReadyPeerArtifact\s*\(/.test(serverSrc),
+		"v1.2.18 Finding 1+2 anti-drift: server.js MUST call findLastReadyPeerArtifact in concurrence path",
+	);
+	assert(
+		/formatPriorArtifactForPrompt\s*\(/.test(serverSrc),
+		"v1.2.18 Finding 1+2 anti-drift: server.js MUST call formatPriorArtifactForPrompt to wrap the injected content",
+	);
+	results.push({
+		step: "v1.2.18 Finding 1+2 anti-drift: server.js handlers wire concurrence flag → findLastReadyPeerArtifact → formatPriorArtifactForPrompt → prompt prepend",
+		ok: true,
+	});
+
+	// peer-spawn.js spawnPeers must accept perAgentPrompts override.
+	const peerSrc = fs.readFileSync(
+		path.resolve(__dirname, "..", "src", "lib", "peer-spawn.js"),
+		"utf8",
+	);
+	assert(
+		/options\.perAgentPrompts/.test(peerSrc),
+		"v1.2.18 Finding 1+2: spawnPeers MUST accept options.perAgentPrompts for per-agent prompt overrides",
+	);
+	results.push({
+		step: "v1.2.18 Finding 1+2: spawnPeers accepts options.perAgentPrompts for per-peer concurrence injection (no cross-contamination between peers)",
 		ok: true,
 	});
 

@@ -1526,10 +1526,27 @@ function spawnPeers(agents, prompt, options = {}) {
 	const settled = new Map(); // agent -> {status, value|reason}
 	const perAgentResolvers = new Map(); // agent -> resolver function
 
+	// v1.2.18 / Finding 1+2: support per-agent prompt overrides so concurrence
+	// auto-injection can give each peer ONLY its own prior artifact (not other
+	// peers' artifacts). When `options.perAgentPrompts[agent]` is a non-empty
+	// string, that string replaces the broadcast `prompt` for that specific
+	// agent. Falls back to the broadcast prompt for any agent without an
+	// override. Backward-compatible: callers passing only `prompt` still work.
+	const perAgentPrompts =
+		options.perAgentPrompts && typeof options.perAgentPrompts === "object"
+			? options.perAgentPrompts
+			: null;
+
 	const tasks = agents.map((a) => {
 		return new Promise((resolve) => {
 			perAgentResolvers.set(a, resolve);
-			spawnPeer(a, prompt, options).then(
+			const agentPrompt =
+				perAgentPrompts &&
+				typeof perAgentPrompts[a] === "string" &&
+				perAgentPrompts[a].length > 0
+					? perAgentPrompts[a]
+					: prompt;
+			spawnPeer(a, agentPrompt, options).then(
 				(value) => {
 					if (settled.has(a)) return;
 					const entry = { agent: a, status: "fulfilled", value };

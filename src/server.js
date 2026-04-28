@@ -60,7 +60,7 @@ const {
 	MODEL_CLOSE_TAG,
 } = require("./lib/model-parser.js");
 
-const VERSION = "1.2.17";
+const VERSION = "1.2.18";
 
 // v1.2.4: release date for `server_info`. Updated alongside VERSION on each
 // ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
@@ -661,6 +661,11 @@ PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be
 						description:
 							"Caller's own STATUS for this round. READY = caller has nothing to add and concurs with peer's previous position (if any). NOT_READY = caller has applied changes, has objections, needs evidence from peer, or wants another round regardless.",
 					},
+					concurrence: {
+						type: "boolean",
+						description:
+							"v1.2.18 (Finding 1+2 from handoff 2026-04-28). Opt-in: when true, the server walks meta.rounds in reverse and finds the most recent round where THIS bilateral peer reported peer_status='READY'. If found, the verbatim content of that round's peer artifact is auto-prepended to the prompt as a 'Prior round artifact' section before the tail directive. The peer subprocess is stateless across rounds, so concurrence prompts like 'I concur with your previous READY assessment' produce NEEDS_EVIDENCE responses (correctly applying anti-hallucination §6.14 — the peer has no in-context proof of its prior verdict). This flag closes that gap by giving the peer a verifiable artifact of its own prior assessment to reference. Anti-hallucination discipline is preserved: the injection block explicitly instructs the peer NOT to rubber-stamp; if material claims in the new prompt cannot be reconciled with the artifact or current source, NEEDS_EVIDENCE remains the correct response. No-op when there is no prior READY in the session for this peer; the response includes a `concurrence_artifact_injected` field so the caller can audit whether the auto-injection fired. Default false (preserves pre-v1.2.18 behavior).",
+					},
 				},
 				required: ["session_id", "prompt", "caller_status"],
 			},
@@ -680,6 +685,11 @@ PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be
 					caller_status: {
 						type: "string",
 						enum: ["READY", "NOT_READY"],
+					},
+					concurrence: {
+						type: "boolean",
+						description:
+							"v1.2.18 (Finding 1+2 from handoff 2026-04-28). Opt-in: when true, the server walks meta.rounds in reverse and for EACH peer in metaPeers finds the most recent round where that peer reported peer_status='READY'. The verbatim content of each prior peer artifact is auto-prepended to the prompt for that specific peer (each peer sees only its own prior artifact). Same anti-hallucination guard as ask_peer's concurrence: the injected block instructs the peer NOT to rubber-stamp. Per-peer audit: the response includes `concurrence_artifacts_injected: { agent: peer_file or null }` so the caller can see which peers received an artifact and which had no prior READY. Default false.",
 					},
 				},
 				required: ["session_id", "prompt", "caller_status"],
@@ -1105,13 +1115,49 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 							lexemes: promptLanguageWarning.signals.lexemes_matched.length,
 						});
 					}
-					const promptWithTail = attachPromptTailDirective(rawPrompt);
+					// v1.2.18 / Finding 1+2 (handoff 2026-04-28): concurrence
+					// auto-injection. When the caller opts in via concurrence:true,
+					// look up the peer's most recent READY artifact in this
+					// session and prepend its verbatim content to the prompt
+					// before the tail directive. The peer can then verify its
+					// own prior verdict instead of returning NEEDS_EVIDENCE.
+					const concurrenceRequested = args.concurrence === true;
+					let priorArtifact = null;
+					let promptWithArtifact = rawPrompt;
+					if (concurrenceRequested) {
+						priorArtifact = store.findLastReadyPeerArtifact(
+							sessionId,
+							sessionLegacyPeer,
+						);
+						if (priorArtifact) {
+							promptWithArtifact =
+								store.formatPriorArtifactForPrompt(priorArtifact) + rawPrompt;
+							log("ask_peer: concurrence artifact injected", {
+								session: sessionId,
+								round: roundNum,
+								peer: sessionLegacyPeer,
+								artifact_round: priorArtifact.round,
+								artifact_file: priorArtifact.peer_file,
+								injected_bytes: Buffer.byteLength(promptWithArtifact, "utf8"),
+							});
+						} else {
+							log("ask_peer: concurrence requested but no prior READY found", {
+								session: sessionId,
+								round: roundNum,
+								peer: sessionLegacyPeer,
+							});
+						}
+					}
+					const promptWithTail = attachPromptTailDirective(promptWithArtifact);
 					store.savePromptForRound(sessionId, roundNum, promptWithTail);
 					log(`ask_peer: spawning ${sessionLegacyPeer}`, {
 						session: sessionId,
 						round: roundNum,
 						caller_status: callerStatus,
 						prompt_bytes: Buffer.byteLength(promptWithTail, "utf8"),
+						concurrence_artifact_injected: priorArtifact
+							? priorArtifact.peer_file
+							: null,
 					});
 					const t0 = Date.now();
 					let spawnResult;
@@ -1145,12 +1191,28 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 						const reasonMsg = String(
 							spawnErr?.message || spawnErr || "spawn rejected",
 						);
+						// v1.2.18 / Finding 3 (handoff 2026-04-28): propagate
+						// exit_code, transport_descriptor, duration_ms, stderr_tail
+						// (separate from full message) so spawn_rejected is
+						// actionable. spawnPeer already attaches these to the err
+						// object on close-nonzero (peer-spawn.js:1466-1468); we
+						// were discarding everything except .message — caller had
+						// to parse the stringified message tail to get exit code.
+						const spawnExitCode = Number.isFinite(spawnErr?.exit_code)
+							? spawnErr.exit_code
+							: null;
+						const spawnTransport = spawnErr?.transport_descriptor || null;
+						const spawnStderrTail =
+							typeof spawnErr?.stderr_tail === "string"
+								? spawnErr.stderr_tail
+								: null;
+						const durationMsAtFailure = Date.now() - t0;
 						store.saveFailedAttempt(
 							sessionId,
 							sessionLegacyPeer,
 							failureClass,
 							{
-								stderr_tail: reasonMsg,
+								stderr_tail: spawnStderrTail ?? reasonMsg,
 								failure_class: failureClass,
 								round: roundNum,
 								retry_attempt: 0,
@@ -1164,6 +1226,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 									null,
 								recovery_hint: recoveryHint,
 								docs_url: promptFlagged?.docs_url ?? null,
+								exit_code: spawnExitCode,
+								transport_descriptor: spawnTransport,
+								duration_ms: durationMsAtFailure,
 							},
 						);
 						return {
@@ -1183,6 +1248,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 												? 'Avoid charged words like "adversarial", "jailbreak", "exploit", "attack", "bypass", "circumvent". Replace model-introspection prose with neutral technical descriptions. Prefer "response anomaly" over "silent_downgrade", "edge case" over "adversarial input", "alternative path" over "bypass". Resubmit the reformulated prompt via ask_peer in a new round; do NOT abort the session. Repeat up to 5 reformulation attempts before escalating to the operator.'
 												: null,
 											reason: reasonMsg.slice(-400),
+											exit_code: spawnExitCode,
+											stderr_tail: spawnStderrTail
+												? spawnStderrTail.slice(-400)
+												: null,
+											transport_descriptor: spawnTransport,
+											duration_ms: durationMsAtFailure,
 										},
 										null,
 										2,
@@ -1297,6 +1368,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 										duration_ms: durationMs,
 										content: stdout,
 										stderr_tail: (stderr || "").slice(-600),
+										// v1.2.18 / Finding 1+2 audit trail: tells
+										// the caller whether concurrence injection
+										// fired (and which artifact was used).
+										concurrence_artifact_injected: priorArtifact
+											? {
+													round: priorArtifact.round,
+													peer_file: priorArtifact.peer_file,
+												}
+											: concurrenceRequested
+												? null
+												: undefined,
 									},
 									null,
 									2,
@@ -1382,16 +1464,72 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 							lexemes: promptLanguageWarning.signals.lexemes_matched.length,
 						});
 					}
+					// v1.2.18 / Finding 1+2 (handoff 2026-04-28): concurrence
+					// auto-injection per peer. Each peer gets ONLY its own prior
+					// READY artifact (no cross-contamination). Builds a
+					// per-agent prompt map; spawnPeers consumes it via
+					// options.perAgentPrompts. Falls back to the broadcast
+					// promptWithTail for peers with no prior READY in this
+					// session.
+					const concurrenceRequested = args.concurrence === true;
+					const concurrenceArtifactsInjected = {};
+					const perAgentPrompts = {};
 					const promptWithTail = attachPromptTailDirective(rawPrompt);
+					if (concurrenceRequested) {
+						for (const agent of metaPeers) {
+							const artifact = store.findLastReadyPeerArtifact(
+								sessionId,
+								agent,
+							);
+							if (artifact) {
+								const enriched =
+									store.formatPriorArtifactForPrompt(artifact) + rawPrompt;
+								perAgentPrompts[agent] = attachPromptTailDirective(enriched);
+								concurrenceArtifactsInjected[agent] = {
+									round: artifact.round,
+									peer_file: artifact.peer_file,
+								};
+								log("ask_peers: concurrence artifact injected", {
+									session: sessionId,
+									round: roundNum,
+									peer: agent,
+									artifact_round: artifact.round,
+									artifact_file: artifact.peer_file,
+								});
+							} else {
+								concurrenceArtifactsInjected[agent] = null;
+								log(
+									"ask_peers: concurrence requested but no prior READY found for peer",
+									{
+										session: sessionId,
+										round: roundNum,
+										peer: agent,
+									},
+								);
+							}
+						}
+					}
+					// Persist the broadcast prompt under the round file. Per-agent
+					// overrides are not persisted separately; the artifact files
+					// from prior rounds (which were prepended) remain on disk.
 					store.savePromptForRound(sessionId, roundNum, promptWithTail);
 					log(`ask_peers: spawning ${metaPeers.join(",")}`, {
 						session: sessionId,
 						round: roundNum,
 						caller_status: callerStatus,
 						prompt_bytes: Buffer.byteLength(promptWithTail, "utf8"),
+						concurrence_requested: concurrenceRequested,
+						concurrence_injected_for: Object.keys(
+							concurrenceArtifactsInjected,
+						).filter((a) => concurrenceArtifactsInjected[a] !== null),
 					});
 					const t0 = Date.now();
-					const peerResults = await spawnPeers(metaPeers, promptWithTail);
+					const peerResults = await spawnPeers(metaPeers, promptWithTail, {
+						perAgentPrompts:
+							concurrenceRequested && Object.keys(perAgentPrompts).length > 0
+								? perAgentPrompts
+								: undefined,
+					});
 					const durationMs = Date.now() - t0;
 
 					const roundPeers = [];
@@ -1445,8 +1583,24 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 									: spawnRateLimit
 										? "wait_and_retry"
 										: null;
+							// v1.2.18 / Finding 3 (handoff 2026-04-28): propagate
+							// exit_code / transport_descriptor / stderr_tail
+							// (separate from full message) / duration_ms so
+							// spawn_rejected becomes actionable. spawnPeer
+							// already attaches these on close-nonzero
+							// (peer-spawn.js:1466-1468); pre-v1.2.18 we discarded
+							// everything except .message — caller had to parse
+							// the stringified message tail to recover exit code.
+							const spawnExitCode = Number.isFinite(reason?.exit_code)
+								? reason.exit_code
+								: null;
+							const spawnTransport = reason?.transport_descriptor || null;
+							const spawnStderrTail =
+								typeof reason?.stderr_tail === "string"
+									? reason.stderr_tail
+									: null;
 							store.saveFailedAttempt(sessionId, entry.agent, failureClass, {
-								stderr_tail: reasonMsg,
+								stderr_tail: spawnStderrTail ?? reasonMsg,
 								failure_class: failureClass,
 								round: roundNum,
 								retry_attempt: 0,
@@ -1467,12 +1621,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 								round_timeout_ms: roundTimedOut
 									? (reason?.round_timeout_ms ?? null)
 									: null,
+								// v1.2.18 / Finding 3 propagated diagnostics.
+								exit_code: spawnExitCode,
+								transport_descriptor: spawnTransport,
+								duration_ms: durationMs,
 							});
 							log("ask_peers: peer rejected", {
 								round: roundNum,
 								agent: entry.agent,
 								failure_class: failureClass,
 								recovery_hint: recoveryHint,
+								exit_code: spawnExitCode,
 								retry_after_seconds:
 									spawnRateLimit?.retry_after_seconds ?? null,
 								reason: reasonMsg.slice(-200),
@@ -1498,6 +1657,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 								reformulation_advice: promptFlagged
 									? 'Avoid charged words like "adversarial", "jailbreak", "exploit", "attack", "bypass", "circumvent". Replace model-introspection prose with neutral technical descriptions. Prefer "response anomaly" over "silent_downgrade", "edge case" over "adversarial input", "alternative path" over "bypass". Resubmit the reformulated prompt via ask_peers in a new round; do NOT abort the session. Repeat up to 5 reformulation attempts before escalating to the operator.'
 									: null,
+								// v1.2.18 / Finding 3 propagated diagnostics.
+								exit_code: spawnExitCode,
+								stderr_tail: spawnStderrTail
+									? spawnStderrTail.slice(-400)
+									: null,
+								transport_descriptor: spawnTransport,
+								duration_ms: durationMs,
 							});
 							if (spawnRateLimit) {
 								rateLimitedPeers.push({
@@ -1639,6 +1805,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 											prompt_language_warning: promptLanguageWarning,
 										}),
 										duration_ms: durationMs,
+										// v1.2.18 / Finding 1+2 audit trail: per-peer
+										// record of whether concurrence injection
+										// fired for each agent (and which artifact
+										// was used).
+										...(concurrenceRequested && {
+											concurrence_artifacts_injected:
+												concurrenceArtifactsInjected,
+										}),
 									},
 									null,
 									2,

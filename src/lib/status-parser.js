@@ -62,12 +62,20 @@ const VALID_UNCERTAINTY = new Set(["low", "medium", "high"]);
 //     Empty or absent is allowed but under confidence='verified' an empty
 //     set emits an advisory warning.
 const VALID_CONFIDENCE = new Set(["verified", "inferred", "unknown"]);
+// v1.2.18 / Finding 7 (handoff 2026-04-28): `summary` accepted as an
+// optional structured field. The peer organically emits one-line summaries
+// of the round verdict in the structured block; pre-v1.2.18 the parser
+// emitted `unknown field 'summary' ignored` warnings on every response,
+// adding noise without indicating a defect. Operationally useful — keep.
+// Other optional fields: epistemic discipline (uncertainty, confidence,
+// evidence_sources) + protocol items (caller_requests, follow_ups).
 const OPTIONAL_FIELDS = new Set([
 	"uncertainty",
 	"caller_requests",
 	"follow_ups",
 	"confidence",
 	"evidence_sources",
+	"summary",
 ]);
 const MAX_ARRAY_ITEMS = 20;
 const MAX_ITEM_CHARS = 500;
@@ -165,6 +173,28 @@ function validateOptionalFields(parsed) {
 			warnings,
 		);
 		if (v !== undefined) clean.evidence_sources = v;
+	}
+
+	// v1.2.18 / Finding 7 (handoff 2026-04-28): summary is a one-line
+	// peer-authored description of the round verdict. Capped at MAX_ITEM_CHARS
+	// (500) to prevent runaway text. Wrong shape emits a warning but doesn't
+	// fail the parse. R1 (gemini): when truncation fires, emit a warning so
+	// the peer/operator knows the summary was clipped — aligns with the
+	// existing per-field-too-long warning mechanics.
+	if ("summary" in parsed) {
+		const s = parsed.summary;
+		if (typeof s === "string") {
+			if (s.length > MAX_ITEM_CHARS) {
+				warnings.push(
+					`summary truncated to ${MAX_ITEM_CHARS} chars (was ${s.length})`,
+				);
+				clean.summary = s.slice(0, MAX_ITEM_CHARS);
+			} else {
+				clean.summary = s;
+			}
+		} else {
+			warnings.push("summary has invalid shape; expected string");
+		}
 	}
 
 	// v0.7.0-alpha Item D: cross-field consistency rules.
