@@ -59,6 +59,56 @@ jobs:
           scope: '@lcv-ideas-software'
           cache: npm
 
+      - name: Normalize package metadata to canonical scope
+        # Historical commits (v1.0.2 - v1.2.13) shipped under the deprecated
+        # @lcv-leo npm scope. After the org transfer to LCV-Ideas-Software
+        # (v1.2.14), the @lcv-leo packages were unpublished. Republishing
+        # those historical tags to npmjs.com requires rewriting the package
+        # name + repository.url to the canonical @lcv-ideas-software scope
+        # AT BUILD TIME — git history is immutable, so we patch the working
+        # copy before npm reads it. Newer commits (v1.2.14+) already have
+        # the canonical metadata; this step is a no-op for them.
+        run: |
+          set -euo pipefail
+          node <<'JS'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const CANONICAL_NAME = '@lcv-ideas-software/cross-review-mcp';
+          const CANONICAL_REPO = 'https://github.com/LCV-Ideas-Software/cross-review-mcp';
+          let mutated = false;
+          if (pkg.name !== CANONICAL_NAME) {
+            console.log(`Renaming package: ${pkg.name} -> ${CANONICAL_NAME}`);
+            pkg.name = CANONICAL_NAME;
+            mutated = true;
+          }
+          if (pkg.repository && typeof pkg.repository === 'object') {
+            const want = `git+${CANONICAL_REPO}.git`;
+            if (pkg.repository.url !== want) {
+              console.log(`Updating repository.url: ${pkg.repository.url} -> ${want}`);
+              pkg.repository.url = want;
+              mutated = true;
+            }
+          }
+          if (pkg.homepage && pkg.homepage.includes('lcv-leo')) {
+            const newHome = pkg.homepage.replace(/lcv-leo/g, 'LCV-Ideas-Software');
+            console.log(`Updating homepage: ${pkg.homepage} -> ${newHome}`);
+            pkg.homepage = newHome;
+            mutated = true;
+          }
+          if (pkg.bugs && pkg.bugs.url && pkg.bugs.url.includes('lcv-leo')) {
+            const newBugs = pkg.bugs.url.replace(/lcv-leo/g, 'LCV-Ideas-Software');
+            console.log(`Updating bugs.url: ${pkg.bugs.url} -> ${newBugs}`);
+            pkg.bugs.url = newBugs;
+            mutated = true;
+          }
+          if (mutated) {
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            console.log('package.json normalized for canonical org scope.');
+          } else {
+            console.log('package.json already canonical, no changes.');
+          }
+          JS
+
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
@@ -104,6 +154,42 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@lcv-ideas-software'
           cache: npm
+
+      - name: Normalize package metadata to canonical scope
+        run: |
+          set -euo pipefail
+          node <<'JS'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const CANONICAL_NAME = '@lcv-ideas-software/cross-review-mcp';
+          const CANONICAL_REPO = 'https://github.com/LCV-Ideas-Software/cross-review-mcp';
+          let mutated = false;
+          if (pkg.name !== CANONICAL_NAME) {
+            pkg.name = CANONICAL_NAME;
+            mutated = true;
+          }
+          if (pkg.repository && typeof pkg.repository === 'object') {
+            const want = `git+${CANONICAL_REPO}.git`;
+            if (pkg.repository.url !== want) {
+              pkg.repository.url = want;
+              mutated = true;
+            }
+          }
+          if (pkg.homepage && pkg.homepage.includes('lcv-leo')) {
+            pkg.homepage = pkg.homepage.replace(/lcv-leo/g, 'LCV-Ideas-Software');
+            mutated = true;
+          }
+          if (pkg.bugs && pkg.bugs.url && pkg.bugs.url.includes('lcv-leo')) {
+            pkg.bugs.url = pkg.bugs.url.replace(/lcv-leo/g, 'LCV-Ideas-Software');
+            mutated = true;
+          }
+          if (mutated) {
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            console.log('package.json normalized for canonical org scope.');
+          } else {
+            console.log('package.json already canonical, no changes.');
+          }
+          JS
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
