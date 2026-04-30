@@ -15,6 +15,12 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 ### Adicionado
 - (em aberto — F1 caller capability tokens, F3 shell:false migration, F5 StdioServerTransport buffer cap (upstream SDK), F7 detached-spawn for orphan grandchild containment. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
 
+---
+
+## [1.5.1] — 2026-04-30
+
+**Release automation and CodeQL hardening.** This patch keeps the v1.5.0 runtime topology intact and fixes the repository release path so future version bumps publish automatically through GitHub Actions Trusted Publishing. It also closes the CodeQL `js/insecure-temporary-file` alert opened against the v1.5.0 smoke test.
+
 ### Alterado
 
 - Publicação npmjs.com preparada para GitHub Actions Trusted Publishing/OIDC:
@@ -24,6 +30,10 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 - Automação de release reforçada para não depender de encadeamento implícito por `GITHUB_TOKEN`:
   - `auto-tag.yml` passa a declarar `actions: write`, cria/verifica a tag universal e despacha explicitamente `publish.yml` na ref da tag;
   - `publish.yml` passa a validar a ref de publicação como tag versionada antes do checkout, usa Node.js 24 / npm 11+ nos jobs de publicação e falha cedo se a toolchain não suportar Trusted Publishing.
+
+### Corrigido
+
+- `scripts/functional-smoke.js` deixa de gravar configuração MCP em arquivo previsível dentro de `%TEMP%`; o smoke agora usa `fs.mkdtempSync(...)` e remove o diretório temporário ao final, fechando o alerta CodeQL `js/insecure-temporary-file`.
 
 ### Removido
 

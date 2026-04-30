@@ -5383,10 +5383,10 @@ async function driveDeepSeekCliShapeUnit() {
 		}
 	}
 	const fixturePath = path.resolve(__dirname, "fixtures", "mcp-echo-server.js");
-	const tmpConfig = path.join(
-		os.tmpdir(),
-		`cross-review-v1-deepseek-mcp-${process.pid}.json`,
+	const tmpDir = fs.mkdtempSync(
+		path.join(os.tmpdir(), "cross-review-v1-deepseek-mcp-"),
 	);
+	const tmpConfig = path.join(tmpDir, "mcp-config.json");
 	fs.writeFileSync(
 		tmpConfig,
 		JSON.stringify({
@@ -5432,7 +5432,7 @@ async function driveDeepSeekCliShapeUnit() {
 			}
 		}
 		try {
-			fs.unlinkSync(tmpConfig);
+			fs.rmSync(tmpDir, { recursive: true, force: true });
 		} catch {}
 	}
 
