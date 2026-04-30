@@ -23,6 +23,10 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
   - `publish-npmjs` agora declara `environment: npm-production`;
   - publish npmjs.com deixou de exigir `NPM_TOKEN` permanente, preservando provenance.
 
+### Removido
+
+- Workflow manual `fix-dist-tag.yml`, que dependia de `NPM_TOKEN`; a linha v1 passa a não manter workflow ativo com token npm clássico.
+
 ---
 
 ## [1.4.1] — 2026-04-30
