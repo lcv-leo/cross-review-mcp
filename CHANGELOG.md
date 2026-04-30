@@ -17,6 +17,18 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 
 ---
 
+## [1.6.3] — 2026-04-30
+
+### Corrigido
+
+- `review_focus` agora é envelopado em `<review_focus>...</review_focus>` e escapado antes de ser injetado no prompt dos peers. O bloco também declara explicitamente que o conteúdo marcado é dado de escopo do operador, não instrução capaz de sobrescrever protocolo, schema, regras de segurança ou diretivas da tarefa. Isso operacionaliza a recomendação da auditoria Gemini/Antigravity sobre "Prompt Shielding" mantendo paridade com `cross-review-v2`.
+
+### Validação
+
+- `npm test` — cobre tags `<review_focus>`, escape de `</review_focus>` injetado pelo operador e preservação da cláusula `OUT OF SCOPE`.
+
+---
+
 ## [1.6.2] — 2026-04-30
 
 ### Alterado
