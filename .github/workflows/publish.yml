@@ -42,6 +42,7 @@ jobs:
     name: Publish to npmjs.com
     needs: gate
     runs-on: ubuntu-latest
+    environment: npm-production
     permissions:
       contents: read
       id-token: write
@@ -124,14 +125,10 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "$NAME@$VERSION is not published on npmjs.com yet."
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish (public, with provenance)
         if: steps.npmjs-version.outputs.exists != 'true'
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gh-packages:
     name: Publish to GitHub Packages

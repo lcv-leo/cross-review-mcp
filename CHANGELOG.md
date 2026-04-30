@@ -16,6 +16,13 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 - (em aberto — F1 caller capability tokens, F3 shell:false migration, F5 StdioServerTransport buffer cap (upstream SDK), F7 detached-spawn for orphan grandchild containment. Plus future tightening of §6.10 detector to hard-reject on high-confidence non-en-US after operator observation period.)
 - **DeepSeek as a 4th peer (deferred from v1.4.0)** — pending a secure transport (direct SDK/API or a CLI that accepts stdin/file). The `deepseek-cli` MVP only takes the prompt as positional argv, and `shell: true` on Windows runs `cmd.exe`, which truncates argv at the first `\n` even inside double quotes — silent prompt truncation + command injection on subsequent lines. The `node.exe + shell:false` paliative was rejected (prompt still in argv / process list with command-line caps). v1.5.0 will integrate via the OpenAI-compatible DeepSeek API or an SDK transport.
 
+### Alterado
+
+- Publicação npmjs.com preparada para GitHub Actions Trusted Publishing/OIDC:
+  - environment GitHub `npm-production` criado com política de deployment restrita a tags `v*`;
+  - `publish-npmjs` agora declara `environment: npm-production`;
+  - publish npmjs.com deixou de exigir `NPM_TOKEN` permanente, preservando provenance.
+
 ---
 
 ## [1.4.1] — 2026-04-30
