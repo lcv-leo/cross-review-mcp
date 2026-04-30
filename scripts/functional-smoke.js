@@ -4625,6 +4625,15 @@ async function driveAskPeersNAry() {
 			"ask_peers prepends Review Focus block from session metadata",
 		);
 		assert(
+			persistedPrompt.includes("OUT OF SCOPE"),
+			"ask_peers injects explicit out-of-scope rejection clause",
+		);
+		assert(
+			persistedPrompt.indexOf("## Review Focus") <
+				persistedPrompt.indexOf("quadrilateral stub probe"),
+			"ask_peers front-loads Review Focus before the caller prompt",
+		);
+		assert(
 			!/\/focus\s+services\/billing/.test(persistedPrompt),
 			"ask_peers does not inject Claude Code /focus slash command",
 		);
@@ -4645,6 +4654,10 @@ async function driveAskPeersNAry() {
 			overridePrompt.includes("## Review Focus") &&
 				overridePrompt.includes("[REDACTED]"),
 			"ask_peers redacts per-round Review Focus before prompt persistence",
+		);
+		assert(
+			overridePrompt.includes("OUT OF SCOPE"),
+			"per-round Review Focus override preserves out-of-scope rejection clause",
 		);
 		assert(
 			!overridePrompt.includes(focusSecret),

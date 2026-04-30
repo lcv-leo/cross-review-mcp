@@ -1,6 +1,6 @@
 {
   "name": "@lcv-ideas-software/cross-review-v1",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "MCP server orchestrating CLI-only cross-review between Claude Code, ChatGPT Codex, Gemini CLI, and embedded DeepSeek CLI",
   "type": "commonjs",
   "main": "src/server.js",

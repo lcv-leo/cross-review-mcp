@@ -61,7 +61,7 @@ const {
 	MODEL_CLOSE_TAG,
 } = require("./lib/model-parser.js");
 
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 
 // v1.2.4: release date for `server_info`. Updated alongside VERSION on each
 // ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
@@ -325,7 +325,8 @@ function prependReviewFocus(prompt, reviewFocus) {
 		"## Review Focus",
 		normalized,
 		"",
-		"Treat this as the primary review anchor. Prioritize this area, but still report critical cross-cutting blockers if they invalidate the result.",
+		"Treat this front-loaded block as the primary review anchor.",
+		"If a possible finding is outside this focus, label it OUT OF SCOPE and do not count it as a blocking issue unless it is a critical cross-cutting blocker that invalidates the result.",
 		"",
 		prompt,
 	].join("\n");
@@ -563,7 +564,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 					review_focus: {
 						type: "string",
 						description:
-							"Optional provider-neutral review scope anchor, persisted as meta.review_focus and prepended to future ask_peer/ask_peers prompts as a 'Review Focus' block. This is not Claude Code's /focus UI command; do not pass slash commands here.",
+							"Optional provider-neutral review scope anchor, persisted as meta.review_focus and prepended to future ask_peer/ask_peers prompts as a front-loaded 'Review Focus' block with OUT OF SCOPE handling for unrelated findings. This is not Claude Code's /focus UI command; do not pass slash commands here.",
 						maxLength: REVIEW_FOCUS_MAX_CHARS,
 					},
 				},
@@ -724,7 +725,7 @@ PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be
 					review_focus: {
 						type: "string",
 						description:
-							"Optional per-round provider-neutral review scope anchor. Overrides meta.review_focus for this prompt only and is prepended as a 'Review Focus' block.",
+							"Optional per-round provider-neutral review scope anchor. Overrides meta.review_focus for this prompt only and is prepended as a front-loaded 'Review Focus' block with OUT OF SCOPE handling for unrelated findings.",
 						maxLength: REVIEW_FOCUS_MAX_CHARS,
 					},
 					caller_status: {
@@ -757,7 +758,7 @@ PROMPT LANGUAGE (spec v4.14 §6.10). The 'prompt' field is peer exchange MUST be
 					review_focus: {
 						type: "string",
 						description:
-							"Optional per-round provider-neutral review scope anchor. Overrides meta.review_focus for this prompt only and is prepended as a 'Review Focus' block for every selected peer.",
+							"Optional per-round provider-neutral review scope anchor. Overrides meta.review_focus for this prompt only and is prepended as a front-loaded 'Review Focus' block for every selected peer, with OUT OF SCOPE handling for unrelated findings.",
 						maxLength: REVIEW_FOCUS_MAX_CHARS,
 					},
 					caller_status: {

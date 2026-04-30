@@ -17,6 +17,20 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 
 ---
 
+## [1.6.1] — 2026-04-30
+
+### Alterado
+
+- Refinada a semântica de `review_focus`: o bloco injetado passa a se declarar explicitamente como âncora front-loaded de escopo e instrui os peers a rotular achados fora do foco como `OUT OF SCOPE` em vez de contá-los como bloqueadores, salvo quando forem bloqueios transversais críticos que invalidem o resultado.
+- Mantida a superfície pública de v1.6.0; esta release é patch porque não adiciona novo parâmetro MCP nem altera formato de resposta.
+
+### Validação
+
+- `npm test` — agora cobre a cláusula `OUT OF SCOPE` e confirma que `Review Focus` fica antes do prompt do caller.
+- `npm run check-models`
+
+---
+
 ## [1.6.0] — 2026-04-30
 
 ### Adicionado
