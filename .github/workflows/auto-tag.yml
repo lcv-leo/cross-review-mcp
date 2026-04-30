@@ -87,9 +87,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "${TAG}: auto-tagged from package.json on push to main"
+          # Keep automated release tags lightweight so refs/tags/<tag> points
+          # directly to the release commit. Annotated tags create a second
+          # tag-object SHA, which makes post-release verification noisier.
+          git tag "${TAG}" HEAD
           git push origin "${TAG}"
-          echo "Created and pushed ${TAG}; publish.yml will be dispatched on the tag ref."
+          echo "Created and pushed lightweight tag ${TAG}; publish.yml will be dispatched on the tag ref."
 
       - name: Dispatch publish workflow on tag ref
         if: steps.check.outputs.exists == 'false' || github.event_name == 'workflow_dispatch'
@@ -100,10 +103,21 @@ jobs:
           set -euo pipefail
           # Use the tag ref so the npm-production environment branch policy
           # (v* tags only) accepts the trusted-publishing deployment.
+          expected_sha="$(git rev-parse HEAD)"
           for attempt in {1..10}; do
-            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-              echo "Tag ${TAG} is visible on origin."
-              break
+            tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk '{print $1}')"
+            peeled_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | awk '{print $1}')"
+            if [ -n "${tag_sha}" ]; then
+              if [ "${tag_sha}" = "${expected_sha}" ]; then
+                echo "Tag ${TAG} is visible on origin as a lightweight tag at ${expected_sha}."
+                break
+              fi
+              if [ "${peeled_sha}" = "${expected_sha}" ]; then
+                echo "::warning::Tag ${TAG} is annotated but peels to ${expected_sha}; proceeding for compatibility. New auto-created tags are lightweight."
+                break
+              fi
+              echo "::error::Tag ${TAG} points to ${tag_sha} (peeled: ${peeled_sha:-none}), expected ${expected_sha}; refusing to dispatch publish.yml."
+              exit 1
             fi
             if [ "$attempt" -eq 10 ]; then
               echo "::error::Tag ${TAG} was not visible on origin after push; refusing to dispatch publish.yml."
