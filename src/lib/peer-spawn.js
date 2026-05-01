@@ -17,9 +17,9 @@
 //     `err.spawn_rate_limit = { retry_after_seconds, lexeme_matched, detection_source: 'spawn' }`.
 //     Generic `{rate, quota, limit}` is explicitly excluded to prevent
 //     false-positives on meta-discussion.
-//   - Forensic-only `cli_attested_model_raw`: extracts the Codex CLI stderr
-//     banner line `model: <id>` (unparsed, non-authoritative). CLI banner as
-//     authoritative attestation is DEFERRED to v0.7+.
+//   - `cli_attested_model_raw`: extracts stderr banner line `model: <id>`.
+//     For Codex this is forensic-only under cli-subscription; for the embedded
+//     DeepSeek wrapper it is the provider-response model attestation.
 //
 // Spawn of the peer CLI with the definitive flag tree from the canonical
 // README.
@@ -467,13 +467,18 @@ function detectPromptModerationFlag(stderr) {
 	};
 }
 
-// Forensic-only (v0.6.0-alpha): extract Codex CLI stderr banner line
-// `model: <id>`. Unparsed beyond the trim; non-authoritative. CLI banner as
-// authoritative attestation is deferred to v0.7+.
-function extractCodexAttestedModelRaw(stderr) {
+// Extract CLI stderr banner line `model: <id>`. For Codex this remains
+// forensic-only under cli-subscription. For the embedded DeepSeek CLI, the
+// line is written by our wrapper from the provider response model and is the
+// authoritative transport attestation.
+function extractCliAttestedModelRaw(stderr) {
 	if (typeof stderr !== "string" || !stderr.length) return null;
 	const m = stderr.match(/^model:\s*(\S[^\r\n]*)/m);
 	return m ? m[1].trim() : null;
+}
+
+function extractCodexAttestedModelRaw(stderr) {
+	return extractCliAttestedModelRaw(stderr);
 }
 
 function loadExclusions() {
@@ -1084,7 +1089,9 @@ function probeAgent(agent, options = {}) {
 			const stderrTail = stderr.slice(-400);
 			const descriptor = buildTransportDescriptor(agent);
 			const cli_attested_model_raw =
-				agent === "codex" ? extractCodexAttestedModelRaw(stderr) : null;
+				agent === "codex" || agent === "deepseek"
+					? extractCliAttestedModelRaw(stderr)
+					: null;
 
 			// Non-zero exit: classify. Spawn-level rate-limit takes
 			// precedence over generic probe_nonzero_exit.
@@ -1117,7 +1124,10 @@ function probeAgent(agent, options = {}) {
 			// transport that exposes an authoritative modelVersion;
 			// cli-subscription / oauth-personal text self-report is unreliable
 			// and MUST NOT trip silent_model_downgrade.
-			const reported = extractReportedModel(stdout);
+			const reported =
+				agent === "deepseek" && cli_attested_model_raw
+					? cli_attested_model_raw
+					: extractReportedModel(stdout);
 			const attested = authoritativeModelAttestationAvailable(descriptor);
 
 			if (attested) {
@@ -1647,6 +1657,7 @@ function buildCommandLine(cmd, args) {
 function spawnPeer(peerAgent, prompt, options = {}) {
 	const stubbed = peerStub();
 	if (stubbed) return stubbed;
+	const started = Date.now();
 
 	// v1.2.15 / spec §6.22 Item F — per-peer timeout configurable.
 	// Default reduced from 30min (pre-v1.2.15) to 8min, aligned with
@@ -1723,9 +1734,14 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 			finished = true;
 			detachStreamListeners();
 			killProcessTree(proc);
-			reject(
-				new Error(`peer ${peerAgent} timed out after ${timeoutMs / 1000}s`),
+			const err = new Error(
+				`peer ${peerAgent} timed out after ${timeoutMs / 1000}s`,
 			);
+			err.duration_ms = Date.now() - started;
+			err.stdout_tail = stdout.slice(-400);
+			err.stderr_tail = stderr.slice(-400);
+			err.transport_descriptor = buildTransportDescriptor(peerAgent);
+			reject(err);
 		}, timeoutMs);
 
 		// v1.2.5 / external-audit round-4 §4.1: per-stream byte cap.
@@ -1743,6 +1759,10 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 			const err = new Error(
 				`peer ${peerAgent} ${stream} overflow: exceeded ${PEER_STREAM_MAX_BYTES} bytes`,
 			);
+			err.duration_ms = Date.now() - started;
+			err.stdout_tail = stdout.slice(-400);
+			err.stderr_tail = stderr.slice(-400);
+			err.transport_descriptor = buildTransportDescriptor(peerAgent);
 			err.stream_overflow = {
 				stream,
 				max_bytes: PEER_STREAM_MAX_BYTES,
@@ -1764,14 +1784,21 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 		proc.on("error", (err) => {
 			finished = true;
 			clearTimeout(timer);
-			reject(new Error(`spawn ${cmd} failed: ${err.message}`));
+			const wrapped = new Error(`spawn ${cmd} failed: ${err.message}`);
+			wrapped.duration_ms = Date.now() - started;
+			wrapped.stdout_tail = stdout.slice(-400);
+			wrapped.stderr_tail = stderr.slice(-400);
+			wrapped.transport_descriptor = buildTransportDescriptor(peerAgent);
+			reject(wrapped);
 		});
 		proc.on("close", (code) => {
 			finished = true;
 			clearTimeout(timer);
 			const descriptor = buildTransportDescriptor(peerAgent);
 			const cli_attested_model_raw =
-				peerAgent === "codex" ? extractCodexAttestedModelRaw(stderr) : null;
+				peerAgent === "codex" || peerAgent === "deepseek"
+					? extractCliAttestedModelRaw(stderr)
+					: null;
 			if (code !== 0) {
 				// v0.6.0-alpha / spec v4.9: attach structured rate-limit hint
 				// to the rejection error so the ask_peers handler can
@@ -1779,11 +1806,16 @@ function spawnPeer(peerAgent, prompt, options = {}) {
 				// 'rate_limit_induced_response' + retry_after_seconds.
 				const rl = detectSpawnRateLimit(stderr);
 				const flagged = detectPromptModerationFlag(stderr);
+				const stdoutTail = stdout.slice(-400);
+				const stderrTail = stderr.slice(-400);
+				const diagnosticTail = stderrTail || stdoutTail;
 				const err = new Error(
-					`peer ${peerAgent} exit ${code}: ${stderr.slice(-400)}`,
+					`peer ${peerAgent} exit ${code}: ${diagnosticTail}`,
 				);
 				err.exit_code = code;
-				err.stderr_tail = stderr.slice(-400);
+				err.stdout_tail = stdoutTail;
+				err.stderr_tail = stderrTail;
+				err.duration_ms = Date.now() - started;
 				err.transport_descriptor = descriptor;
 				if (rl) err.spawn_rate_limit = rl;
 				if (flagged) err.prompt_flagged = flagged;
@@ -2335,6 +2367,7 @@ module.exports = {
 	matchRateLimitLexeme,
 	extractRetryAfterSeconds,
 	detectSpawnRateLimit,
+	extractCliAttestedModelRaw,
 	extractCodexAttestedModelRaw,
 	// v1.0.5 additions: prompt-moderation flag detection + recovery contract.
 	PROMPT_FLAG_LEXEMES,

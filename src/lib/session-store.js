@@ -967,6 +967,9 @@ function saveFailedAttempt(sessionId, agent, reason, extras = {}) {
 	if (extras.stderr_tail != null) {
 		entry.stderr_tail = clipStderrTail(String(extras.stderr_tail));
 	}
+	if (extras.stdout_tail != null) {
+		entry.stdout_tail = clipStderrTail(String(extras.stdout_tail));
+	}
 	if (extras.failure_class != null) {
 		entry.failure_class = String(extras.failure_class);
 	}
@@ -986,6 +989,34 @@ function saveFailedAttempt(sessionId, agent, reason, extras = {}) {
 	}
 	if (extras.lexeme_matched != null) {
 		entry.lexeme_matched = String(extras.lexeme_matched);
+	}
+	if (extras.recovery_hint != null) {
+		entry.recovery_hint = String(extras.recovery_hint);
+	}
+	if (extras.docs_url != null) {
+		entry.docs_url = String(extras.docs_url);
+	}
+	if (extras.round_timeout_ms != null) {
+		entry.round_timeout_ms = Number(extras.round_timeout_ms);
+	}
+	if (extras.exit_code != null) {
+		entry.exit_code = Number(extras.exit_code);
+	}
+	if (extras.duration_ms != null) {
+		entry.duration_ms = Number(extras.duration_ms);
+	}
+	if (
+		extras.transport_descriptor != null &&
+		typeof extras.transport_descriptor === "object" &&
+		!Array.isArray(extras.transport_descriptor)
+	) {
+		entry.transport_descriptor = {
+			agent: String(extras.transport_descriptor.agent ?? "unknown"),
+			auth: String(extras.transport_descriptor.auth ?? "unknown"),
+			endpoint_class: String(
+				extras.transport_descriptor.endpoint_class ?? "unknown",
+			),
+		};
 	}
 	// v1.3.0 / Finding 5 (handoff 2026-04-28): classify stderr noise classes
 	// and surface the classification on the audit entry. Non-destructive —

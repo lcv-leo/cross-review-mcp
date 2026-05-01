@@ -61,7 +61,7 @@ const {
 	MODEL_CLOSE_TAG,
 } = require("./lib/model-parser.js");
 
-const VERSION = "1.6.4";
+const VERSION = "1.6.5";
 
 // v1.2.4: release date for `server_info`. Updated alongside VERSION on each
 // ship. Anti-drift smoke (driveV414ServerInfoUnit) asserts that the
@@ -449,9 +449,17 @@ function parsePeerOutputs(
 
 	if (!isStub) {
 		const modelParsed = parseDeclaredModel(stdout);
+		const deepseekCliAttested =
+			transportDescriptor?.agent === "deepseek" &&
+			typeof cliAttestedModel === "string" &&
+			cliAttestedModel.trim().length > 0;
 		modelRequested = peerModel;
-		modelReported = modelParsed.model_id;
-		modelWarnings = modelParsed.parser_warnings || [];
+		modelReported = deepseekCliAttested
+			? cliAttestedModel.trim()
+			: modelParsed.model_id;
+		modelWarnings = deepseekCliAttested
+			? []
+			: modelParsed.parser_warnings || [];
 
 		const attested = transportDescriptor
 			? authoritativeModelAttestationAvailable(transportDescriptor)
@@ -1381,13 +1389,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 							typeof spawnErr?.stderr_tail === "string"
 								? spawnErr.stderr_tail
 								: null;
-						const durationMsAtFailure = Date.now() - t0;
+						const spawnStdoutTail =
+							typeof spawnErr?.stdout_tail === "string"
+								? spawnErr.stdout_tail
+								: null;
+						const durationMsAtFailure = Number.isFinite(spawnErr?.duration_ms)
+							? spawnErr.duration_ms
+							: Date.now() - t0;
 						store.saveFailedAttempt(
 							sessionId,
 							sessionLegacyPeer,
 							failureClass,
 							{
 								stderr_tail: spawnStderrTail ?? reasonMsg,
+								stdout_tail: spawnStdoutTail,
 								failure_class: failureClass,
 								round: roundNum,
 								retry_attempt: 0,
@@ -1426,6 +1441,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 											exit_code: spawnExitCode,
 											stderr_tail: spawnStderrTail
 												? spawnStderrTail.slice(-400)
+												: null,
+											stdout_tail: spawnStdoutTail
+												? spawnStdoutTail.slice(-400)
 												: null,
 											transport_descriptor: spawnTransport,
 											duration_ms: durationMsAtFailure,
@@ -1791,8 +1809,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 								typeof reason?.stderr_tail === "string"
 									? reason.stderr_tail
 									: null;
+							const spawnStdoutTail =
+								typeof reason?.stdout_tail === "string"
+									? reason.stdout_tail
+									: null;
+							const peerDurationMs = Number.isFinite(reason?.duration_ms)
+								? reason.duration_ms
+								: durationMs;
 							store.saveFailedAttempt(sessionId, entry.agent, failureClass, {
 								stderr_tail: spawnStderrTail ?? reasonMsg,
+								stdout_tail: spawnStdoutTail,
 								failure_class: failureClass,
 								round: roundNum,
 								retry_attempt: 0,
@@ -1816,7 +1842,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 								// v1.2.18 / Finding 3 propagated diagnostics.
 								exit_code: spawnExitCode,
 								transport_descriptor: spawnTransport,
-								duration_ms: durationMs,
+								duration_ms: peerDurationMs,
 							});
 							log("ask_peers: peer rejected", {
 								round: roundNum,
@@ -1854,8 +1880,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 								stderr_tail: spawnStderrTail
 									? spawnStderrTail.slice(-400)
 									: null,
+								stdout_tail: spawnStdoutTail
+									? spawnStdoutTail.slice(-400)
+									: null,
 								transport_descriptor: spawnTransport,
-								duration_ms: durationMs,
+								duration_ms: peerDurationMs,
 							});
 							if (spawnRateLimit) {
 								rateLimitedPeers.push({

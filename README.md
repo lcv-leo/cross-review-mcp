@@ -14,12 +14,13 @@
 
 **Install.** `npm install -g @lcv-ideas-software/cross-review-v1` (npmjs.com) or `npm install -g @lcv-ideas-software/cross-review-v1 --registry=https://npm.pkg.github.com` (GitHub Packages mirror).
 
-**Status.** Stable. Current release: **v1.6.4** runtime paired with **spec v4.14**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
+**Status.** Stable. Current release: **v1.6.5** runtime paired with **spec v4.14**. See [CHANGELOG.md](./CHANGELOG.md) for the release history. v1.x releases follow a frozen-public-surface contract (see [CONTRIBUTING.md](./CONTRIBUTING.md) for the v1.x semver policy: patch additive within frozen surface, minor additive only, major requires a new trilateral cross-review session). v1.0 was cut on 2026-04-25 after a 10-session field-use validation gate per operator directive 2026-04-24, ratified by trilateral final approval session `fca13b80`.
 
 The version history at a glance:
 
 | Release | Spec | Scope |
 |---|---|---|
+| **`v1.6.5`** | v4.14 | **DeepSeek model attestation + failed-spawn diagnostics.** The embedded DeepSeek path now trusts the wrapper/provider `model:` stderr attestation over unreliable text self-report, preventing false `silent_model_downgrade` when the model writes another model id in the peer block. Failed spawn audit entries now persist stdout tail, exit code, per-peer duration, transport descriptor, recovery hint, and timeout metadata so future CLI failures are actionable instead of blank. |
 | **`v1.6.4`** | v4.14 | **DeepSeek env fallback + probe/runtime reconciliation.** The embedded DeepSeek path now falls back to the Windows User/Machine environment registry when the current process env is stale, and convergence telemetry no longer keeps a peer in `excluded_probe` after that peer actually responded in the round. |
 | **`v1.6.3`** | v4.14 | **Review focus shielding.** The front-loaded `review_focus` block is now wrapped in `<review_focus>...</review_focus>` tags, escaped as scope data, and explicitly marked as non-authoritative content that cannot override protocol, schema, safety, or task directives. |
 | **`v1.6.2`** | v4.14 | **README organizational standardization.** Harmonized the public README opening with the shared organizational pattern: larger centered branding, normalized section capitalization, and a version-history table layout aligned with the rest of the portfolio. |

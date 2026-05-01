@@ -17,6 +17,20 @@ Nota de nomenclatura: a partir de 2026-04-30, o produto, repositório, pacote np
 
 ---
 
+## [1.6.5] — 2026-04-30
+
+### Corrigido
+
+- O caminho embutido do DeepSeek agora trata a linha `model: ...` emitida pela própria wrapper CLI no `stderr` como atestação de transporte para o modelo realmente usado pela API. Isso evita falso `silent_model_downgrade` quando o LLM escreve, no bloco textual `<cross_review_peer_model>`, um modelo alheio como `claude-sonnet-4-20250514` apesar de o transporte estar fixado em `deepseek-v4-pro`.
+- Falhas de spawn passaram a carregar `stdout_tail`, `stderr_tail`, `exit_code`, `duration_ms` por peer e `transport_descriptor` diretamente no erro. Quando uma CLI sair com código != 0 mas escrever o diagnóstico no stdout, o v1 deixa de retornar uma falha praticamente vazia.
+- `saveFailedAttempt()` agora persiste os campos diagnósticos que os handlers já passavam (`exit_code`, `duration_ms`, `transport_descriptor`, `recovery_hint`, `round_timeout_ms`, `stdout_tail`). Antes o handler declarava esses campos, mas o store descartava parte deles, empobrecendo o `meta.failed_attempts`.
+
+### Validação
+
+- `npm test` — inclui cobertura nova para a atestação de modelo do DeepSeek via CLI embutida e para a persistência dos campos diagnósticos de failed attempts.
+
+---
+
 ## [1.6.4] — 2026-04-30
 
 ### Corrigido

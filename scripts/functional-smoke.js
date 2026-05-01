@@ -1457,6 +1457,8 @@ async function runAll() {
 	all.push(...s89.results);
 	const s90 = await driveV164ProbeRuntimeReconciliationUnit();
 	all.push(...s90.results);
+	const s91 = await driveV165DeepSeekCliAttestationUnit();
+	all.push(...s91.results);
 	return all;
 }
 
@@ -5093,9 +5095,18 @@ async function driveSessionStoreUnit() {
 	// saveFailedAttempt with secret in stderr_tail -> redacted.
 	store.saveFailedAttempt(id, "gemini", "rate_limit_exceeded", {
 		stderr_tail: `Error: quota exceeded. token=${["sk", "-"].join("")}${"1".repeat(20)}; retry later.`,
+		stdout_tail: "stdout diagnostic tail",
 		failure_class: "rate_limit_exceeded",
 		round: 1,
 		retry_attempt: 0,
+		exit_code: 1,
+		duration_ms: 1234,
+		recovery_hint: "wait_and_retry",
+		transport_descriptor: {
+			agent: "gemini",
+			auth: "oauth-personal",
+			endpoint_class: "v1internal",
+		},
 	});
 	const meta3 = store.readMeta(id);
 	assert(
@@ -5113,8 +5124,20 @@ async function driveSessionStoreUnit() {
 		"stderr_tail redacted (R14)",
 	);
 	assert(attempt.stderr_tail.includes("[REDACTED]"), "REDACTED marker present");
+	assert(
+		attempt.stdout_tail === "stdout diagnostic tail" &&
+			attempt.exit_code === 1 &&
+			attempt.duration_ms === 1234 &&
+			attempt.recovery_hint === "wait_and_retry",
+		"failed attempt diagnostic fields persisted",
+	);
+	assert(
+		attempt.transport_descriptor?.agent === "gemini" &&
+			attempt.transport_descriptor?.auth === "oauth-personal",
+		"failed attempt transport descriptor persisted",
+	);
 	results.push({
-		step: "session-store.saveFailedAttempt: entry persisted with clipped + redacted stderr_tail",
+		step: "session-store.saveFailedAttempt: entry persisted with clipped/redacted stderr_tail plus actionable diagnostics",
 		ok: true,
 	});
 
@@ -5563,6 +5586,47 @@ async function driveV164ProbeRuntimeReconciliationUnit() {
 	);
 	results.push({
 		step: "v1.6.4: convergence exclusions reconcile probe-offline peers with real round responders",
+		ok: true,
+	});
+	return { results };
+}
+
+async function driveV165DeepSeekCliAttestationUnit() {
+	const results = [];
+	process.env.CROSS_REVIEW_TEST_IMPORT = "1";
+	delete require.cache[require.resolve("../src/server.js")];
+	const server = require("../src/server.js");
+	const wrongTextModelStdout = [
+		"DeepSeek body",
+		'<cross_review_peer_model>{"model_id":"claude-sonnet-4-20250514"}</cross_review_peer_model>',
+		'<cross_review_status>{"status":"READY","confidence":"verified","evidence_sources":["fixture"]}</cross_review_status>',
+		"",
+	].join("\n");
+	const parsed = server.parsePeerOutputs(
+		wrongTextModelStdout,
+		"deepseek-v4-pro",
+		{
+			agent: "deepseek",
+			auth: "api-key",
+			endpoint_class: "deepseek-openai-compatible",
+		},
+		"deepseek-v4-pro",
+	);
+	assert(
+		parsed.model_reported === "deepseek-v4-pro",
+		"DeepSeek embedded CLI transport attestation overrides hallucinated text model block",
+	);
+	assert(parsed.model_match === true, "DeepSeek CLI attested model matches pin");
+	assert(
+		parsed.model_failure_class == null,
+		"DeepSeek CLI attestation suppresses false silent_model_downgrade",
+	);
+	assert(
+		parsed.protocol_violation === false,
+		"DeepSeek CLI attestation does not turn a valid READY block into protocol_violation",
+	);
+	results.push({
+		step: "v1.6.5: embedded DeepSeek CLI model attestation overrides unreliable text self-report",
 		ok: true,
 	});
 	return { results };
@@ -6859,7 +6923,7 @@ async function driveV1218SpawnRejectedDiagnosticPropagationUnit() {
 		askPeersSavePayload &&
 			/exit_code:\s*spawnExitCode/.test(askPeersSavePayload[0]) &&
 			/transport_descriptor:\s*spawnTransport/.test(askPeersSavePayload[0]) &&
-			/duration_ms:\s*durationMs/.test(askPeersSavePayload[0]),
+			/duration_ms:\s*peerDurationMs/.test(askPeersSavePayload[0]),
 		"v1.2.18 Finding 3: ask_peers saveFailedAttempt MUST include exit_code, transport_descriptor, duration_ms",
 	);
 
@@ -6876,7 +6940,7 @@ async function driveV1218SpawnRejectedDiagnosticPropagationUnit() {
 	);
 	assert(
 		/err\.exit_code\s*=\s*code/.test(peerSrc) &&
-			/err\.stderr_tail\s*=\s*stderr\.slice\(\s*-400\s*\)/.test(peerSrc) &&
+			/err\.stderr_tail\s*=\s*stderrTail/.test(peerSrc) &&
 			/err\.transport_descriptor\s*=\s*descriptor/.test(peerSrc),
 		"v1.2.18 Finding 3 upstream: spawnPeer close-nonzero handler MUST attach exit_code, stderr_tail, transport_descriptor to the rejection error (was true since v1.2.5; this is a regression guard)",
 	);
